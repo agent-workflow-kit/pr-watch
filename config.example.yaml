@@ -1,0 +1,2 @@
+# Example config for pr-watch. Location: ~/.config/pr-watch/config.yaml (drop-ins: config.d/*.yaml). Keys are defined in docs/interface.md once designed.
+hooks: {}
