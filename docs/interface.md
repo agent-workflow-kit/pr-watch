@@ -222,6 +222,10 @@ Codes 11, 13 to 19 and 21 are unused: pr-watch has no pre-hooks, no pending stor
 
 `{"error": {"code": "...", "message": "...", "reason": "...", "details": {...}, "lower_error": {...}}}` (`schemas/cli/error.json`). `code` is one of `usage`, `config_invalid`, `invalid_pr`, `not_found`, `host_failed`, `tool_missing` (with `details.install`), `tool_too_old` (with `details.required` and `details.found`), `contract`, `refused` (with `reason`), `internal`. `lower_error` carries forgectl's own `code`, `reason`, `retry_after` and `message` when a forgectl call caused the error. Messages are sanitized one-line text.
 
+### Result objects
+
+The result objects of `watch add`, `watch remove`, `label add|remove`, `prune`, `reconcile`, `cron install|uninstall`, `list` and `show` are defined by `schemas/cli/<command>.json`, which are normative for their field names. Rules that go beyond the schemas: every mutating command prints `changed` (true or false); a PR stored without a digest (added with `--no-baseline`, not yet polled) prints `null` for `state`, `draft`, `ci_state`, `head_sha` and `last_polled_at`; `events.more` is always present; a `poll` that exits 0 with `already_running` still prints the full report shape with zero counts.
+
 ### Poll report
 
 `poll --json` prints: `already_running`, `started_at`, `duration_ms`, `hosts` (per host: `queried`, `snapshots`, `requests_estimate`, `paused_until`, `skipped`, `errors`), `prs` (`snapshotted`, `unchanged`, `skipped_locked`, `unreachable`), `events` (count by type), `hooks` (`run`, `skipped`, `failed`), `failed` (the PRs or scopes left unchecked, each with the failure code) and `full_pass` (whether this cycle was a full pass).
@@ -233,9 +237,9 @@ Hook points (design guide section 8). All are post-hooks that report a change th
 | Hook | Fires | Payload |
 |---|---|---|
 | `on-pushed`, `on-comment`, `on-review_comment`, `on-review`, `on-approved`, `on-changes_requested`, `on-ci`, `on-ready`, `on-merged`, `on-closed` | once per stored event of that type, after its transaction committed | the event (Events) plus `tool`, `hook`, `object_type: pr`, `object_id` (the `pr_id`) and `repo` |
-| `post-poll` | once at the end of a `poll` that had any error | counts, per-host error codes, no PR text |
+| `post-poll` | once at the end of a `poll` that had any error | counts, per-host error codes, no PR text; its `object_id` is the poll's `started_at` |
 
-- **Delivery** is at-most-once. Events are committed first; hooks run afterward, one invocation per event, in event order. If `poll` is killed, the events are safe but their hooks are not re-run; a consumer that needs a guarantee reads `events` with a cursor. `event_id` in the payload is the deduplication key.
+- **Delivery** is at-most-once. Events are committed first; hooks run afterward, one invocation per event, in event order. If `poll` is killed, the events are safe but their hooks are not re-run; a consumer that needs a guarantee reads `events` with a cursor. The payload carries `event_id` (the same value as the event's `id`) as the deduplication key.
 - **Execution:** `sh -c`, own process group, JSON on stdin, no template substitution. Environment: `PR_WATCH_HOOK=<hook name>`, `PR_WATCH_ID=<event id>` (for `post-poll`, the empty string) and `PR_WATCH_OBJECT_TYPE=pr` (`poll` for `post-poll`). Hooks receive a clean environment (`PATH`, `HOME`, `LANG`, `TERM`, the `XDG_*` variables and the `PR_WATCH_*` ones above) plus the names in `hooks.env_allow`; they never inherit forgectl's token variables.
 - **Timing:** hooks are `async: true` by default (detached); `async: false` runs one at a time within the poll's budget. Each has a timeout (default 30 s); on timeout the process group is signaled (SIGTERM, then SIGKILL after 5 s), only the group pr-watch created. Hook decisions and stdout are ignored.
 - **Cap:** at most `hooks.max_per_poll` (default 50) hook invocations start in one poll. The rest are skipped with one warning naming the number skipped (also in the report); their events are stored.
@@ -279,7 +283,7 @@ repos:                     # per-repo overrides (design guide section 5)
   # <host/path>: {detect_force_push: true, ci: {settle_polls: 2}, failures: {unreachable_after: 8}}
 ```
 
-The built-in per-host defaults when not set: `full_every` 6, and `concurrency` 4 for hosts reporting a rate limit and 2 for hosts that report none (GitLab self-hosted in the design spikes). Per-repo overrides apply to `detect_force_push`, `ci.settle_polls` and `failures.unreachable_after`. The identity ("me") is forgectl's: set `me` and `hosts.<host>.me` in forgectl's config (setting `hosts.<host>.me` saves one request per snapshot on GitHub); pr-watch has no `me` key of its own, apart from `me.name` used for the default owner. Invalid config fails fast naming the key. pr-watch holds no credentials: git-host access is forgectl's.
+A hook's `timeout` is an integer number of seconds; every other duration is a string (`5m`, `30d`). `retention.events` below `30d` (or not a whole number of days) is invalid config (exit 2, `code: config_invalid`), not clamped. `forgectl.min_version` is a constant of the release, not a config key. `me.name` is an optional key (the default owner's name). The built-in per-host defaults when not set: `full_every` 6, and `concurrency` 4 for hosts reporting a rate limit and 2 for hosts that report none (GitLab self-hosted in the design spikes). Per-repo overrides apply to `detect_force_push`, `ci.settle_polls` and `failures.unreachable_after`. The identity ("me") is forgectl's: set `me` and `hosts.<host>.me` in forgectl's config (setting `hosts.<host>.me` saves one request per snapshot on GitHub); pr-watch has no `me` key of its own, apart from `me.name` used for the default owner. Invalid config fails fast naming the key. pr-watch holds no credentials: git-host access is forgectl's.
 
 ## Environment variables
 
