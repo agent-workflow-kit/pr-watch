@@ -14,6 +14,19 @@
     "every": {
       "$ref": "../defs.json#/$defs/duration"
     },
+    "replaced": {
+      "type": "boolean"
+    },
+    "previous_every": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/duration"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "lines": {
       "type": "array",
       "items": {
@@ -27,6 +40,8 @@
     "installed",
     "changed",
     "every",
+    "replaced",
+    "previous_every",
     "lines"
   ]
 }

@@ -78,6 +78,22 @@
           "type": "null"
         }
       ]
+    },
+    "at": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/ts"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "can_push": {
+      "type": [
+        "boolean",
+        "null"
+      ]
     }
   },
   "additionalProperties": false,
@@ -99,6 +115,8 @@
     "head_sha",
     "watches",
     "reviewer",
-    "commit_sha"
+    "commit_sha",
+    "at",
+    "can_push"
   ]
 }

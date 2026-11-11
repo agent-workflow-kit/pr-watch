@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "pr-watch/cli/poll.json",
   "title": "poll --json",
-  "description": "Also printed with exit 12 when a host failed and left PRs unchecked. With already_running true the counters are zero.",
+  "description": "Also printed with exit 12 when a whole host failed. With already_running true the counters are zero. polled appears only with poll --pr: false when the PR was locked by another poll.",
   "type": "object",
   "properties": {
     "already_running": {
@@ -16,6 +16,16 @@
       "minimum": 0
     },
     "full_pass": {
+      "type": "boolean"
+    },
+    "truncated": {
+      "type": "boolean"
+    },
+    "deferred": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "polled": {
       "type": "boolean"
     },
     "hosts": {
@@ -50,13 +60,18 @@
           "skipped": {
             "oneOf": [
               {
-                "type": "string",
-                "pattern": "^[a-z_]{1,64}$"
+                "enum": [
+                  "no_credential",
+                  "not_in_scope"
+                ]
               },
               {
                 "type": "null"
               }
             ]
+          },
+          "incomplete_listing": {
+            "type": "boolean"
           },
           "errors": {
             "type": "array",
@@ -114,6 +129,7 @@
           "requests_estimate",
           "paused_until",
           "skipped",
+          "incomplete_listing",
           "errors",
           "last_full_at"
         ]
@@ -134,7 +150,15 @@
           "type": "integer",
           "minimum": 0
         },
+        "skipped_conflict": {
+          "type": "integer",
+          "minimum": 0
+        },
         "unreachable": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "incomplete": {
           "type": "integer",
           "minimum": 0
         }
@@ -144,7 +168,9 @@
         "snapshotted",
         "unchanged",
         "skipped_locked",
-        "unreachable"
+        "skipped_conflict",
+        "unreachable",
+        "incomplete"
       ]
     },
     "events": {
@@ -216,6 +242,8 @@
     "started_at",
     "duration_ms",
     "full_pass",
+    "truncated",
+    "deferred",
     "hosts",
     "prs",
     "events",

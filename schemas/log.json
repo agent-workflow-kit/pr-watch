@@ -31,6 +31,14 @@
         "scope": {
           "type": "string",
           "maxLength": 256
+        },
+        "forgectl_path": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "forgectl_version": {
+          "type": "string",
+          "maxLength": 32
         }
       },
       "additionalProperties": false,
@@ -38,7 +46,9 @@
         "ts",
         "level",
         "event",
-        "full"
+        "full",
+        "forgectl_path",
+        "forgectl_version"
       ]
     },
     {
@@ -80,6 +90,12 @@
         },
         "already_running": {
           "type": "boolean"
+        },
+        "interrupted": {
+          "type": "boolean"
+        },
+        "truncated": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false,
@@ -91,7 +107,130 @@
         "snapshots",
         "events",
         "errors",
-        "already_running"
+        "already_running",
+        "interrupted",
+        "truncated"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "event": {
+          "const": "host_failed"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "host": {
+          "$ref": "defs.json#/$defs/host"
+        },
+        "code": {
+          "$ref": "defs.json#/$defs/failure_code"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "level",
+        "event",
+        "host",
+        "code"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "event": {
+          "const": "part_incomplete"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "part": {
+          "$ref": "defs.json#/$defs/part"
+        },
+        "snapshots": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "level",
+        "event",
+        "pr_id",
+        "pr",
+        "part",
+        "snapshots"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "event": {
+          "const": "commit_skipped"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "reason": {
+          "type": "string",
+          "pattern": "^[a-z_]{1,64}$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "level",
+        "event",
+        "pr_id",
+        "reason"
       ]
     },
     {
@@ -329,6 +468,12 @@
         "skipped": {
           "type": "integer",
           "minimum": 1
+        },
+        "first_event_id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "last_event_id": {
+          "$ref": "defs.json#/$defs/event_id"
         }
       },
       "additionalProperties": false,
@@ -336,7 +481,9 @@
         "ts",
         "level",
         "event",
-        "skipped"
+        "skipped",
+        "first_event_id",
+        "last_event_id"
       ]
     },
     {

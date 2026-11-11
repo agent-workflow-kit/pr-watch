@@ -15,11 +15,71 @@
       "items": {
         "$ref": "../defs.json#/$defs/pr_row"
       }
+    },
+    "last_poll_finished_at": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/ts"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "hosts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "$ref": "../defs.json#/$defs/host"
+          },
+          "paused_until": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/ts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_enumerated_at": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/ts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_full_at": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/ts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "host",
+          "paused_until",
+          "last_enumerated_at",
+          "last_full_at"
+        ]
+      }
     }
   },
   "additionalProperties": false,
   "required": [
     "watches",
-    "prs"
+    "prs",
+    "last_poll_finished_at",
+    "hosts"
   ]
 }

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "pr-watch/cli/show.json",
   "title": "show --json",
-  "description": "The list row fields flattened, plus the digest summary and the 20 most recent events (newest last). Digest fields are null before the first snapshot.",
+  "description": "The list row fields flattened, plus the digest summary and the 20 most recent events (oldest first). Digest fields are null before the first snapshot.",
   "type": "object",
   "properties": {
     "pr": {
@@ -31,6 +31,21 @@
     },
     "last_full_at": {
       "$ref": "../defs.json#/$defs/pr_row/properties/last_full_at"
+    },
+    "ci_head_sha": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/ci_head_sha"
+    },
+    "ci_stale": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/ci_stale"
+    },
+    "ci_stuck": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/ci_stuck"
+    },
+    "incomplete": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/incomplete"
+    },
+    "incomplete_snapshots": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/incomplete_snapshots"
     },
     "failures": {
       "$ref": "../defs.json#/$defs/pr_row/properties/failures"
@@ -75,7 +90,7 @@
             "$ref": "../defs.json#/$defs/account_id"
           },
           "state": {
-            "$ref": "../defs.json#/$defs/review_state"
+            "$ref": "../defs.json#/$defs/reviewer_state"
           },
           "commit_sha": {
             "oneOf": [
@@ -96,6 +111,12 @@
                 "type": "null"
               }
             ]
+          },
+          "can_push": {
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "additionalProperties": false,
@@ -103,7 +124,8 @@
           "id",
           "state",
           "commit_sha",
-          "at"
+          "at",
+          "can_push"
         ]
       }
     },
@@ -111,10 +133,6 @@
       "type": "object",
       "properties": {
         "comments": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "thread_comments": {
           "type": "integer",
           "minimum": 0
         },
@@ -126,7 +144,6 @@
       "additionalProperties": false,
       "required": [
         "comments",
-        "thread_comments",
         "reviews"
       ]
     },
@@ -155,6 +172,11 @@
     "head_sha",
     "last_polled_at",
     "last_full_at",
+    "ci_head_sha",
+    "ci_stale",
+    "ci_stuck",
+    "incomplete",
+    "incomplete_snapshots",
     "failures",
     "sources",
     "blocked_by",

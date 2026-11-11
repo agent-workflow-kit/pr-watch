@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "pr-watch/hooks/post-poll.json",
   "title": "post-poll hook payload (stdin)",
-  "description": "Once at the end of a poll that had any error. Counts and codes only, no PR text.",
+  "description": "Once at the end of a poll that had any error or any newly unreachable PR. Counts and codes only, no host text.",
   "type": "object",
   "properties": {
     "tool": {
@@ -43,7 +43,15 @@
           "type": "integer",
           "minimum": 0
         },
+        "skipped_conflict": {
+          "type": "integer",
+          "minimum": 0
+        },
         "unreachable": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "incomplete": {
           "type": "integer",
           "minimum": 0
         }
@@ -53,7 +61,9 @@
         "snapshotted",
         "unchanged",
         "skipped_locked",
-        "unreachable"
+        "skipped_conflict",
+        "unreachable",
+        "incomplete"
       ]
     },
     "events": {
@@ -111,6 +121,34 @@
           "codes"
         ]
       }
+    },
+    "degraded": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "unreachable": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pr": {
+            "$ref": "../defs.json#/$defs/pr"
+          },
+          "pr_id": {
+            "$ref": "../defs.json#/$defs/pr_id"
+          },
+          "code": {
+            "$ref": "../defs.json#/$defs/failure_code"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "pr",
+          "pr_id",
+          "code"
+        ]
+      },
+      "maxItems": 50
     }
   },
   "additionalProperties": false,
@@ -125,6 +163,8 @@
     "prs",
     "events",
     "hooks",
-    "errors"
+    "errors",
+    "degraded",
+    "unreachable"
   ]
 }

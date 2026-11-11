@@ -79,6 +79,22 @@
         }
       ]
     },
+    "at": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/ts"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "can_push": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "approvals_at_head": {
       "oneOf": [
         {
@@ -111,6 +127,8 @@
     "watches",
     "reviewer",
     "commit_sha",
+    "at",
+    "can_push",
     "approvals_at_head"
   ]
 }

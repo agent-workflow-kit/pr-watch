@@ -106,6 +106,16 @@
           "type": "null"
         }
       ]
+    },
+    "commit_sha": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/sha"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -131,6 +141,7 @@
     "author",
     "path",
     "line",
-    "side"
+    "side",
+    "commit_sha"
   ]
 }

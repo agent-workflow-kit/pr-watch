@@ -21,8 +21,8 @@
     },
     "pr_id": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9:/_=.+-]{1,128}$",
-      "description": "Opaque, stable PR id reported by forgectl."
+      "pattern": "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9:/_=.+-]{0,127}$",
+      "description": "Opaque, stable PR id reported by forgectl. Starts with an alphanumeric, no '..'; never used in argv or a path."
     },
     "sha": {
       "type": "string",
@@ -69,7 +69,8 @@
       "items": {
         "$ref": "#/$defs/label"
       },
-      "description": "A multiset, returned verbatim."
+      "uniqueItems": true,
+      "description": "A set, returned verbatim."
     },
     "forgectl_id": {
       "type": "string",
@@ -133,9 +134,25 @@
         "approved",
         "changes_requested",
         "commented",
-        "dismissed",
-        "pending"
+        "dismissed"
       ]
+    },
+    "reviewer_state": {
+      "enum": [
+        "approved",
+        "changes_requested",
+        "dismissed"
+      ],
+      "description": "State of a latest_by_reviewer entry."
+    },
+    "part": {
+      "enum": [
+        "reviews",
+        "threads",
+        "ci",
+        "review_requests"
+      ],
+      "description": "A forgectl snapshot part that can be listed in incomplete."
     },
     "pr_state": {
       "enum": [
@@ -166,6 +183,8 @@
         "tool_missing",
         "tool_too_old",
         "contract",
+        "store_too_new",
+        "state_unsafe",
         "refused",
         "internal"
       ]
@@ -173,12 +192,22 @@
     "watch_key": {
       "type": "string",
       "maxLength": 4096,
-      "pattern": "^(?:mine\\+open(?:;host=[^;,]+(?:,[^;,]+)*)?(?:;repo=[^;,]+(?:,[^;,]+)*)?|[A-Za-z0-9:/_=.+-]{1,128})$",
+      "pattern": "^(?:mine\\+open(?:;host=[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:,[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?)*)?(?:;repo=[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|,|;|$))[A-Za-z0-9._-]+)+(?:,[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|,|;|$))[A-Za-z0-9._-]+)+)*)?|(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9:/_=.+-]{0,127})$",
       "description": "pr_id for a per-PR watch, else the canonical query string."
     },
     "author": {
       "type": "object",
       "properties": {
+        "id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/account_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "login": {
           "$ref": "#/$defs/login"
         },
@@ -191,6 +220,7 @@
         }
       },
       "required": [
+        "id",
         "login",
         "is_bot"
       ],
@@ -386,6 +416,33 @@
             }
           ]
         },
+        "ci_head_sha": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ci_stale": {
+          "type": "boolean"
+        },
+        "ci_stuck": {
+          "type": "boolean"
+        },
+        "incomplete": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/part"
+          },
+          "uniqueItems": true
+        },
+        "incomplete_snapshots": {
+          "type": "integer",
+          "minimum": 0
+        },
         "failures": {
           "type": "integer",
           "minimum": 0
@@ -404,14 +461,19 @@
         "state",
         "draft",
         "ci_state",
+        "ci_head_sha",
+        "ci_stale",
+        "ci_stuck",
         "head_sha",
         "last_polled_at",
         "last_full_at",
+        "incomplete",
+        "incomplete_snapshots",
         "failures",
         "sources"
       ],
       "additionalProperties": false,
-      "description": "state, draft, ci_state, head_sha and last_polled_at are null until the first snapshot (watch add --no-baseline)."
+      "description": "state, draft, ci_state, ci_head_sha and head_sha and last_polled_at are null until the first snapshot (watch add --no-baseline). ci_state is null while a CI hold keeps a stale state (ci_stale true)."
     }
   }
 }

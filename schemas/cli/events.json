@@ -19,6 +19,16 @@
     },
     "more": {
       "type": "boolean"
+    },
+    "last_poll_finished_at": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/ts"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -26,6 +36,7 @@
     "events",
     "cursor",
     "gap",
-    "more"
+    "more",
+    "last_poll_finished_at"
   ]
 }

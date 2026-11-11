@@ -29,13 +29,13 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 10000,
-          "default": 6
+          "description": "Unset: 6 on GitHub, 12 on GitLab."
         },
         "concurrency": {
           "type": "integer",
           "minimum": 1,
           "maximum": 64,
-          "default": 4
+          "description": "Unset: 4 on GitHub, 2 on GitLab."
         },
         "host_low_water": {
           "type": "integer",
@@ -45,12 +45,18 @@
         "overlap": {
           "type": "string",
           "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
-          "default": "60s"
+          "default": "60s",
+          "description": "Subtracted from the host-time watermark of a per-PR repo scope (covers search index lag)."
         },
         "hosts_ttl": {
           "type": "string",
           "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
           "default": "1h"
+        },
+        "max_duration": {
+          "type": "string",
+          "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+          "default": "15m"
         }
       },
       "additionalProperties": false
@@ -125,6 +131,11 @@
           "minimum": 0,
           "maximum": 10,
           "default": 1
+        },
+        "pending_max_age": {
+          "type": "string",
+          "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+          "default": "6h"
         }
       },
       "additionalProperties": false
@@ -136,6 +147,12 @@
           "type": "string",
           "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
           "default": "120s"
+        },
+        "max_output_mib": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256,
+          "default": 32
         }
       },
       "additionalProperties": false
@@ -149,13 +166,26 @@
           "maximum": 100000,
           "default": 50
         },
+        "max_per_pr_per_poll": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 10
+        },
+        "concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32,
+          "default": 4
+        },
         "env_allow": {
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+            "pattern": "^(?!PR_WATCH_|LD_|DYLD_)[A-Za-z_][A-Za-z0-9_]{0,127}$"
           },
-          "default": []
+          "default": [],
+          "description": "Names starting with PR_WATCH_, LD_ or DYLD_ are rejected."
         },
         "on-pushed": {
           "type": "array",
@@ -467,6 +497,11 @@
                   "minimum": 0,
                   "maximum": 10,
                   "default": 1
+                },
+                "pending_max_age": {
+                  "type": "string",
+                  "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+                  "default": "6h"
                 }
               },
               "additionalProperties": false
