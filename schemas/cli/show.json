@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/show.json",
+  "title": "show --json",
+  "description": "The list row fields flattened, plus the digest summary and the 20 most recent events (newest last). Digest fields are null before the first snapshot.",
+  "type": "object",
+  "properties": {
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/pr"
+    },
+    "pr_id": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/pr_id"
+    },
+    "status": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/status"
+    },
+    "state": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/state"
+    },
+    "draft": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/draft"
+    },
+    "ci_state": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/ci_state"
+    },
+    "head_sha": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/head_sha"
+    },
+    "last_polled_at": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/last_polled_at"
+    },
+    "last_full_at": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/last_full_at"
+    },
+    "failures": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/failures"
+    },
+    "sources": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/sources"
+    },
+    "blocked_by": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/blocked_by"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "review_decision": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[a-z_]{1,32}$"
+    },
+    "approvals_at_head": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reviewers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "../defs.json#/$defs/account_id"
+          },
+          "state": {
+            "$ref": "../defs.json#/$defs/review_state"
+          },
+          "commit_sha": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/sha"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "at": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/ts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "state",
+          "commit_sha",
+          "at"
+        ]
+      }
+    },
+    "seen": {
+      "type": "object",
+      "properties": {
+        "comments": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "thread_comments": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reviews": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "comments",
+        "thread_comments",
+        "reviews"
+      ]
+    },
+    "watches": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/watch"
+      }
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/event"
+      },
+      "maxItems": 20
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "pr",
+    "pr_id",
+    "status",
+    "state",
+    "draft",
+    "ci_state",
+    "head_sha",
+    "last_polled_at",
+    "last_full_at",
+    "failures",
+    "sources",
+    "blocked_by",
+    "review_decision",
+    "approvals_at_head",
+    "reviewers",
+    "seen",
+    "watches",
+    "events"
+  ]
+}

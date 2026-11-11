@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/list.json",
+  "title": "list --json",
+  "type": "object",
+  "properties": {
+    "watches": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/watch"
+      }
+    },
+    "prs": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/pr_row"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "watches",
+    "prs"
+  ]
+}

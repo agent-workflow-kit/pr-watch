@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/export.json",
+  "title": "export (JSON lines)",
+  "description": "Not one document: stdout is JSON lines, one stored event per line, oldest first, each line validating against this schema (the event object). No other line types.",
+  "$ref": "../event.json"
+}

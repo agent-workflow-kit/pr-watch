@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/watch-add.json",
+  "title": "watch add --json",
+  "description": "changed is false when the owner and labels were already present. members_baselined is 0 for a per-PR watch or --no-baseline.",
+  "type": "object",
+  "properties": {
+    "watch": {
+      "$ref": "../defs.json#/$defs/watch"
+    },
+    "created": {
+      "type": "boolean"
+    },
+    "changed": {
+      "type": "boolean"
+    },
+    "owner": {
+      "$ref": "../defs.json#/$defs/owner"
+    },
+    "baselined": {
+      "type": "boolean"
+    },
+    "members_baselined": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "events_emitted": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "watch",
+    "created",
+    "changed",
+    "owner",
+    "baselined",
+    "members_baselined",
+    "events_emitted"
+  ]
+}

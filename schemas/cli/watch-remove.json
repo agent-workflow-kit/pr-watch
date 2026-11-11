@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/watch-remove.json",
+  "title": "watch remove --json",
+  "description": "watch is null once the last owner left (the watch ended).",
+  "type": "object",
+  "properties": {
+    "watch": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/watch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "owner": {
+      "$ref": "../defs.json#/$defs/owner"
+    },
+    "watch_ended": {
+      "type": "boolean"
+    },
+    "prs_dropped": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "watch",
+    "owner",
+    "watch_ended",
+    "prs_dropped"
+  ]
+}

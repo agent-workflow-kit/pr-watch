@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/poll.json",
+  "title": "poll --json",
+  "description": "Also printed with exit 12 when a host failed and left PRs unchecked. With already_running true the counters are zero.",
+  "type": "object",
+  "properties": {
+    "already_running": {
+      "type": "boolean"
+    },
+    "started_at": {
+      "$ref": "../defs.json#/$defs/ts"
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "full_pass": {
+      "type": "boolean"
+    },
+    "hosts": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "../defs.json#/$defs/host"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "queried": {
+            "type": "boolean"
+          },
+          "snapshots": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "requests_estimate": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "paused_until": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/ts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "skipped": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-z_]{1,64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "$ref": "../defs.json#/$defs/failure_code"
+                },
+                "pr": {
+                  "oneOf": [
+                    {
+                      "$ref": "../defs.json#/$defs/pr"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "retry_after": {
+                  "oneOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "pr",
+                "retry_after"
+              ]
+            }
+          },
+          "last_full_at": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/ts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "queried",
+          "snapshots",
+          "requests_estimate",
+          "paused_until",
+          "skipped",
+          "errors",
+          "last_full_at"
+        ]
+      }
+    },
+    "prs": {
+      "type": "object",
+      "properties": {
+        "snapshotted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unchanged": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped_locked": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unreachable": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "snapshotted",
+        "unchanged",
+        "skipped_locked",
+        "unreachable"
+      ]
+    },
+    "events": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "../defs.json#/$defs/event_type"
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "hooks": {
+      "type": "object",
+      "properties": {
+        "run": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "run",
+        "skipped",
+        "failed"
+      ]
+    },
+    "failed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "enum": [
+              "pr",
+              "host",
+              "repo",
+              "query"
+            ]
+          },
+          "ref": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "code": {
+            "$ref": "../defs.json#/$defs/failure_code"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "ref",
+          "code"
+        ]
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "already_running",
+    "started_at",
+    "duration_ms",
+    "full_pass",
+    "hosts",
+    "prs",
+    "events",
+    "hooks",
+    "failed"
+  ]
+}

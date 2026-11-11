@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/events.json",
+  "title": "events --json",
+  "description": "Oldest first. Without --since the list is empty and cursor is the current head.",
+  "type": "object",
+  "properties": {
+    "events": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/event"
+      }
+    },
+    "cursor": {
+      "$ref": "../defs.json#/$defs/cursor"
+    },
+    "gap": {
+      "type": "boolean"
+    },
+    "more": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "events",
+    "cursor",
+    "gap",
+    "more"
+  ]
+}

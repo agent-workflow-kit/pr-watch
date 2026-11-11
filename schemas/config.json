@@ -1,12 +1,495 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "pr-watch/config",
+  "$id": "pr-watch/config.json",
   "title": "pr-watch config",
+  "description": "Self-contained (no external $ref). Unknown keys are refused. Defaults are those of docs/interface.md, Config.",
   "type": "object",
   "properties": {
+    "me": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "additionalProperties": false,
+      "description": "Only the name used for the default owner; identity itself is forgectl's."
+    },
+    "poll": {
+      "type": "object",
+      "properties": {
+        "interval_hint": {
+          "type": "string",
+          "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+          "default": "5m"
+        },
+        "full_every": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000,
+          "default": 6
+        },
+        "concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "default": 4
+        },
+        "host_low_water": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 100
+        },
+        "overlap": {
+          "type": "string",
+          "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+          "default": "60s"
+        },
+        "hosts_ttl": {
+          "type": "string",
+          "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+          "default": "1h"
+        }
+      },
+      "additionalProperties": false
+    },
+    "hosts": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$": {
+          "type": "object",
+          "properties": {
+            "full_every": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000
+            },
+            "concurrency": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "default": {}
+    },
+    "retention": {
+      "type": "object",
+      "properties": {
+        "events": {
+          "type": "string",
+          "pattern": "^(?:[3-9][0-9]|[1-9][0-9]{2,})d$",
+          "default": "30d",
+          "description": "Whole days, at least 30."
+        }
+      },
+      "additionalProperties": false
+    },
+    "expiry": {
+      "type": "object",
+      "properties": {
+        "after_terminal": {
+          "type": "string",
+          "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+          "default": "7d"
+        }
+      },
+      "additionalProperties": false
+    },
+    "failures": {
+      "type": "object",
+      "properties": {
+        "unreachable_after": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 5
+        }
+      },
+      "additionalProperties": false
+    },
+    "detect_force_push": {
+      "type": "boolean",
+      "default": false
+    },
+    "ci": {
+      "type": "object",
+      "properties": {
+        "settle_polls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10,
+          "default": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "forgectl": {
+      "type": "object",
+      "properties": {
+        "timeout": {
+          "type": "string",
+          "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+          "default": "120s"
+        }
+      },
+      "additionalProperties": false
+    },
     "hooks": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "max_per_poll": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000,
+          "default": 50
+        },
+        "env_allow": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+          },
+          "default": []
+        },
+        "on-pushed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "timeout": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3600
+              },
+              "async": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "cmd"
+            ]
+          }
+        },
+        "on-comment": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "timeout": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3600
+              },
+              "async": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "cmd"
+            ]
+          }
+        },
+        "on-review_comment": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "timeout": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3600
+              },
+              "async": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "cmd"
+            ]
+          }
+        },
+        "on-review": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "timeout": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3600
+              },
+              "async": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "cmd"
+            ]
+          }
+        },
+        "on-approved": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "timeout": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3600
+              },
+              "async": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "cmd"
+            ]
+          }
+        },
+        "on-changes_requested": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "timeout": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3600
+              },
+              "async": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "cmd"
+            ]
+          }
+        },
+        "on-ci": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "timeout": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3600
+              },
+              "async": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "cmd"
+            ]
+          }
+        },
+        "on-ready": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "timeout": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3600
+              },
+              "async": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "cmd"
+            ]
+          }
+        },
+        "on-merged": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "timeout": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3600
+              },
+              "async": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "cmd"
+            ]
+          }
+        },
+        "on-closed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "timeout": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3600
+              },
+              "async": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "cmd"
+            ]
+          }
+        },
+        "post-poll": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "timeout": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3600
+              },
+              "async": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "cmd"
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "cron": {
+      "type": "object",
+      "properties": {
+        "env_file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 4096,
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "repos": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+$": {
+          "type": "object",
+          "properties": {
+            "detect_force_push": {
+              "type": "boolean"
+            },
+            "ci": {
+              "type": "object",
+              "properties": {
+                "settle_polls": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 10,
+                  "default": 1
+                }
+              },
+              "additionalProperties": false
+            },
+            "failures": {
+              "type": "object",
+              "properties": {
+                "unreachable_after": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000,
+                  "default": 5
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "default": {}
     }
   },
-  "additionalProperties": true
+  "additionalProperties": false
 }

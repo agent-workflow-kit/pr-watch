@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/cron-install.json",
+  "title": "cron install --json",
+  "description": "lines are the managed block's entries as written.",
+  "type": "object",
+  "properties": {
+    "installed": {
+      "const": true
+    },
+    "changed": {
+      "type": "boolean"
+    },
+    "every": {
+      "$ref": "../defs.json#/$defs/duration"
+    },
+    "lines": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 4096
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "installed",
+    "changed",
+    "every",
+    "lines"
+  ]
+}

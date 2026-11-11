@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/cron-uninstall.json",
+  "title": "cron uninstall --json",
+  "type": "object",
+  "properties": {
+    "installed": {
+      "const": false
+    },
+    "changed": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "installed",
+    "changed"
+  ]
+}

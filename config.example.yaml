@@ -1,2 +1,48 @@
-# Example config for pr-watch. Location: ~/.config/pr-watch/config.yaml (drop-ins: config.d/*.yaml). Keys are defined in docs/interface.md once designed.
-hooks: {}
+# Example config for pr-watch (docs/interface.md, Config).
+# Location: ~/.config/pr-watch/config.yaml, drop-ins in config.d/*.yaml.
+# Every value shown is the default. Unknown keys are refused.
+# Any key may also be set as PR_WATCH_<KEY>, nested keys joined with __ (PR_WATCH_POLL__CONCURRENCY).
+
+# me:
+#   name: your-name           # only used for the default owner (human:<name>); identity is forgectl's
+
+poll:
+  interval_hint: 5m           # pacing and the cron install line only
+  full_every: 6               # cycles between full passes, per host
+  concurrency: 4              # snapshot workers per host (2 for hosts that report no rate limit)
+  host_low_water: 100         # forgectl rate_limit.remaining below this: snapshot only what must be
+  overlap: 60s                # subtracted from the enumeration time
+  hosts_ttl: 1h               # how long whoami's host list is cached
+
+hosts: {}                     # per-host overrides: full_every and concurrency
+  # example.com: {full_every: 12, concurrency: 2}
+
+retention:
+  events: 30d                 # whole days, at least 30d
+
+expiry:
+  after_terminal: 7d
+
+failures:
+  unreachable_after: 5
+
+detect_force_push: false      # call forgectl compare to fill `forced`
+
+ci:
+  settle_polls: 1
+
+forgectl:
+  timeout: 120s               # forgectl --timeout per call
+
+hooks:
+  max_per_poll: 50
+  env_allow: []
+  # on-pushed, on-comment, on-review_comment, on-review, on-approved, on-changes_requested,
+  # on-ci, on-ready, on-merged, on-closed and post-poll each take a list:
+  # on-approved: [{cmd: "my-script", timeout: 30, async: true}]
+
+cron:
+  env_file: null
+
+repos: {}                     # per-repo overrides: detect_force_push, ci.settle_polls, failures.unreachable_after
+  # example.com/group/project: {detect_force_push: true, ci: {settle_polls: 2}, failures: {unreachable_after: 8}}

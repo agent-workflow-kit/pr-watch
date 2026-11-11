@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/hooks/post-poll.json",
+  "title": "post-poll hook payload (stdin)",
+  "description": "Once at the end of a poll that had any error. Counts and codes only, no PR text.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "pr-watch"
+    },
+    "hook": {
+      "const": "post-poll"
+    },
+    "object_type": {
+      "const": "poll"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/ts",
+      "description": "The poll's started_at."
+    },
+    "started_at": {
+      "$ref": "../defs.json#/$defs/ts"
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "full_pass": {
+      "type": "boolean"
+    },
+    "prs": {
+      "type": "object",
+      "properties": {
+        "snapshotted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unchanged": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped_locked": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unreachable": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "snapshotted",
+        "unchanged",
+        "skipped_locked",
+        "unreachable"
+      ]
+    },
+    "events": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "../defs.json#/$defs/event_type"
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "hooks": {
+      "type": "object",
+      "properties": {
+        "run": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "run",
+        "skipped",
+        "failed"
+      ]
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "$ref": "../defs.json#/$defs/host"
+          },
+          "codes": {
+            "type": "array",
+            "items": {
+              "$ref": "../defs.json#/$defs/failure_code"
+            },
+            "uniqueItems": true
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "host",
+          "codes"
+        ]
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "started_at",
+    "duration_ms",
+    "full_pass",
+    "prs",
+    "events",
+    "hooks",
+    "errors"
+  ]
+}

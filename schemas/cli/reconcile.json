@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/reconcile.json",
+  "title": "reconcile --json",
+  "type": "object",
+  "properties": {
+    "changed": {
+      "type": "boolean"
+    },
+    "members_dropped": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "digests_dropped": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "leases_dropped": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "changed",
+    "members_dropped",
+    "digests_dropped",
+    "leases_dropped"
+  ]
+}
