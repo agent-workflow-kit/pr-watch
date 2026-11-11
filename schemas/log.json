@@ -23,7 +23,8 @@
         },
         "message": {
           "type": "string",
-          "maxLength": 1024
+          "maxLength": 256,
+          "x-untrusted": true
         },
         "full": {
           "type": "boolean"
@@ -70,7 +71,8 @@
         },
         "message": {
           "type": "string",
-          "maxLength": 1024
+          "maxLength": 256,
+          "x-untrusted": true
         },
         "duration_ms": {
           "type": "integer",
@@ -131,7 +133,8 @@
         },
         "message": {
           "type": "string",
-          "maxLength": 1024
+          "maxLength": 256,
+          "x-untrusted": true
         },
         "host": {
           "$ref": "defs.json#/$defs/host"
@@ -168,7 +171,8 @@
         },
         "message": {
           "type": "string",
-          "maxLength": 1024
+          "maxLength": 256,
+          "x-untrusted": true
         },
         "pr_id": {
           "$ref": "defs.json#/$defs/pr_id"
@@ -214,7 +218,8 @@
         },
         "message": {
           "type": "string",
-          "maxLength": 1024
+          "maxLength": 256,
+          "x-untrusted": true
         },
         "pr_id": {
           "$ref": "defs.json#/$defs/pr_id"
@@ -252,7 +257,8 @@
         },
         "message": {
           "type": "string",
-          "maxLength": 1024
+          "maxLength": 256,
+          "x-untrusted": true
         },
         "host": {
           "$ref": "defs.json#/$defs/host"
@@ -311,7 +317,8 @@
         },
         "message": {
           "type": "string",
-          "maxLength": 1024
+          "maxLength": 256,
+          "x-untrusted": true
         },
         "pr": {
           "$ref": "defs.json#/$defs/pr"
@@ -357,7 +364,8 @@
         },
         "message": {
           "type": "string",
-          "maxLength": 1024
+          "maxLength": 256,
+          "x-untrusted": true
         },
         "pr": {
           "$ref": "defs.json#/$defs/pr"
@@ -402,7 +410,8 @@
         },
         "message": {
           "type": "string",
-          "maxLength": 1024
+          "maxLength": 256,
+          "x-untrusted": true
         },
         "event_id": {
           "oneOf": [
@@ -463,7 +472,8 @@
         },
         "message": {
           "type": "string",
-          "maxLength": 1024
+          "maxLength": 256,
+          "x-untrusted": true
         },
         "skipped": {
           "type": "integer",
@@ -505,7 +515,8 @@
         },
         "message": {
           "type": "string",
-          "maxLength": 1024
+          "maxLength": 256,
+          "x-untrusted": true
         },
         "key": {
           "type": "string",

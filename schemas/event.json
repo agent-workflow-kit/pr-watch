@@ -659,7 +659,8 @@
           ]
         },
         "for_head": {
-          "$ref": "defs.json#/$defs/sha"
+          "$ref": "defs.json#/$defs/sha",
+          "description": "forgectl's ci.head_sha."
         }
       },
       "additionalProperties": false,
@@ -730,6 +731,9 @@
           },
           "uniqueItems": true
         },
+        "from_blocked_by": {
+          "$ref": "defs.json#/$defs/blocked_by"
+        },
         "blocked_by": {
           "$ref": "defs.json#/$defs/blocked_by"
         }
@@ -747,6 +751,7 @@
         "labels",
         "head_sha",
         "watches",
+        "from_blocked_by",
         "blocked_by"
       ]
     },

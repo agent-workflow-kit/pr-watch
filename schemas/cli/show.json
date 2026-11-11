@@ -41,6 +41,18 @@
     "ci_stuck": {
       "$ref": "../defs.json#/$defs/pr_row/properties/ci_stuck"
     },
+    "terminal_at": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/terminal_at"
+    },
+    "terminal_kind": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/terminal_kind"
+    },
+    "baselined_at": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/baselined_at"
+    },
+    "baselined": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/baselined"
+    },
     "incomplete": {
       "$ref": "../defs.json#/$defs/pr_row/properties/incomplete"
     },
@@ -86,8 +98,21 @@
       "items": {
         "type": "object",
         "properties": {
+          "key": {
+            "type": "string",
+            "pattern": "^(?:[A-Za-z0-9:/_=-]{1,128}|login:.{1,256})$",
+            "x-untrusted": true,
+            "description": "The reviewer key: id when forgectl gives one, else login: plus the lowercased login."
+          },
           "id": {
-            "$ref": "../defs.json#/$defs/account_id"
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/account_id"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "state": {
             "$ref": "../defs.json#/$defs/reviewer_state"
@@ -121,6 +146,7 @@
         },
         "additionalProperties": false,
         "required": [
+          "key",
           "id",
           "state",
           "commit_sha",
@@ -175,6 +201,10 @@
     "ci_head_sha",
     "ci_stale",
     "ci_stuck",
+    "terminal_at",
+    "terminal_kind",
+    "baselined_at",
+    "baselined",
     "incomplete",
     "incomplete_snapshots",
     "failures",

@@ -25,11 +25,12 @@ L2 (composite). Works fully standalone; it does not need the `awkit` harness.
 Finalized in [docs/interface.md](docs/interface.md).
 
 - `pr-watch watch add <pr> [--label k=v] [--owner <tool>] [--no-baseline]`
-- `pr-watch watch add --mine --open [--host H] [--repo ID] [--owner <tool>]`
+- `pr-watch watch add --mine --open [--host H] [--repo ID] [--owner <tool>]` (`--owner` is required when stdin is not a TTY: tool callers must pass it)
 - `pr-watch watch remove (<pr> | --mine --open ...) [--owner <tool>]`
 - `pr-watch poll [--pr <ref>] [--repo <id>] [--full] [--no-hooks] [--hook NAME=CMD]`
-- `pr-watch list`, `show <pr>`, `events [--label k=v] [--pr <ref>] [--type T] [--since <cursor>]`
-- `pr-watch label add|remove`, `prune [--dry-run]`, `reconcile`, `cron install|uninstall`, `export`
+- `pr-watch list`, `show <pr>`, `events [--label k=v]... [--pr <ref>]... [--type T]... [--since <cursor>] [--limit N]`
+- `pr-watch label add|remove <pr|--watch ID> k=v... [--owner O]`, `prune [--dry-run]`, `cron install|uninstall`
+- `pr-watch export [--since D] [--label k=v] [--type T] [--pr <ref>]`
 
 All commands take `--json`. Exit codes: 0 success, 2 usage, 10 not found, 12 failed (host failing, forgectl missing or too old), 20 refused (a forgectl refusal passed through).
 
@@ -39,7 +40,7 @@ All commands take `--json`. Exit codes: 0 success, 2 usage, 10 not found, 12 fai
 
 ## Configuration
 
-`~/.config/pr-watch/config.yaml` (plus `config.d/*.yaml`); every key is documented in [config.example.yaml](config.example.yaml). pr-watch holds no credentials and reads no environment variable of its own besides `PR_WATCH_<KEY>` overrides, which apply to scalar keys only; set up forgectl's hosts and tokens first.
+`~/.config/pr-watch/config.yaml` (plus `config.d/*.yaml`); every key is documented in [config.example.yaml](config.example.yaml). pr-watch holds no credentials and its own environment variables are the `PR_WATCH_<KEY>` overrides, which apply to scalar keys only (it also reads `PATH` and `XDG_*` and passes its environment through to forgectl); set up forgectl's hosts and tokens first.
 
 ## Install
 

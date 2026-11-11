@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "pr-watch/cli/poll.json",
   "title": "poll --json",
-  "description": "Also printed with exit 12 when a whole host failed. With already_running true the counters are zero. polled appears only with poll --pr: false when the PR was locked by another poll.",
+  "description": "Also printed with exit 12 when a whole host failed. With already_running true only prs.skipped_locked can be non-zero. events is zero-filled over all ten types in the event order. prs.incomplete is a database-wide current count. truncated is true for either poll.max_duration or poll.max_snapshots and deferred counts the snapshots not started because of either. hooks.skipped counts hooks skipped by a cap or the drain bound; hooks.failed counts runs that exited non-zero, timed out or failed to spawn. requests_estimate is snapshots x 7 (GitHub) or x 21 (GitLab). polled appears only with poll --pr: false when the PR was locked by another poll or is merged.",
   "type": "object",
   "properties": {
     "already_running": {
@@ -221,7 +221,8 @@
           },
           "ref": {
             "type": "string",
-            "maxLength": 256
+            "maxLength": 256,
+            "description": "The canonical pr for kind pr, the repo id for repo, the host for query and host."
           },
           "code": {
             "$ref": "../defs.json#/$defs/failure_code"

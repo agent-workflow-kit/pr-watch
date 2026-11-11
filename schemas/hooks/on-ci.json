@@ -107,7 +107,8 @@
       ]
     },
     "for_head": {
-      "$ref": "../defs.json#/$defs/sha"
+      "$ref": "../defs.json#/$defs/sha",
+      "description": "forgectl's ci.head_sha."
     }
   },
   "additionalProperties": false,

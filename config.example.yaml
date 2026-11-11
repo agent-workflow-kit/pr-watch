@@ -7,13 +7,14 @@
 #   name: your-name           # only used for the default owner (human:<name>); identity is forgectl's
 
 poll:
-  interval_hint: 5m           # pacing and the cron install line only
+  interval_hint: 5m           # cron install default only (5m, 10m, 1h, ...)
   # full_every: 6             # cycles between full passes, per host; unset: 6 on GitHub, 12 on GitLab
   # concurrency: 4            # snapshot workers per host; unset: 4 on GitHub, 2 on GitLab
   host_low_water: 100         # forgectl rate_limit.remaining below this: snapshot only what must be
   overlap: 60s                # subtracted from the host-time watermark of a per-PR repo scope (covers search index lag)
   hosts_ttl: 1h               # how long whoami's host list is cached
   max_duration: 15m           # the cycle stops starting snapshots after this
+  max_snapshots: 40           # snapshots started per host and cycle; deferred ones keep their triggers (0 is unlimited)
 
 hosts: {}                     # per-host overrides: full_every and concurrency
   # example.com: {full_every: 12, concurrency: 2}
@@ -35,16 +36,16 @@ ci:
 
 forgectl:
   timeout: 120s               # forgectl --timeout per call
-  max_output_mib: 32          # bytes read from one forgectl call (1 to 256)
+  max_output_mib: 32          # MiB read from one forgectl call (1 to 256)
 
 hooks:
-  max_per_poll: 50
+  max_per_poll: 50            # 0: no hook runs
   max_per_pr_per_poll: 10     # 1 to 1000
   concurrency: 4              # hook workers, 1 to 32
   env_allow: []
   # on-pushed, on-comment, on-review_comment, on-review, on-approved, on-changes_requested,
   # on-ci, on-ready, on-merged, on-closed and post-poll each take a list:
-  # on-approved: [{cmd: "my-script", timeout: 30, async: true}]
+  # on-approved: [{cmd: "my-script", timeout: 30, async: true}]   # timeout in seconds, 1 to 600
 
 cron:
   env_file: null

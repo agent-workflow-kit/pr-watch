@@ -149,8 +149,7 @@
       "enum": [
         "reviews",
         "threads",
-        "ci",
-        "review_requests"
+        "ci"
       ],
       "description": "A forgectl snapshot part that can be listed in incomplete."
     },
@@ -335,6 +334,32 @@
             }
           ],
           "description": "Member count for a query watch, null for a per-PR watch."
+        },
+        "created_at": {
+          "$ref": "#/$defs/ts"
+        },
+        "enumerated_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Query watch: the oldest hosts.last_enumerated_at over the hosts it lists; null while any is null or older than created_at, and for a per-PR watch."
+        },
+        "pending_baseline": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Query watch: members with no digest; null for a per-PR watch. A query watch is ready when enumerated_at is non-null and pending_baseline is 0."
         }
       },
       "required": [
@@ -344,9 +369,36 @@
         "pr",
         "owners",
         "labels",
-        "members"
+        "members",
+        "created_at",
+        "enumerated_at",
+        "pending_baseline"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "query"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "key": {
+            "pattern": "^mine\\+open(?:;host=[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:,[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?)*)?(?:;repo=[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|,|;|$))[A-Za-z0-9._-]+)+(?:,[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|,|;|$))[A-Za-z0-9._-]+)+)*)?$"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "key": {
+            "pattern": "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9:/_=.+-]{0,127}$"
+          }
+        }
+      }
     },
     "pr_row": {
       "type": "object",
@@ -384,7 +436,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "The digest's ci.state; null while a CI hold is in progress (ci_stale true) and before the first snapshot."
         },
         "head_sha": {
           "oneOf": [
@@ -424,13 +477,77 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "The digest's ci.head_sha (forgectl's; may differ from head_sha for a GitLab merged-results pipeline, which is information, not staleness)."
         },
         "ci_stale": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "True while a CI hold is in progress."
         },
         "ci_stuck": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "True when the PR is unsettled and has been for at least ci.pending_max_age; it is then snapshotted only on full passes."
+        },
+        "terminal_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "terminal_kind": {
+          "oneOf": [
+            {
+              "enum": [
+                "merged",
+                "closed"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baselined_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baselined": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "reviews": {
+                  "type": "boolean"
+                },
+                "threads": {
+                  "type": "boolean"
+                },
+                "ci": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "reviews",
+                "threads",
+                "ci"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "From the digest; null before the first snapshot."
         },
         "incomplete": {
           "type": "array",
@@ -470,7 +587,11 @@
         "incomplete",
         "incomplete_snapshots",
         "failures",
-        "sources"
+        "sources",
+        "terminal_at",
+        "terminal_kind",
+        "baselined_at",
+        "baselined"
       ],
       "additionalProperties": false,
       "description": "state, draft, ci_state, ci_head_sha and head_sha and last_polled_at are null until the first snapshot (watch add --no-baseline). ci_state is null while a CI hold keeps a stale state (ci_stale true)."

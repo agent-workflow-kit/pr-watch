@@ -40,6 +40,18 @@
     "prs_dropped": {
       "type": "integer",
       "minimum": 0
+    },
+    "reference": {
+      "oneOf": [
+        {
+          "type": "string",
+          "maxLength": 256
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The resolved reference (canonical pr for a per-PR remove, the watch key for a query remove, null when nothing resolved), so a typo or a stale name is visible."
     }
   },
   "additionalProperties": false,
@@ -49,6 +61,7 @@
     "changed",
     "reason",
     "watch_ended",
-    "prs_dropped"
+    "prs_dropped",
+    "reference"
   ]
 }

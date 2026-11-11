@@ -13,9 +13,9 @@
         },
         "message": {
           "type": "string",
-          "maxLength": 1024,
+          "maxLength": 256,
           "x-untrusted": true,
-          "description": "Sanitized one-line text; may carry a host message."
+          "description": "Sanitized one-line text, truncated to 256 characters; may carry a host message."
         },
         "reason": {
           "type": [
@@ -91,7 +91,7 @@
                   "oneOf": [
                     {
                       "type": "string",
-                      "maxLength": 1024,
+                      "maxLength": 256,
                       "x-untrusted": true
                     },
                     {

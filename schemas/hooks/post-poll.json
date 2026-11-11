@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "pr-watch/hooks/post-poll.json",
   "title": "post-poll hook payload (stdin)",
-  "description": "Once at the end of a poll that had any error or any newly unreachable PR. Counts and codes only, no host text.",
+  "description": "Once at the end of a poll that had a failed object, a host error or a newly unreachable PR. Counts (excluding itself) and codes only, no host text.",
   "type": "object",
   "properties": {
     "tool": {
