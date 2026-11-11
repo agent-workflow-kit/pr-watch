@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/error.json",
+  "title": "Error envelope (any command with --json)",
+  "description": "Printed on stdout for every non-zero exit except 12 from poll with a report. Also on stderr as text.",
+  "type": "object",
+  "properties": {
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "../defs.json#/$defs/error_code"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 256,
+          "x-untrusted": true,
+          "description": "Sanitized one-line text, truncated to 256 characters; may carry a host message."
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-z_]{1,64}$",
+          "description": "Set when code is refused."
+        },
+        "details": {
+          "type": "object",
+          "properties": {
+            "install": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "required": {
+              "type": "string",
+              "maxLength": 32
+            },
+            "found": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 32
+            },
+            "kind": {
+              "type": "string",
+              "pattern": "^[a-z_]{1,32}$"
+            }
+          },
+          "additionalProperties": true
+        },
+        "lower_error": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "oneOf": [
+                    {
+                      "$ref": "../defs.json#/$defs/failure_code"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "reason": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[a-z_]{1,64}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "retry_after": {
+                  "oneOf": [
+                    {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "message": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 256,
+                      "x-untrusted": true
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "reason",
+                "retry_after",
+                "message"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "refused"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "tool_missing"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "required": [
+                  "install"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "tool_too_old"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "required": [
+                  "required",
+                  "found"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "required": [
+    "error"
+  ],
+  "additionalProperties": false
+}

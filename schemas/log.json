@@ -1,33 +1,535 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "pr-watch/log",
+  "$id": "pr-watch/log.json",
   "title": "pr-watch log.jsonl record",
-  "type": "object",
-  "properties": {
-    "ts": {
-      "type": "string",
-      "format": "date-time"
-    },
-    "level": {
-      "type": "string",
-      "enum": [
-        "debug",
-        "info",
-        "warn",
-        "error"
+  "description": "Public, append-only. Never holds host text beyond the one-line fields (pr paths are repo ids).",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "event": {
+          "const": "poll_start"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 256,
+          "x-untrusted": true
+        },
+        "full": {
+          "type": "boolean"
+        },
+        "scope": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "forgectl_path": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "forgectl_version": {
+          "type": "string",
+          "maxLength": 32
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "level",
+        "event",
+        "full",
+        "forgectl_path",
+        "forgectl_version"
       ]
     },
-    "event": {
-      "type": "string"
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "event": {
+          "const": "poll_end"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 256,
+          "x-untrusted": true
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "snapshots": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "events": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "errors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "already_running": {
+          "type": "boolean"
+        },
+        "interrupted": {
+          "type": "boolean"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "level",
+        "event",
+        "duration_ms",
+        "snapshots",
+        "events",
+        "errors",
+        "already_running",
+        "interrupted",
+        "truncated"
+      ]
     },
-    "message": {
-      "type": "string"
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "event": {
+          "const": "host_failed"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 256,
+          "x-untrusted": true
+        },
+        "host": {
+          "$ref": "defs.json#/$defs/host"
+        },
+        "code": {
+          "$ref": "defs.json#/$defs/failure_code"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "level",
+        "event",
+        "host",
+        "code"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "event": {
+          "const": "part_incomplete"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 256,
+          "x-untrusted": true
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "part": {
+          "$ref": "defs.json#/$defs/part"
+        },
+        "snapshots": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "level",
+        "event",
+        "pr_id",
+        "pr",
+        "part",
+        "snapshots"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "event": {
+          "const": "commit_skipped"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 256,
+          "x-untrusted": true
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "reason": {
+          "type": "string",
+          "pattern": "^[a-z_]{1,64}$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "level",
+        "event",
+        "pr_id",
+        "reason"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "event": {
+          "const": "host_summary"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 256,
+          "x-untrusted": true
+        },
+        "host": {
+          "$ref": "defs.json#/$defs/host"
+        },
+        "snapshots": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requests_estimate": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "errors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "paused_until": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "level",
+        "event",
+        "host",
+        "snapshots",
+        "requests_estimate",
+        "errors",
+        "paused_until"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "event": {
+          "const": "snapshot_failed"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 256,
+          "x-untrusted": true
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "code": {
+          "$ref": "defs.json#/$defs/failure_code"
+        },
+        "failures": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "level",
+        "event",
+        "pr",
+        "pr_id",
+        "code",
+        "failures"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "event": {
+          "const": "pr_status"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 256,
+          "x-untrusted": true
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "from": {
+          "$ref": "defs.json#/$defs/pr_status"
+        },
+        "to": {
+          "$ref": "defs.json#/$defs/pr_status"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "level",
+        "event",
+        "pr",
+        "pr_id",
+        "from",
+        "to"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "event": {
+          "const": "hook_run"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 256,
+          "x-untrusted": true
+        },
+        "event_id": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/event_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hook": {
+          "type": "string",
+          "pattern": "^(?:on-[a-z_]+|post-poll)$"
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "timed_out": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "level",
+        "event",
+        "event_id",
+        "hook",
+        "exit_code",
+        "duration_ms",
+        "timed_out"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "event": {
+          "const": "hook_cap"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 256,
+          "x-untrusted": true
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "first_event_id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "last_event_id": {
+          "$ref": "defs.json#/$defs/event_id"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "level",
+        "event",
+        "skipped",
+        "first_event_id",
+        "last_event_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "event": {
+          "const": "config_warning"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 256,
+          "x-untrusted": true
+        },
+        "key": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "level",
+        "event",
+        "key"
+      ]
     }
-  },
-  "required": [
-    "ts",
-    "level",
-    "event"
-  ],
-  "additionalProperties": true
+  ]
 }

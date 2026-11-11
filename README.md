@@ -1,10 +1,10 @@
 # pr-watch
 
-Watches PRs for changes and exposes them as events and hooks.
+Watches pull requests and merge requests for changes and exposes them as events and hooks.
 
 ## Status
 
-Pre-design: interface not yet specified; see [docs/design.md](docs/design.md).
+Designed (interface 0.1.0-design); not implemented yet. See [docs/interface.md](docs/interface.md) (the normative spec) and [docs/design.md](docs/design.md).
 
 ## Layer
 
@@ -12,31 +12,41 @@ L2 (composite). Works fully standalone; it does not need the `awkit` harness.
 
 ## What it does
 
-- Detects new commits, comments, reviews, approvals, CI changes, readiness and merge/close on watched PRs.
-- Event types include `comment`, `review_comment`, `review`, `approved`, `changes_requested`, `ci`, `ready`, `merged`, `closed`, `pushed`.
-- Exposes `on-<event>` hooks per change type (e.g. `on-comment`, `on-approved`, `on-merged`); they report external changes and cannot veto.
-- Watches are reference-counted by owner (`--owner <tool>`); query watches (`--mine --open`) are supported.
-- `events` is non-destructive: each consumer keeps its own opaque cursor; a cursor older than the retention window returns exit 0 with `"gap": true`.
+- You (or another tool) register watches: one PR, or the query "my open PRs" (`--mine --open`, optionally narrowed by host or repo). A watch has owners (a watch ends when its last owner removes its reference) and its owners' labels.
+- `pr-watch poll` (run it from cron, every 5 minutes by default) asks the git host for what changed and stores events. It is the only command that talks to a host (apart from the baseline of a per-PR `watch add`), and it only reads, through forgectl.
+- Events: `pushed`, `comment`, `review_comment`, `review` (GitHub only), `approved`, `changes_requested`, `ci`, `ready`, `merged`, `closed`. Each carries metadata and ids, never comment text, titles or descriptions; read text through forgectl by id.
+- `pr-watch events --since <cursor>` is non-destructive: every consumer keeps its own opaque cursor. Without `--since` you get nothing and a cursor for "from now". An old cursor returns `"gap": true`: re-sync current state through forgectl and reset your cursor.
+- `on-<event>` hooks (JSON on stdin) report changes to notifiers or other tools; they are best-effort and cannot veto.
+- `watch add <pr>` baselines synchronously and a query watch is baselined by its first poll; neither emits events, except that a PR already merged or closed emits that one event.
+- Events are kept at least 30 days; a PR's state is dropped 7 days after it merged or closed (both configurable).
 
-## Indicative commands
+## Commands
 
-Indicative, finalized in [docs/interface.md](docs/interface.md).
+Finalized in [docs/interface.md](docs/interface.md).
 
-- `pr-watch watch add <pr> [--label k=v] [--owner <tool>]`
-- `pr-watch watch add --mine --open [--owner <tool>]  (query watch)`
-- `pr-watch watch remove (<pr> | --mine --open) [--owner <tool>]`
-- `pr-watch poll`
-- `pr-watch list`
-- `pr-watch events [--label k=v] [--pr <ref>] [--since <cursor>]`
+- `pr-watch watch add <pr> [--label k=v] [--owner <tool>] [--no-baseline]`
+- `pr-watch watch add --mine --open [--host H] [--repo ID] [--owner <tool>]` (`--owner` is required when stdin is not a TTY: tool callers must pass it)
+- `pr-watch watch remove (<pr> | --mine --open ...) [--owner <tool>]`
+- `pr-watch poll [--pr <ref>] [--repo <id>] [--full] [--no-hooks] [--hook NAME=CMD]`
+- `pr-watch list`, `show <pr>`, `events [--label k=v]... [--pr <ref>]... [--type T]... [--since <cursor>] [--limit N]`
+- `pr-watch label add|remove <pr|--watch ID> k=v... [--owner O]`, `prune [--dry-run]`, `cron install|uninstall`
+- `pr-watch export [--since D] [--label k=v] [--type T] [--pr <ref>]`
+
+All commands take `--json`. Exit codes: 0 success, 2 usage, 10 not found, 12 failed (host failing, forgectl missing or too old), 20 refused (a forgectl refusal passed through).
 
 ## Dependencies
 
-- forgectl: binding: TBD (A/B/C), decided in this tool's design session
+- forgectl: binding A (hard). All host access goes through it; it holds the credentials. Install: `uv tool install git+https://github.com/agent-workflow-kit/forgectl`.
+
+## Configuration
+
+`~/.config/pr-watch/config.yaml` (plus `config.d/*.yaml`); every key is documented in [config.example.yaml](config.example.yaml). pr-watch holds no credentials and its own environment variables are the `PR_WATCH_<KEY>` overrides, which apply to scalar keys only (it also reads `PATH` and `XDG_*` and passes its environment through to forgectl); set up forgectl's hosts and tokens first.
 
 ## Install
 
 ```sh
 uv tool install git+https://github.com/agent-workflow-kit/pr-watch
+pr-watch cron install
 ```
 
 ## Documentation

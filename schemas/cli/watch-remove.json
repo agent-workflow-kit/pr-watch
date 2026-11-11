@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/watch-remove.json",
+  "title": "watch remove --json",
+  "description": "watch is null once the last owner left (the watch ended) or when nothing was held. Idempotent: changed is false with reason not_held or pr_unknown when the owner held no reference.",
+  "type": "object",
+  "properties": {
+    "watch": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/watch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "owner": {
+      "$ref": "../defs.json#/$defs/owner"
+    },
+    "changed": {
+      "type": "boolean"
+    },
+    "reason": {
+      "oneOf": [
+        {
+          "enum": [
+            "not_held",
+            "pr_unknown"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "watch_ended": {
+      "type": "boolean"
+    },
+    "prs_dropped": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "reference": {
+      "oneOf": [
+        {
+          "type": "string",
+          "maxLength": 256
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The resolved reference (canonical pr for a per-PR remove, the watch key for a query remove, null when nothing resolved), so a typo or a stale name is visible."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "watch",
+    "owner",
+    "changed",
+    "reason",
+    "watch_ended",
+    "prs_dropped",
+    "reference"
+  ]
+}

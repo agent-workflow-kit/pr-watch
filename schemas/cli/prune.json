@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/prune.json",
+  "title": "prune --json",
+  "description": "With dry_run true the counts are what would be deleted. leases_deleted counts expired leases and leases of dead holders.",
+  "type": "object",
+  "properties": {
+    "dry_run": {
+      "type": "boolean"
+    },
+    "events_deleted": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "prs_deleted": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "watches_ended": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "members_dropped": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "leases_deleted": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "dry_run",
+    "events_deleted",
+    "prs_deleted",
+    "watches_ended",
+    "members_dropped",
+    "leases_deleted"
+  ]
+}

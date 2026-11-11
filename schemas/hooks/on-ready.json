@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/hooks/on-ready.json",
+  "title": "on-ready hook payload (stdin)",
+  "description": "After the event's transaction committed. At-most-once delivery. Host text fields are untrusted.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "pr-watch"
+    },
+    "hook": {
+      "const": "on-ready"
+    },
+    "object_type": {
+      "const": "pr"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/pr_id"
+    },
+    "event_id": {
+      "$ref": "../defs.json#/$defs/event_id",
+      "description": "Same value as id; the deduplication key."
+    },
+    "id": {
+      "$ref": "../defs.json#/$defs/event_id"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "type": {
+      "const": "ready"
+    },
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "pr_id": {
+      "$ref": "../defs.json#/$defs/pr_id"
+    },
+    "repo": {
+      "$ref": "../defs.json#/$defs/repo_id"
+    },
+    "detected_at": {
+      "$ref": "../defs.json#/$defs/ts"
+    },
+    "occurred_at": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/ts"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "labels": {
+      "$ref": "../defs.json#/$defs/labels"
+    },
+    "head_sha": {
+      "$ref": "../defs.json#/$defs/sha"
+    },
+    "watches": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/watch_id"
+      },
+      "uniqueItems": true
+    },
+    "from_blocked_by": {
+      "$ref": "../defs.json#/$defs/blocked_by"
+    },
+    "blocked_by": {
+      "$ref": "../defs.json#/$defs/blocked_by"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "event_id",
+    "id",
+    "seq",
+    "type",
+    "pr",
+    "pr_id",
+    "repo",
+    "detected_at",
+    "occurred_at",
+    "labels",
+    "head_sha",
+    "watches",
+    "from_blocked_by",
+    "blocked_by"
+  ]
+}

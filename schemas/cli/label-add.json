@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/label-add.json",
+  "title": "label add --json",
+  "description": "watch.labels is the set after the change; changed is false when nothing was added.",
+  "type": "object",
+  "properties": {
+    "watch": {
+      "$ref": "../defs.json#/$defs/watch"
+    },
+    "owner": {
+      "$ref": "../defs.json#/$defs/owner"
+    },
+    "changed": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "watch",
+    "owner",
+    "changed"
+  ]
+}

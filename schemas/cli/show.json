@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/show.json",
+  "title": "show --json",
+  "description": "The list row fields flattened, plus the digest summary and the 20 most recent events (oldest first). Digest fields are null before the first snapshot.",
+  "type": "object",
+  "properties": {
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/pr"
+    },
+    "pr_id": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/pr_id"
+    },
+    "status": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/status"
+    },
+    "state": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/state"
+    },
+    "draft": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/draft"
+    },
+    "ci_state": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/ci_state"
+    },
+    "head_sha": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/head_sha"
+    },
+    "last_polled_at": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/last_polled_at"
+    },
+    "last_full_at": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/last_full_at"
+    },
+    "ci_head_sha": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/ci_head_sha"
+    },
+    "ci_stale": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/ci_stale"
+    },
+    "ci_stuck": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/ci_stuck"
+    },
+    "terminal_at": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/terminal_at"
+    },
+    "terminal_kind": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/terminal_kind"
+    },
+    "baselined_at": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/baselined_at"
+    },
+    "baselined": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/baselined"
+    },
+    "incomplete": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/incomplete"
+    },
+    "incomplete_snapshots": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/incomplete_snapshots"
+    },
+    "failures": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/failures"
+    },
+    "sources": {
+      "$ref": "../defs.json#/$defs/pr_row/properties/sources"
+    },
+    "blocked_by": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/blocked_by"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "review_decision": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[a-z_]{1,32}$"
+    },
+    "approvals_at_head": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reviewers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "pattern": "^(?:[A-Za-z0-9:/_=-]{1,128}|login:.{1,256})$",
+            "x-untrusted": true,
+            "description": "The reviewer key: id when forgectl gives one, else login: plus the lowercased login."
+          },
+          "id": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/account_id"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "$ref": "../defs.json#/$defs/reviewer_state"
+          },
+          "commit_sha": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/sha"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "at": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/ts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "can_push": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "id",
+          "state",
+          "commit_sha",
+          "at",
+          "can_push"
+        ]
+      }
+    },
+    "seen": {
+      "type": "object",
+      "properties": {
+        "comments": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reviews": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "comments",
+        "reviews"
+      ]
+    },
+    "watches": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/watch"
+      }
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/event"
+      },
+      "maxItems": 20
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "pr",
+    "pr_id",
+    "status",
+    "state",
+    "draft",
+    "ci_state",
+    "head_sha",
+    "last_polled_at",
+    "last_full_at",
+    "ci_head_sha",
+    "ci_stale",
+    "ci_stuck",
+    "terminal_at",
+    "terminal_kind",
+    "baselined_at",
+    "baselined",
+    "incomplete",
+    "incomplete_snapshots",
+    "failures",
+    "sources",
+    "blocked_by",
+    "review_decision",
+    "approvals_at_head",
+    "reviewers",
+    "seen",
+    "watches",
+    "events"
+  ]
+}

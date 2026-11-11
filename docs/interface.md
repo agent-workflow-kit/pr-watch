@@ -1,43 +1,455 @@
 # pr-watch: interface
 
-Status: not yet specified. Written before implementation (architecture §18.1).
+Status: designed, 2026-11-10 (interface 0.1.0-design). This document is the single normative source for pr-watch's rules. `design.md` records the decisions and the internal structure and links to the headings here instead of restating them; the README, the architecture and the schemas follow it. Machine-readable shapes are in `schemas/`.
+
+## Concepts
+
+pr-watch turns "what changed on these PRs since I last looked?" into a stream of events. A tool or a person registers **watches** on pull requests (GitHub) or merge requests (GitLab), a periodic `poll` compares what the host reports now with what it reported last time, and every difference becomes an **event** that consumers read with their own cursor or receive through an `on-<event>` hook. pr-watch reads the host only through forgectl, never posts or changes anything on a host, and takes no external action, so it keeps no audit log. Terms defined later are used earlier in places: Poll cycle, Digest, State, Events, Pacing and backoff, Residual risks.
+
+### Identifiers
+
+- **Repo id** and **PR reference:** as in the design guide, section 4.1. `host/<full project path>` for a repo; a PR is a URL or `host/<full project path>#N` (GitLab numbers written without `!`); output always uses `#N`. pr-watch validates every user value before it builds argv: a PR argument must match the `pr` pattern of `schemas/defs.json` (an uppercase or mixed-case host is accepted and lowercased; the schema pattern is the canonical, lowercase-host form of stored and printed values) or be an `https://` URL without whitespace or control characters; `--host` must match the host grammar and `--repo` the repo-id grammar (exit 2 `usage` at `watch add` and `poll`); every stored `pr` and filter is re-validated before use; a value starting with `-` is refused; shas for `compare` match `^[0-9a-f]{40}$`. argv is built as `--option=value` where forgectl accepts it; a `--` before positionals is used only if confirmed (a forgectl question, see design.md Live verification), so validation is the primary defense. A stored free string is never put in argv; `pr_id` is never used in argv or a path. forgectl's grammar decides everything else (an invalid reference is exit 2, `code: invalid_pr`).
+- **`pr_id`:** the opaque, stable id forgectl reports for a PR (it survives repository renames and moves). pr-watch keys every stored PR on `pr_id` and prints the canonical `pr` form beside it; the `pr` form is refreshed on every successful snapshot. A reference that now names a different `pr_id` than the stored one (a number reused after a repo was deleted and recreated) is a different PR.
+- **Reference resolution:** `watch add` and `poll --pr` accept a `pr` reference (`host/path#N`) or a URL; `show`, `list --pr`, `events --pr`, `export --pr`, `watch remove` and `label` accept a `pr` reference, a URL or a `pr_id`. A name or URL that matches more than one stored row (a repo name that was reused) is exit 2 `usage` with the hint to use the `pr_id`; `watch add` with such a name takes the `pr_id` from its snapshot. Matching a reference against the stored canonical `pr` and `pr_id` happens offline in process and is case-insensitive in host and path (the stored form is the lowercase host and the path as forgectl printed it). A URL is parsed by a small pattern (GitHub `https://<host>/<owner>/<repo>/pull/<N>`, GitLab `https://<host>/<path>/-/merge_requests/<N>`; a query, fragment or trailing path is ignored; a GitLab `api_prefix` host or any form the parser does not recognize is exit 2 `invalid_pr` with the hint to use `host/path#N`). There are no stored aliases, so a stale name after a repo rename does not match a row (use the new name or the `pr_id`). `poll --pr` resolves the reference offline and then snapshots (it does contact the host); `show`, `list`, `events`, `export`, `watch remove` and `label` never contact a host.
+- **Owner:** `^[a-z0-9][a-z0-9_.:@-]{0,63}$`, a free string naming who holds a reference to a watch (for example `review-respond`, `human:<name>`). pr-watch assigns no meaning to an owner. `watch add`, `watch remove`, `label add` and `label remove` take `--owner O`. Without it: on a TTY the owner is `human:<me.name>`; when stdin is not a TTY the command exits 2 (`usage`, `details.kind: owner_required`, message "--owner is required when not run from a terminal"). `me.name` defaults to the OS user name; cleaning follows the design guide section 6 actor rule (lowercase, characters outside the owner charset replaced with `-`, cut to 64, a leading non-alphanumeric stripped); an empty result is exit 2 asking for `--owner`.
+- **Watch key:** a per-PR watch is keyed by `pr_id`. A query watch is keyed by its canonical query string: `mine+open` followed, when filters were given, by `;host=<h>,...;repo=<id>,...` with each list sorted and deduplicated. Two `watch add` calls with the same key are the same watch.
+- **Watch id:** `w-` followed by 10 lowercase base32 characters (`a-z`, `2-7`), generated once when a watch is created. Printed by `watch add` and `list`; not needed to remove a watch (a watch is removed by its reference or query).
+- **Event id:** `ev-` followed by 12 lowercase base32 characters, generated when the event is stored. It is the deduplication key for hook consumers.
+- **Cursor:** `v1.<store_id>.<seq>`: `store_id` is 8 lowercase base32 characters created once with `state.db`, and `seq` is a non-negative decimal integer, the event stream position. A cursor is opaque to consumers (they store and return it verbatim). The grammar is `^v1\.[a-z2-7]{8}\.[0-9]{1,18}$`.
+- **Label:** `key=value`; the key matches `^[a-z][a-z0-9_-]{0,31}$` and the value `^[A-Za-z0-9._:@/#+-]{1,128}$` (design guide section 9; no key has built-in meaning).
+- **Time:** every stored and printed timestamp is UTC as `YYYY-MM-DDTHH:MM:SS.ffffffZ`. Timestamps read from forgectl are converted to that form. `--since`-style durations take `0` or an integer and a unit: `ms`, `s`, `m`, `h`, `d`.
+
+### Watches, owners and members
+
+- A **per-PR watch** follows one PR. `watch add <pr>` resolves it and records the watch.
+- A **query watch** follows a query. Version 0.x has one query, `--mine --open`: the PRs authored by the account forgectl calls "me" on each host in scope. The optional `--host <host>` and `--repo <id>` filters (both repeatable) narrow it and become part of its key. A query's members are the listed items that match its filters: the `--host` list (OR), the `--repo` list (OR), the two lists ANDed; a repo implies its host (a `--repo` whose host is not in the `--host` list is exit 2 `usage` at `watch add`). Hosts in scope are those `forgectl whoami` lists with `token_source` other than `none`; a declared host with `none` is reported `skipped: no_credential`; a per-PR watch's host is always attempted. pr-watch caches the host list for `hosts_ttl` (default 1 hour).
+- Every watch has a set of **owners** and a set of **labels**. A label belongs to the (watch, owner) pair that added it and is removed with that owner's reference; the labels of a watch are the union over its owners; adding an owner or a label that is already present is a no-op. `watch remove` removes only the named owner's reference (and its labels); the watch ends when its last owner is gone. An event's labels are the union over every watch that includes the PR, as they were at detection; a label added later does not reach stored events.
+- A query watch has **members**: the PRs its open listing found. A member is a PR row (State) with a `sources` row for the query watch; a PR can be a member of several query watches and the subject of a per-PR watch at once, with one row, one digest and one event stream. Enumeration only adds: a listed open item that matches the filters becomes a member (a row with no digest, to be baselined silently by its first snapshot) and sets that source's `left_count` to 0. A member of a host that is absent from a **complete** open listing of that host gets `sources.left_count` + 1; a source with `left_count` 2 (absent from two consecutive complete listings, so one lagging search result does not remove a member) is a snapshot trigger (Poll cycle, step 4 (d)); an incomplete listing changes no `left_count`. A source is removed only inside the snapshot commit (Locks and commit): when the snapshot shows the PR `open` and its source has `left_count` 2, that query's source is deleted (no event; the row is dropped when no source remains); when the snapshot shows `merged` or `closed` the sources stay until expiry, so the `merged` or `closed` event is always stored. A snapshot that fails (`not_found` and the rest) keeps the source.
+- A PR row is dropped, in the same transaction that removes its last source, when none of its sources remains (all its per-PR watches were removed and it is no longer a member of any query watch that still exists). Its stored events stay until retention.
+
+### PR status
+
+Each stored PR has a status:
+
+- `active`: polled normally.
+- `terminal`: seen `merged` (final) or `closed`. `terminal_at` is the local time the snapshot that saw the PR terminal was committed (a PR merged long before `watch add` gets the full `expiry.after_terminal` from first sight). A closed PR keeps its row (digest included) for `expiry.after_terminal` after `terminal_at`. When an enumeration lists a closed PR's row as `open` (the query's open listing, or a per-PR repo listing), the PR is reactivated: `status` becomes `active`, `terminal_at` is cleared and `rebaseline` is set; its next snapshot replaces the digest and emits only `pushed` (when the head changed), `merged` or `closed`, and comments, reviews and CI changes made while it was closed are not reported. Repos that hold a terminal-closed per-PR PR inside the expiry stay in the per-PR listing step of the Poll cycle. A terminal PR gets no snapshots and is never `unreachable`.
+- `unreachable`: `failures.unreachable_after` consecutive counted per-PR failures (Failures). Snapshotted only on its host's full pass, and it clears on the first success. Whole-host failures never change PR status. An `unreachable` PR never expires by itself (a deleted repo stays visible until its watch is removed, `list --status unreachable` shows it, and `post-poll` named it once); it costs one snapshot per full pass.
+
+A terminal PR's row (digest included) is deleted `expiry.after_terminal` after `terminal_at`, and so are the watches that only referred to them (a per-PR watch ends; a member is dropped). The deletion happens in `prune` (so up to a day after the expiry). The expiry predicate (`terminal_at` older than `expiry.after_terminal`) is evaluated inside the transaction that deletes the row, in `prune` per row and in `watch add`: `watch add` of a PR whose row satisfies it treats the row as absent, deletes it and baselines the PR as new in one transaction (so a re-add never lands on a row `prune` is about to delete).
+
+### Untrusted text
+
+pr-watch stores and prints no free text from a host: no comment body, title, description or check output. The only host text it handles is one-line: a login, a file path, a check name and a `blocked_by.detail`. forgectl has already replaced control characters and bidi marks in them with `<U+XXXX>` markers; pr-watch passes them through, marks them `x-untrusted` in the schemas, and never puts them in argv or environment variables (hooks receive them on stdin only). Anything that needs the text reads it through forgectl by id (`comments`, `reviews`). Consumers must treat the login, path, check-name and detail fields as untrusted. The one other host text that can appear is the `message` of an error (the error envelope, `lower_error.message`, `log.jsonl` messages); it is forgectl's sanitized one-line text, truncated to 256 characters and marked `x-untrusted` in the schemas, and it is never put in argv or environment.
+
+Every host-derived one-line field (login, path, check name, `blocked_by.detail`) is truncated to 256 characters at a marker boundary (never inside a `<U+XXXX>` marker) with a trailing `...` kept inside the limit, before it is stored or validated (keys and `seen` are computed from the full sanitized value first); truncation never fails a snapshot or a commit; keys and `seen` use ids and hashes of the full value, so truncated values cannot collide into one check. A truncated `path` is not usable for matching. A marker `<U+XXXX>` is not proof that a character was removed (an author can type it); consumers match check names exactly with forgectl's `required` flag and never by substring. The CLI's human output replaces any remaining C0, C1 or ESC character in every host-derived string (defense in depth).
+
+## Detection
+
+### Poll cycle
+
+`poll` is the only command that contacts a host. Cron or a caller runs it; `events`, `list`, `show` and `watch` never do, except the per-PR `watch add`'s baseline (see `watch add`). One cycle:
+
+1. **Preflight.** Resolve forgectl once (absolute `PATH` entries only), check its version, load the host list (`whoami`, cached `hosts_ttl`) (Failures).
+2. **Enumerate, one host at a time.** (a) Query watches: for every host in scope that some query applies to, one `forgectl prs --host <h> --author me --state open --limit 1000 --json`. `--repo` filters are applied client-side to the host's list (forgectl rejects `--repo` with `--host`, so no `--author me --repo` call is made). A listing with `complete: false` (more than 1000 open PRs, or a cut) is processed for the PRs it lists, reported as `hosts.<h>.incomplete_listing: true`, and never used to conclude that a member left the set. (b) Per-PR watches: for every repo that has a per-PR watch whose PR is `active` or terminal-closed inside `expiry.after_terminal`, one `forgectl prs --repo <id> --state all --updated-since <w> --limit 1000 --json`, where `w` is the repo scope's `watermark` minus `poll.overlap`. The `scopes` row for a repo is created by the first listing: while it does not exist, `w` is the smallest `snap_updated_at` among the repo's `active` or closed-inside-expiry per-PR rows that have a digest (minus the overlap; a repo whose rows have no digest is not listed this cycle, trigger (a) covers them). Every listing writes the new watermark in its own transaction (State, transaction 1): the largest listed `updated_at`, or the old value when the listing is empty; a listing that failed writes nothing. A `complete: false` listing is safe to write because the same transaction marks every `active` per-PR row of that repo as changed (`listed_updated_at` becomes the larger of its value and `snap_updated_at` plus one microsecond), so trigger (b) snapshots them all and the marks survive a crash, deferral, a pause and low water. A `scopes` row is deleted by the first cycle in which no `active` or closed-inside-expiry per-PR row has that `repo` (a renamed repo's old row goes this way, and the new name starts as a new scope). Hosts are listed one at a time, never in one call; the snapshots of different hosts then run in parallel pools after all listings.
+3. **Apply listings** (inside the transaction of each listing, State transaction 1). Items are matched to stored rows by `pr_id` only (an item whose `pr` equals a stored `pr` but whose `pr_id` differs is another PR and is ignored unless it makes a new member). For every listed item with a stored row: `listed_updated_at` becomes the larger of the old value and the item's `updated_at`, and the stored `pr` and `repo` are replaced by the item's. A listed open item that matches a query watch becomes a member or resets `left_count` (Watches, owners and members); a stored row that is `terminal` with kind `closed` and is listed `open` is reactivated (PR status). A listed item with no stored row that matches no query is ignored. Before inserting a source the transaction verifies that the watch still exists.
+4. **Choose snapshots.** Only `active` rows are chosen by (a) to (e); only `unreachable` rows by (f); a `terminal` row is never chosen (a closed one becomes `active` first by reactivation). An eligible PR is snapshotted once per cycle when any of these holds: (a) it has no digest or `rebaseline` is set (a member just found, added with `--no-baseline`, or reopened); (b) `listed_updated_at` is greater than `snap_updated_at`; (c) it is unsettled (State) and `ci_stuck` is false; (d) one of its sources has `left_count` 2; (e) its host's full pass is in progress and the PR is not done for the pass (Pacing and backoff, Full pass); (f) it is `unreachable` and the same full-pass condition holds. Order: (b), (d), (a), (c), then (e), (f); while a pass is in progress with a (e) or (f) row waiting, group (c) takes at most three quarters of `poll.max_snapshots` per host; inside a group, oldest `last_polled_at` first. The cycle stops starting snapshots for a host after `poll.max_snapshots` of them (default 40; 0 means unlimited; `--full` ignores it) and for all hosts after `poll.max_duration` (default 15m): the report has `truncated: true` and `deferred: n`; deferred PRs keep their triggers (all are persisted) and go first next cycle. `snap_updated_at` is set to the larger of the snapshot's `updated_at` and the `listed_updated_at` read when the snapshot started. A changed-PR mark is never separate from a successful commit: the triggers are persisted comparisons, so a failed or crashed snapshot is retried next cycle without any extra mark.
+5. **Snapshot.** `forgectl snapshot <pr> --json` through a pool of `poll.concurrency` workers per host (Pacing and backoff), each PR under its own lease (Locks and commit). Each result is classified (Failures), then turned into a digest and diffed against the stored one (Digest, Events). Every forgectl call has a wall-clock deadline of `forgectl.timeout` plus 10 seconds. The read loop stops at the output cap and at the deadline; the child's process group gets SIGTERM, then SIGKILL after 2 seconds, only while its leader is unreaped. The result is the local code `killed` (retryable per PR, Failures). `compare` has the same deadline. Before any diff the poll compares `snapshot.pr_id` with `prs.pr_id` (Failures, `pr_id_changed`).
+6. **Commit.** All events and the new digest of one PR are stored in one compare-and-set transaction (Locks and commit); the sequence numbers are assigned inside it. A crash before commit loses nothing and repeats the work; after commit the events are durable.
+7. **Hooks.** After each PR's commit, its `on-<event>` hooks are queued to a bounded pool inside the poll process (Hooks); the poll exits when the pool drains.
+8. **Report and housekeeping.** The poll report is printed; `post-poll` fires when `failed` names a scope, a host or a PR that was not already `unreachable` at the start of the cycle, any `hosts.<h>.errors` is non-empty, or a PR became unreachable (its payload counts exclude itself; an already `unreachable` PR that fails again is in `failed` but never alone causes `post-poll`); `prune` work (retention, expiry) runs at most once a day at the end of a `poll`.
+
+A poll never writes to a host.
+
+### Locks and commit
+
+- A lease is per PR, taken when that PR's snapshot starts (not for all PRs up front) and released at its commit or failure. Row: holder pid, start time, boot id (`/proc/sys/kernel/random/boot_id`, or the boot time on macOS), expiry. The expiry is `3 x forgectl.timeout` (6 minutes by default), renewed after each forgectl call by the worker. A lease is taken over when its holder is dead (pid, start time and boot id do not verify) or it is expired, whether or not the holder is alive: takeover of a live holder is safe because every commit is a compare-and-set. Dead and expired leases are deleted by `prune`. There is no per-query lease: a query listing writes only through one transaction.
+- Every digest write is a compare-and-set: `UPDATE prs SET ... , rev = rev + 1 WHERE pr_id = ? AND rev = ?` inside `BEGIN IMMEDIATE`, with the check that at least one `sources` row for the PR still exists. If either fails the transaction is rolled back, its events are discarded, `prs.skipped_conflict` is counted and nothing is committed. A poll and a `watch add` baseline may therefore both snapshot the same new PR; the second write is discarded. `watch add` and `watch remove` take no lease. `watch remove` of the last source drops the row; a commit in flight for it is discarded by the check. Inside the same transaction the sources removed by the membership rule are deleted and each event's `labels` and `watches` are read (Watches, owners and members); the transaction also verifies that the snapshot's `pr_id` equals `prs.pr_id`. A snapshot that shows `closed` is discarded (no commit, no counter; its persisted trigger retries it) when the row's `listed_updated_at` at commit is larger than the snapshot's `updated_at`, because a listing has already seen a newer state, so a concurrent poll cannot make a reopened PR terminal.
+- A PR whose lease is held by a live other poll counts as locked. **`already_running`** is defined here once: `already_running: true` is reported when at least one PR needed a snapshot and every such PR was held by a live other poll's lease; then `prs.skipped_locked` is the only non-zero counter and the report has the full shape.
+- `poll.max_duration` (default 15m) stops new snapshots (Poll cycle, step 4).
+
+### What is polled
+
+The cheap trigger is `updated_at` through `prs`. It is reliable for new comments, reviews, pushes, labels, review requests and draft changes, and blind to check completion, thread resolution (GitHub) and, on GitLab, approvals, finished CI jobs and bot-note edits (spikes A and B). That is why an unsettled PR (State) is snapshotted on every cycle until it settles or becomes `ci_stuck` (Poll cycle, step 4 (c)), and why a periodic full pass exists. A storm of unsettled PRs is bounded by `poll.max_snapshots`. A change that only the full pass can see (a GitLab approval, for example) can therefore be reported up to `poll.full_every` cycles late; the report and `show` print `last_full_at`.
+
+### Digest
+
+The digest holds exactly what the diff compares: `head_sha`, `state` (`open`, `closed`, `merged`), `draft`, `mergeable` (shown in `show`, no event), `blocked_by` (sorted codes as forgectl prints them, a code is `{code}` or `{code: other, detail}`, `detail` kept truncated), `ci` (`state`, `head_sha` (forgectl's `ci.head_sha`), `hold` (the number of consecutive snapshots that reported the same new state, 0 when none), `hold_to` and the `checks` map of the **counted** checks only; uncounted checks are neither stored, diffed nor reported), `review_decision` and `approvals_at_head` (`null` is unknown, never zero), `reviewers` (keyed by the reviewer key: `id` when forgectl gives one, else `login:` plus the lowercased login (forgectl's `login` is never null in `latest_by_reviewer`); per key `state`, `commit_sha`, `at`, `can_push`), `seen: {comments, reviews}` (sets of ids; ids are unordered; a set, never a watermark), `pushed_at`, `merged_head_sha`, `merge_commit_sha` and `baselined: {reviews, threads, ci}`. The diff reads the digest and the row's `rebaseline` flag, nothing else; every other stored value is a column of its own (State). No body, title, URL, branch name or any text beyond the one-line fields.
+
+Checks are keyed by the first 32 hex characters of sha256 of the full sanitized `name`, a NUL and `url` (hashed before truncation); the digest stores `{name (truncated), state}` per key, never the URL, at most 500 keys (an overflow count beyond).
+
+Part map. PR object (always present): `head_sha`, `state`, `draft`, `mergeable`, `blocked_by`, `pushed_at`, `merged_head_sha`, `merge_commit_sha`. Part `reviews`: `seen.reviews`, `reviewers`, `review_decision`, `approvals_at_head`. Part `threads`: `seen.comments`. Part `ci`: `ci`. The part `review_requests` and `teams_visible` are not used. The schemas are pinned to a forgectl version in `tests/`.
+
+Parts forgectl lists in `incomplete` (`reviews`, `threads`, `ci`; `review_requests` is not used and is ignored if forgectl lists it) are neither compared nor overwritten: absence from an incomplete part means nothing, and no event of a part is emitted from a snapshot where that part is incomplete. A PR whose list exceeds forgectl's caps (more than about 5000 comments or reviews, or a GitLab fork pipeline) therefore never produces events of that part; this is permanent and visible. The row keeps `incomplete` as a map part to the number of consecutive snapshots in which it was incomplete. `list` and `show` print `incomplete` (array of part names) and `incomplete_snapshots` (max count); the poll report has `prs.incomplete` (database-wide current count of PRs with a part incomplete at least `failures.unreachable_after` snapshots in a row) and `post-poll` has `degraded` (the same count). `log.jsonl` gets a `part_incomplete` record (`pr_id`, `pr`, `part`, `snapshots`) written once when the count reaches `failures.unreachable_after`.
+
+A digest is bounded: `seen` holds at most the ids forgectl can list (50 pages per list), checks at most 500.
+
+### State
+
+Everything pr-watch persists is in `state.db` (Files). Every persisted value lives in exactly one column of the tables below, each with its writer (Transactions). Tables:
+
+- `meta`: `store_id`, `schema_version`, `pruned_through_seq` (highest seq ever deleted, 0 at creation), `last_prune_at`, `last_poll_finished_at`, `hosts_cache` (JSON list of `{host, backend, in_scope}` and `fetched_at`).
+- `hosts`: `host`, `backend`, `poll_count_since_full`, `full_pass_started_at`, `last_full_at`, `last_enumerated_at`, `paused_until`, `pause_step`, `low_water_until`.
+- `scopes`: `repo`, `watermark` (host time; created by a repo's first listing, deleted when no per-PR row refers to the repo).
+- `watches`: `id`, `kind` (`pr` or `query`), `key` (the Watch key), `created_at`; `owners` (watch, owner); `labels` (watch, owner, label); `sources`: `pr_id`, `watch_id`, `left_count` (0 to 2; query sources only, Watches, owners and members); `leases`: `pr_id`, holder pid, start time, boot id, `expires_at`.
+- `events`: `seq` (INTEGER PRIMARY KEY AUTOINCREMENT), `id`, `type`, `pr_id`, `pr`, payload JSON, `detected_at`, labels JSON.
+- `prs`: `pr_id`, `pr`, `repo`, `host`, `status` (`active`, `terminal`, `unreachable`), `terminal_at`, `terminal_kind` (`merged`, `closed`), `rev` (integer, +1 on every digest write), `digest` (JSON, or null before the baseline), `snap_updated_at` (host `updated_at` of the last committed snapshot), `listed_updated_at` (largest host `updated_at` an enumeration reported for the PR), `last_polled_at` (last committed snapshot), `last_attempt_at`, `failure_count`, `last_failure_code`, `incomplete` (JSON map part to consecutive-snapshot count), `unsettled_since`, `rebaseline` (boolean; set by reactivation, cleared by the next snapshot commit), `baselined_at`.
+
+Foreign keys: `owners`, `labels` and `sources` rows are deleted with their watch, `sources` with their PR (`ON DELETE CASCADE`), and a PR row is deleted in the same transaction as its last source, so no orphan can exist.
+
+Definitions. A **source** is a row of `sources`: a per-PR watch, or a query watch that includes the PR. A PR is **unsettled** when `ci.state` is `pending`, `ci.hold` is above 0, or `blocked_by` holds `mergeability_unknown`. `unsettled_since` (local time) is set by the snapshot commit when the PR becomes unsettled and it is null, is reset to the commit time whenever `head_sha` changes, and is cleared when the PR is settled. **`ci_stuck`** is true when the PR is unsettled and `now - unsettled_since` is at least `ci.pending_max_age` (default 6h); a stuck PR is snapshotted only on full passes. `list` and `show` print `ci_stuck`. `baselined_at` is the commit time of the last snapshot that baselined any part silently (first sight, a reopen, a late part baseline); it is null before the first snapshot. **changed**, in `watch add` results, is true when any stored fact changed.
+
+Transactions. (1) Enumeration of one scope: `listed_updated_at`, new member rows and sources (after verifying the watch exists), `left_count`, reactivations (with `rebaseline`), `hosts.last_enumerated_at`, the repo watermark and the incomplete-listing marks (Poll cycle, step 2), and deletion of `scopes` rows no row refers to. (2) Snapshot commit: events (with labels and watches read here), digest, `rev` + 1, `snap_updated_at`, `last_polled_at`, `failure_count = 0`, `incomplete`, `status`, `unsettled_since`, `baselined_at` (set when this commit baselined any part silently, including a reopen), `rebaseline = 0`, and the removal of sources (Watches, owners and members). (3) Failure: `failure_count`, `last_failure_code`, `last_attempt_at`, `status` (the status of a `terminal` row is never changed by a failure). (4) Host state (`paused_until`, `pause_step`, `low_water_until`, `poll_count_since_full`, `full_pass_started_at`, `last_full_at`) is written after the host's cycle. (5) `meta.last_poll_finished_at` is written by the poll's last step only when the poll was not restricted (`--pr`, `--repo`), was not `already_running`, ended with exit 0, was not interrupted and observed something (at least one listing or snapshot succeeded, or the store has no watches); `truncated` polls count. A poll that observed nothing (every host paused, every call failing per PR or per scope) leaves it unchanged, so a stale value is the blindness signal. It is the one freshness field (a poll that failed a whole host does not move it); a fresh value still does not mean every host or PR was observed (Consumer notes). (6) Hooks write only `log.jsonl`.
+
+### Events
+
+An event is one detected difference. The types and the exact rule for each:
+
+| Type | Fires when | Extra fields |
+|---|---|---|
+| `pushed` | `head_sha` differs from the stored one. Never keyed on `pushed_at` (a normal push reports a committer date up to minutes early). | `from_sha`, `to_sha`, `forced` |
+| `comment` | A general comment id (`gh:ic:`, or on GitLab a non-system note `gl:n:` of a discussion without a position) is not in `seen.comments`. Edits, minimizing and deletions are not events. | `comment_id`, `thread_id`, `author` |
+| `review_comment` | An inline comment id (`gh:rc:`, or a non-system note of a positioned GitLab discussion) is not in `seen.comments`. | `comment_id`, `thread_id`, `author`, `path`, `line`, `side`, `commit_sha` |
+| `review` | A review id (`gh:r:`) is not in `seen.reviews`. GitHub only; GitLab has no review objects and never emits it. | `review_id`, `author`, `review_state` |
+| `approved` | A reviewer's `latest_by_reviewer` entry has state `approved` and the stored entry for that reviewer key was not `approved`, or its `at` differs, or (both `at` null) its `commit_sha` differs. One event per reviewer per snapshot. A new approval after a push (same state, new `at` or `commit_sha`) fires again. The event is not proof that the head is approved: on GitLab `commit_sha` and `approvals_at_head` may be null (unknown), and `can_push` says whether the approval counts; consumers that merge on it read forgectl. | `reviewer`, `commit_sha`, `at`, `can_push`, `approvals_at_head` |
+| `changes_requested` | Same key as `approved` with state `changes_requested`. A dismissal (state `dismissed`) is not an event. | `reviewer`, `commit_sha`, `at`, `can_push` |
+| `ci` | `ci.state` changes between `pending`, `passing`, `failing` and `none` (a change involving `none` after the hold below). One event per change. | `from`, `to`, `checks`, `checks_more`, `counts`, `for_head` |
+| `ready` | `draft` goes from true to false. It does not mean mergeable; consumers read `ci` and `blocked_by`. `from_blocked_by` and `blocked_by` are the codes in the stored digest before the snapshot and after it, each a sorted array in the Digest form. | `from_blocked_by`, `blocked_by` |
+| `merged` | `state` becomes `merged`. | `merged_head_sha`, `merge_commit_sha` |
+| `closed` | `state` becomes `closed` (not merged). | none |
+
+Common fields on every event: `id`, `seq`, `type`, `pr`, `pr_id`, `repo`, `detected_at`, `occurred_at` (below, else `null`), `labels` (the union set), `head_sha` (the digest's head after the snapshot, the head at detection, not the head a comment was made on), `watches` (the ids of the watches that include the PR). `detected_at` is the time of the commit transaction; `labels` and `watches` are read inside that transaction (a removed watch is not listed, a just-added one is); `thread_id` is forgectl's thread id for the comment, `null` where forgectl gives none (a `gh:ic:` general comment). `author` and `reviewer` are `{id, login, is_bot}`: `id` from forgectl (nullable, opaque; consumers compare ids, not logins), `login` may be `null`, `is_bot` may be `null`; a consumer must treat `is_bot: null` as not a human. `review_comment` also carries `commit_sha` (the thread's anchor commit, nullable). The event objects are the closed shape of this version; consumers must ignore unknown fields and types and must not validate strictly.
+
+`occurred_at`:
+
+| Type | `occurred_at` |
+|---|---|
+| `comment`, `review_comment` | the comment's `created_at` |
+| `review` | `submitted_at` |
+| `approved`, `changes_requested` | the entry's `at` |
+| `pushed` | the snapshot's `head.pushed_at` (a committer date, may be early) |
+| `merged` | `merged_at` |
+| `closed` | `closed_at` |
+| `ci`, `ready` | `null` |
+
+`checks` lists in the `ci` event the checks whose key appears, disappears or changes state between the stored and the new digest, ordered by name then key, at most 20 (`checks_more` for the rest), each `{name, from, to}` with null `from` or `to` for a check that appears or disappears; the array may be empty. The event also carries `counts: {passing, failing, pending}`; `counts` and `checks` range over the counted checks (Digest); `for_head` is the new `ci.head_sha` (forgectl's, which may differ from `head_sha` for a GitLab merged-results pipeline). `passing` means no counted registered check is failing or pending and one passed; it does not say every expected check registered, and a consumer that gates an action pins the head and re-reads `ci` through forgectl. `forced` is computed from `compare <pr> --from <stored head> --to <new head>` only when `detect_force_push` is true: `diverged`, `behind` or `unavailable` is `true`; `ahead` is `false`; `identical`, exit 20 (`too_large`) or a failed call is `null`; the call returns the diff on `ahead` (cost, bounded by `forgectl.max_output_mib`). `detect_force_push` defaults to false; consumers that need `forced` set it per repo.
+
+Rules that apply to all types:
+
+- **Baseline.** The first snapshot of a PR (a per-PR `watch add`, or the first snapshot of a query member) fills the digest and emits nothing, with one exception: a PR already `merged` or `closed` at that moment emits that one event once, and then expires normally. Baselines are per part: the digest keeps `baselined: {reviews, threads, ci}`; a part that is complete in a snapshot and not yet baselined is filled silently and flagged; a part listed in `incomplete` stays unbaselined and is baselined silently by the first snapshot where it is complete. A snapshot of a row with `rebaseline` set follows the same silent rule, with the exceptions of `pushed`, `merged` and `closed`. Comments and reviews that exist at the baseline are never events (consumers read current state through forgectl on first sight).
+- **Several changes in one snapshot** produce several events, in this fixed order: `pushed`, `review`, `comment`, `review_comment`, `approved`, `changes_requested`, `ci`, `ready`, then `merged` or `closed`; inside a type by ascending `(created_at, id)` of the source item (`approved` and `changes_requested`: by reviewer key, then `at`; `ci` and `ready` are single). No order holds across PRs except by `seq`.
+- **Comment unit.** The event unit is a comment id: `gh:ic:` fires `comment`; `gh:rc:` fires `review_comment`; on GitLab each non-system note (`gl:n:`) of a discussion fires `comment` when its discussion has no position and `review_comment` when it has one, so a reply in an old discussion fires. `thread_id` is the thread's id. `seen.comments` holds every comment id found in `threads` (all kinds); `seen.reviews` holds `gh:r:` ids. A comment first seen with `minimized: true` is added to `seen` without an event; later minimizing of a seen comment is not an event.
+- **CI hold.** A change of `ci.state` in which either the stored or the new state is `none` is held: the digest keeps the previous `ci` (`state`, `head_sha` and `checks`) and sets `ci.hold` to the number of consecutive snapshots that reported the same new state (1 for the first) and `ci.hold_to` to that state; the change is committed, and its `ci` event fires, at the snapshot where `ci.hold` would exceed `ci.settle_polls` (default 1: the second consecutive snapshot; 0 means no hold). A snapshot that reports the stored state, or another state, resets `hold` to 0 (and starts a new hold if that other state involves `none`). A change between `pending`, `passing` and `failing` is never held. While `ci.hold` is above 0 the PR is unsettled (snapshotted every cycle) and `list` and `show` print `ci_state: null` and `ci_stale: true`. Otherwise `ci_state` is the digest's `ci.state`, `ci_stale` is false and `ci_head_sha` is the digest's `ci.head_sha` (forgectl's, which may differ from `head_sha` for a GitLab merged-results pipeline; that is information, not staleness). `passing` is never inferred from `none`. No `ci` event is emitted from a snapshot whose `ci` part is incomplete (the stored state is frozen).
+- **GitLab.** `review` never fires. `approved` and `changes_requested` come from `latest_by_reviewer` on both hosts. `approvals_at_head` is `null` where the project does not reset approvals on push, which means unknown. A GitLab `outdated` value is not used. On GitLab `changes_requested` has `at` and `commit_sha` null, so its key never changes while the state stays; it fires only on a state transition, and a second request for changes after a push is not an event.
+- **Terminal.** After `merged`, a PR is final. After `closed`, a reopen is a silent re-baseline except for `pushed` (PR status).
+- **No per-snapshot event cap.** forgectl bounds every list to 50 pages (about 5000 items), so the events a PR can produce from ids are bounded; the cost of a flood is hook starvation, handled by the per-PR sub-cap (Hooks), and `events --limit` paging.
+
+### Pacing and backoff
+
+- **Host pause.** A `rate_limited` failure with `retry_after` pauses that host until then, but never for more than 1 hour (a larger `retry_after` is clamped; the host is probed again after the clamp). Without `retry_after` the pause is 1 minute and doubles on each further `rate_limited` result up to 15 minutes (`pause_step` is persisted in `hosts`); a success resets it. A paused host is skipped (reported as `paused_until`), other hosts continue; the host's remaining queue and listings are cancelled for this cycle.
+- **Low water.** At cycle start a host is limited iff `now < hosts.low_water_until`. A limited host is still listed and snapshots only groups (a) to (d) of the Poll cycle; groups (e) and (f) wait (a full pass in progress stays in progress). After the host's cycle, if the lowest numeric `rate_limit.remaining` of that host's calls is below `poll.host_low_water` (default 100), `low_water_until` is set to that reading's `reset_at`, else it is cleared. `--full` overrides low water, not a host pause. A host that reports `null` (a self-hosted GitLab without limit headers) is never limited.
+- **Full pass.** `poll_count_since_full` increases by one for every unrestricted cycle (no `--pr`, no `--repo`) in which the host was listed and was not paused. When it reaches the host's `full_every`, or `--full` is given, and no pass is in progress, the cycle sets `full_pass_started_at` to now and resets the counter. A pass is in progress while `full_pass_started_at` is set; it ends (and `last_full_at` is set to now, `full_pass_started_at` cleared) in the first cycle after which every `active` or `unreachable` row of the host is done for the pass: its `last_polled_at` or `last_attempt_at` (a failed attempt counts) is not before `full_pass_started_at`, so a PR that fails every time is tried once per pass and cannot keep a pass open. `--pr` and `--repo` polls never count and never start or end a pass.
+- **Pool.** `poll.concurrency` workers per host: `hosts.<h>.concurrency`, else `poll.concurrency` if set, else 4 on GitHub and 2 on GitLab (backend from `whoami`). The same holds for `full_every` (6 on GitHub, 12 on GitLab).
+- **Cost accounting.** `requests_estimate` is `snapshots x 7` (GitHub) or `snapshots x 21` (GitLab) only (no page count; `compare` and `show` calls are not counted), an estimate. A GitHub snapshot is 5 to 8 requests (5 when forgectl's `hosts.<host>.me` is set); a GitLab snapshot was 19 to 22 requests and 11 to 14 seconds in the design spikes.
+
+### Failures
+
+forgectl results are classified by exit code and error `code`. One table says what each outcome means for three kinds of call: a PR call (`snapshot` or `show` of one PR), a repo listing (`prs --repo`) and a host call (`prs --host`, `whoami`). Every code not listed is the `internal` row.
+
+| Outcome | A PR call | A repo listing | A host call |
+|---|---|---|---|
+| success (exit 0 object) | commit; `incomplete` parts as in Digest | State transaction 1 | State transaction 1 |
+| `rate_limited` (exit 12, with or without `retry_after`) | host pause (Pacing and backoff), no counter, no status change; the host's remaining queue and listings are cancelled for this cycle and PRs keep their persisted triggers; exit 0 | the same | the same |
+| `auth_required`, forgectl `tool_missing` (`details.install`) | whole host this cycle: the host is in `failed` (kind `host`), the host's remaining queue and listings are cancelled, no counter, PRs retried next cycle; exit 12 | the same | the same |
+| `host_rejected`, `unsupported_host_version`, `wrong_host_response` | `host_rejected` and `unsupported_host_version`: that PR's failure: counter +1, `last_failure_code`, a `snapshot_failed` record, a prominent report entry and a `post-poll` mention; the host continues. `wrong_host_response`: whole host this cycle, as `auth_required`, plus a `log.jsonl` error "the token may have reached another host and should be rotated" | whole host, as `auth_required` (`wrong_host_response` also logs the error); exit 12 | the same |
+| `network_error`, `upstream_error`, unparseable stdout, a missing required field (local `contract`), `internal`, any unknown code, a negative return code, 137 or the call deadline (local `killed`), the output cap (local `too_large`) | retryable per PR: counter +1, digest kept, tried next cycle (`too_large` also takes the fallback below) | the repo scope failed this cycle (`failed` kind `repo`, watermark and triggers untouched, no counter, its PRs are still reached by their triggers and by full passes); exit 0 | the host listing or `whoami` failed this cycle (`failed` kind `query` for the open listing, `host` for `whoami`; no counter; the Host list rule for `whoami`); exit 12 |
+| `not_found` (exit 10), `permission_denied` (exit 12) | permanent for the PR: counter +1 (`not_found` means unknown, never closed) | as the previous row (scope failed, no counter; the PRs then fall to the full pass where the PR column applies) | `permission_denied` fails the host listing as in the previous row; `not_found` is `internal` |
+| `unknown_host` (exit 20) | permanent: counter +1 | scope failed, no counter | host failed (kind `query`); exit 12 |
+| `pr_id_changed` (local: the snapshot's `pr_id`, or the `pr_id` of the over-cap fallback's `show`, differs from the stored row's, because a renamed or recreated repo name now names another PR) | no commit, `pr` is not refreshed, counter +1, a `snapshot_failed` record | not applicable | not applicable |
+| exit 128+N while pr-watch was not signaled | interrupted: no counter, retried next cycle, the poll continues | scope or host not listed this cycle, no counter, exit 0 | the same |
+| exit 2 (`usage`, `config_invalid`, `invalid_pr`) | a stored reference was rejected, which is a bug: counted as the `internal` row plus a `contract` warning | the same | forgectl's own `config_invalid` stops the poll with exit 12 `host_failed` |
+| forgectl missing, not executable or `--version` failing | tool: exit 12 `tool_missing` before any work | not applicable | not applicable |
+| version below the minimum | tool: exit 12 `tool_too_old` | not applicable | not applicable |
+
+- **Counters.** Only the PR column rows that say counter +1 change `failure_count` (and `status` after `failures.unreachable_after`); a success clears it; `rate_limited`, `auth_required` and every listing failure never change a PR. A whole-host failure cancels the rest of that host's queue so the failing call is not repeated per queued PR. **Exit 12 from `poll`** is exactly: a row above marked exit 12, or forgectl missing or too old; pause, low water, `truncated`, per-PR and repo failures and `incomplete_listing` are exit 0. `failed[].ref` is the canonical `pr` for kind `pr`, the repo id for `repo`, the host for `query` and `host`.
+- **Call deadline.** Every forgectl call has a wall-clock deadline of `forgectl.timeout` plus 10 seconds; the read loop stops at the output cap and at the deadline, and the child's process group gets SIGTERM, then SIGKILL after 2 seconds, only while its leader is unreaped (local code `killed`). `compare` has the same deadline; a `compare` that exits 20 `too_large` or fails gives `forced: null`.
+- **Over the output cap.** When a snapshot fails `too_large`, pr-watch calls `forgectl show <pr> --json` (the PR object only, no threads) for terminal-state detection only. It first compares `show.pr_id` with `prs.pr_id`: on a mismatch nothing is stored and the failure is the `pr_id_changed` row (counter +1). If its `state` is `merged` or `closed`, the PR's one `merged` or `closed` event is stored with `merged_head_sha` and `merge_commit_sha` from it, the row goes terminal, and only `state`, `merged_head_sha` and `merge_commit_sha` are written to the digest (a row without a digest gets the same minimal digest with `baselined` all false); nothing else is read, and no `pushed`, `ready`, `ci` or other event comes from this path. When the fallback stored a terminal state the counter is set to 0; in every other case the `too_large` failure counts (counter +1), so a still-open over-cap PR becomes `unreachable` and is retried on full passes, each costing one `show` extra.
+- **Version rule.** `MIN_FORGECTL` is a constant of the pr-watch release (for example `(0, 2)`), not a config key. Parse `^forgectl (\d+)\.(\d+)\.(\d+)$` once per process (poll and per-PR `watch add`) from `forgectl --version`; while the constant's major is 0 the found major and minor must equal it (patch is ignored; a 0.x minor may break the schema and the `contract` failure covers the rest), from major 1 the same major and a minor at least the constant's; anything else, an unparseable string or a non-zero exit is `tool_too_old` (`details.found` is the string or `unknown`).
+- **Resolution.** The `forgectl` executable is resolved once per process against absolute `PATH` entries only; the resolved path and the version are logged.
+- **Host list.** `whoami` is called per `hosts_ttl` (the host-call column of the table); exit 12 with an object is used (hosts in `errors` are failed this cycle); on a failed call the stale cache is reused with a warning, and with no cache the query watches are skipped this cycle and listed in `failed`.
+- **`unreachable`.** A PR becomes `unreachable` after `failures.unreachable_after` consecutive counted per-PR failures (default 5); it is snapshotted only on its host's full pass and clears on the first success. Whole-host failures never change PR status. PRs that became unreachable this cycle are named in `post-poll` (`unreachable: [{pr, pr_id, code}]`, at most 50), and `post-poll` fires when any occurred. A flap is not an event.
+
+A failure never produces an event. `closed` and `merged` are never inferred from a failure or from a PR vanishing from a list.
+
+### Signals
+
+On SIGTERM, SIGINT or SIGHUP, pr-watch stops starting work, sends SIGTERM to the forgectl and hook process groups it started (only while their leaders are unreaped), releases its leases, writes `poll_end` with `interrupted: true` and exits 128 plus the number; nothing partial is committed for a PR in flight. A forgectl child exiting 128+N while pr-watch itself was not signaled is an interrupted PR: no counter change, tried next cycle, the poll continues.
 
 ## Commands
 
-To be specified.
+All commands take `--json`, `--config PATH`, `--verbose`, `--quiet` (Global flags). Every command that prints a PR prints it in `#N` form.
 
-## Global flags
+### `watch add`
 
-To be specified.
+`pr-watch watch add <pr> [--label k=v]... [--owner O] [--no-baseline]`
+`pr-watch watch add --mine --open [--host H]... [--repo ID]... [--label k=v]... [--owner O]`
+
+Adds the owner's reference to the watch (creating it), and unions the labels. The query form only records the watch (and validates its filters): it never baselines, and the first `poll` finds and baselines its members silently; `--mine` and `--open` must be given together (exit 2 `usage` otherwise), and filters are validated as in Identifiers and compared case-insensitively. The per-PR form first matches the reference against stored rows (canonical `pr`, URL form, case-insensitive), and the stored row decides whether a host is contacted. Baseline iff the row has no digest and `--no-baseline` is absent:
+
+| Stored row before the call | Host contact | Result |
+|---|---|---|
+| none | one `forgectl snapshot <pr> --json` (it carries the canonical `pr` and `pr_id`); with `--no-baseline` one `forgectl show` instead, and the first `poll` baselines | `baselined: true` (false with `--no-baseline`); `events_emitted` is 1 if the PR was already `merged` or `closed`, else 0 |
+| a row without a digest (an earlier `--no-baseline`, or a member not yet polled) | one `snapshot`, unless `--no-baseline` is given again | baselined now; `events_emitted` as in the previous row |
+| a row with a digest (a member, another owner's watch, a concurrent poll) | none; only the source, owner and labels are added (compare-and-set discards a fetched snapshot) | `baselined: false`, `events_emitted: 0` |
+| a row past `expiry.after_terminal` but not yet pruned | treated as absent: deleted and baselined as new in one transaction (PR status) | as the first row |
+
+The write is a compare-and-set: if a row with a digest already exists (a member of a query watch, or another owner's watch, or a concurrent poll baselined it first), the fetched snapshot is discarded, only the source, owner and labels are added, and no events are emitted. An invalid reference exits 2 and a missing PR exits 10, recording nothing; a transient failure exits 12, recording nothing (so a retry is safe). A PR already `merged` or `closed` stores its one event now; `watch add` runs no hooks (a consumer reads the event through `events`), and a re-add after expiry stores the event again (consumers dedupe on `pr_id` and `merge_commit_sha`). The result always carries the PR (`pr`: the `pr_row` object, null for a query watch), so a consumer sees `state`, `status`, `terminal_at` and `terminal_kind` of an existing terminal row, for which no event is emitted. `cursor` is the events head read at the start of the same transaction as the write, so the event a merged or closed PR stores now (`events_emitted: 1`) is after it. It is for a consumer that has no stored cursor; a consumer that already holds a cursor ignores it (otherwise events between its last read and now are skipped); `created` and `changed` say whether anything was just made. Adding an existing owner and labels to an existing watch prints `changed: false` and does nothing else; a new owner on an existing watch adds the reference without a new baseline when the row has a digest. `--no-baseline` applies to the per-PR form only.
+
+### `watch remove`
+
+`pr-watch watch remove <pr> [--owner O]` and `pr-watch watch remove --mine --open [--host H]... [--repo ID]... [--owner O]`
+
+Removes only the named owner's reference (and the labels that owner added). Idempotent: when the owner holds no reference (including a PR that is not stored or whose watch expired) it exits 0 with `changed: false` and `reason: not_held` or `pr_unknown`; `pr_unknown` also prints a warning line on stderr and the result includes the resolved reference (`reference`), so a typo or a stale name is visible (consumers remove by `pr_id`). An invalid reference is still exit 2. The watch ends when its last owner is gone; PR rows with no remaining source are dropped with their digests; stored events stay until retention. Expiry removes owners' references without an event. Removing never contacts a host. A query watch is addressed by its exact filters (the key); there is no partial match.
+
+### `poll`
+
+`pr-watch poll [--pr <ref>] [--repo <id>] [--full] [--no-hooks] [--hook NAME=CMD]...`
+
+Runs one cycle (Poll cycle). `--repo <id>` limits snapshots and listings to that repo's per-PR scope plus the host listing's matching items (it advances only that repo's watermark; the host listing still writes `listed_updated_at` for all listed rows). `--pr <ref>` does no listing, forces that PR's snapshot, advances no watermark, and exits 10 when the PR is not stored (members count as stored); on a terminal-closed row it snapshots and reactivates it (silently, PR status) if the PR is open; on a merged row it exits 0 with `polled: false` (a merged PR is final); on an `unreachable` row it snapshots; under `already_running` the report prints `polled: false`. A restricted poll (`--pr` or `--repo`) never changes `poll_count_since_full` and never sets `last_poll_finished_at` (State). `--full` snapshots every active PR of the scopes it covers, ignoring the cheap trigger and `poll.max_snapshots`; `--no-hooks` stores events and skips hooks (for a catch-up run); `--hook <name>=<cmd>` (repeatable) adds a per-invocation hook to the configured ones (a static trusted string, never one built from event or host text): `NAME` must be one of the eleven hook names in the Hooks table (`on-<event>`, `post-poll`), else exit 2 `usage` with `details.kind: bad_hook`; `CMD` is a non-empty string of at most 4096 characters; the hook runs with timeout 30 and `async: true`. Exit 0 when the poll ran, including `already_running` and a partial result where every failed object was classified. Exit 12 as defined in Failures. `poll` is safe to run concurrently; a poll whose every needed snapshot is locked exits 0 with `already_running` (Locks and commit).
+
+### `list`
+
+`pr-watch list [--label k=v]... [--owner O] [--pr <ref>] [--status active|terminal|unreachable]`
+
+Prints the watches (id, kind, key or reference, owners, labels, `created_at`, and for a query watch the member count, `enumerated_at` and `pending_baseline`), the PRs (canonical `pr`, `pr_id`, status, state, draft, `ci_state`, `ci_head_sha`, `ci_stale`, `ci_stuck`, `head_sha`, `last_polled_at`, `last_full_at`, `incomplete`, `incomplete_snapshots`, failure count, `terminal_at`, `terminal_kind`, `baselined_at`, `baselined`, sources), `last_poll_finished_at` (time of the last unrestricted `poll` that ran to its end and observed at least one listing or snapshot, null if never) and per host `paused_until`, `last_enumerated_at`, `last_full_at`. Never contacts a host. `--status` filters PRs only; `--owner` and `--label` select watches, and the PRs shown are those with at least one source among the selected watches; `--pr` selects one PR; `hosts` lists every row of `hosts`. `enumerated_at` of a query watch is derived: the oldest `hosts.last_enumerated_at` over the hosts the watch lists, null while any is null or older than the watch's `created_at`; `pending_baseline` is the number of its members with no digest.
+
+### `show`
+
+`pr-watch show <pr>`
+
+One watched PR: its row, its watches and the digest summary (the same fields as in `list`, plus `blocked_by`, `review_decision`, `approvals_at_head`, the reviewers' latest states, and the counts in `seen`) and its most recent 20 events, oldest first. Exit 10 when the PR is not stored. `<pr>` is matched on the canonical `pr`, a URL or the `pr_id` of a stored row (Identifiers); each reviewer is printed with its reviewer `key`.
+
+### `events`
+
+`pr-watch events [--label k=v]... [--pr <ref>]... [--type T]... [--since CURSOR] [--limit N]`
+
+Prints events after the cursor, oldest first. Never contacts a host and never changes state (non-destructive: each consumer keeps its own cursor). Without `--since`, no event is returned and the cursor is the current head ("from now"). The result carries `events`, `cursor`, `gap`, `more` and `last_poll_finished_at` (time of the last `poll` that ran to its end and observed at least one listing or snapshot, null if never, so a consumer can tell "quiet" from "not polled"). `--limit` defaults to 100 (maximum 1000). `--label` is an AND filter over the labels stored on the event, and the three filter kinds (`--label`, `--type`, `--pr`) are ANDed with each other; `--type` is repeatable (OR); `--pr` is repeatable (OR): a reference is resolved through stored rows first; if no row matches, through the `pr` and `pr_id` columns of stored events (an event whose `pr` equals the reference supplies its `pr_id`, and then all events of that `pr_id` are returned, whatever name they were detected under), so a PR whose row expired still resolves while its events are retained. With repeated `--pr` an unresolvable reference is skipped, and exit 10 only when none resolves.
+
+- `seq` is an AUTOINCREMENT integer (deleted numbers are never reused). `meta.pruned_through_seq` is the highest deleted seq. `gap` is true iff the cursor's `store_id` differs, or its `seq` is greater than the head, or its `seq` is less than `pruned_through_seq`; a cursor equal to `pruned_through_seq`, or at the head after a quiet month, is no gap, and a cursor at 50 with an empty table and head 100 is a gap. The head is the AUTOINCREMENT high-water mark (`sqlite_sequence`), 0 on a new store. The head and the rows are read in one read transaction.
+- `cursor` in the result is the head read in that transaction when `more` is false (everything up to it was examined, so filters do not rescan), and the `seq` of the last returned event when `more` is true. With a gap and a backlog the same rules apply and the filters apply to the backlog. With a gap, the events from the oldest retained one are still returned (all of the current store when the id differs); the consumer must re-sync current state through forgectl and treat the events as possibly incomplete.
+- `--limit` outside 1 to 1000, an unknown `--type`, an invalid `--label` or a bad cursor is exit 2 (`code: usage`, `details.kind`: `bad_limit`, `bad_type`, `bad_label`, `bad_cursor`).
+- Output without `--json` is human text with no stability guarantee; tests and consumers use `--json`.
+
+### `label`
+
+`pr-watch label add <pr|--watch ID> k=v... [--owner O]` and `label remove <pr|--watch ID> k=v... [--owner O]`
+
+Adds or removes labels on a watch (a watch is named by its id, or by a per-PR watch's reference), owned by the owner (Identifiers). `label add` needs the owner to hold a reference (else exit 10, `details.kind: owner_not_held`) and a watch (a PR with no per-PR watch: exit 10, `details.kind: no_watch`); adding a label the owner already has is a no-op. `label remove` is idempotent like `watch remove`: an absent label, an owner that holds no reference, or a PR with no watch is exit 0 with `changed: false` (and `reason: not_held` or `no_watch` where it applies, with `watch` null); `label add` keeps exit 10. Labels already stored on past events do not change.
+
+### `prune`
+
+`pr-watch prune [--dry-run]`
+
+Deletes events older than `retention.events`, rows past `expiry.after_terminal`, and the watches and members that only referred to them (so expiry happens up to a day after `expiry.after_terminal`; the expiry predicate is evaluated per row inside the deleting transaction, PR status), and deletes leases that are expired or whose holder is dead (counted as `leases_deleted` in the result). It also runs at most once a day at the end of `poll`, and runs `PRAGMA wal_checkpoint(TRUNCATE)`.
+
+### `cron`
+
+`pr-watch cron install [--every D]` and `cron uninstall`. `cron install` writes one tagged block (paths are written single-quoted by pr-watch; the `. '<env_file>' &&` part is present only when `cron.env_file` is set):
+
+```text
+# pr-watch managed v1 every=5m
+PATH=<dirs>
+*/5 * * * * . '<env_file>' && '<absolute pr-watch>' poll --quiet
+# pr-watch managed end
+```
+
+A block starts at a line that is exactly `# pr-watch managed` or begins with `# pr-watch managed` followed by a space and ends at the next `# pr-watch managed end` line. A block whose end line is missing is never removed or replaced automatically: `cron install` and `cron uninstall` leave the crontab unchanged and exit 2 `usage` with the hint to remove it by hand. `previous_every` is null when the first line has no `every=`. The block has one entry. `--every` wins over `poll.interval_hint`; accepted forms: `Nm` where N divides 60 (`*/N * * * *`; `60m` is hourly) and `Nh` where N divides 24; anything else is exit 2. Validation: refuse any value containing a newline, `%`, quotes or `;`; paths without whitespace; `PATH` holds `~/.local/bin` and the absolute directory of the resolved `forgectl` only if it is owned by the user or root and not group- or world-writable; `cron.env_file` must be a regular file (not a symlink) owned by the user with no group or world permission bits, in a directory owned by the user and not group- or world-writable. The crontab read-modify-write holds an `flock` on `state/cron.lock` and re-reads before writing. The result prints `replaced` (true when a block existed and was replaced), `changed` (true when the crontab text changed; re-installing an identical block is `replaced: true`, `changed: false`), `previous_every` and `warnings`: `cron install` warns on stderr and in `warnings` when a `pr-watch poll` line exists outside the block. The harness's `awkit cron install` writes the same block and each replaces the other's.
+
+### `export`
+
+`pr-watch export [--since D] [--label k=v]... [--type T]... [--pr <ref>]...`
+
+Prints the stored events oldest first as JSON lines (each `schemas/event.json`), always JSON whatever the global flags. `D` is a duration (Time) and selects events detected within the last `D` (without it, every retained event); the three filters are those of `events` (a human who wants "what happened overnight" runs `export --since 1d`). pr-watch takes no external action, so it writes no `audit.jsonl` and `export` has no audit records to print.
+
+### Global flags
+
+`--json`, `--config PATH`, `--verbose`, `--quiet`, `--version`. `--dry-run` exists on `prune`; `watch add` and `watch remove` do not take it (they write only local state). `--yes` and `--actor` are not accepted: no command takes an external action or asks for a confirmation.
 
 ## Exit codes
 
-Reserved codes 0-21 follow design guide §4.2 (`../awkit-docs/design-guide.md`). Tool-specific codes (22+) and refusal reasons are listed here.
+| Code | Meaning |
+|---|---|
+| 0 | success (including `already_running`, a no-op, an idempotent removal and a clean partial poll) |
+| 1 | unexpected or internal error |
+| 2 | usage error (bad flag, bad cursor, invalid PR reference, invalid config, owner required) |
+| 10 | not found (PR not stored or not watched, no watch to label, PR missing on the host) |
+| 12 | failed for a reportable reason (host unreachable or failing and a whole host failed leaving scopes unlisted, forgectl missing or too old, a forgectl result violating the contract in a single call, store too new, state unsafe) |
+| 20 | refused (a forgectl refusal passed through, for example `unknown_host`, with its `reason` and `lower_error`) |
 
-To be specified.
+Codes 11, 13 to 19 and 21 are unused: pr-watch has no pre-hooks, no pending store and no session. A signal ends the process with 128 plus its number (Signals).
 
-## `--json` outputs
+## Output by exit code
 
-Schemas live in [schemas/cli/](../schemas/cli/).
+- **0:** the command's result object (`schemas/cli/<command>.json`); with `--json` always valid JSON on stdout.
+- **12 from `poll`:** the normal poll report (`failed` lists what was left unchecked) and, on stderr, one line per error. Exit 12 for forgectl missing or too old, `store_too_new` or `state_unsafe` prints the error envelope instead.
+- **Any other non-zero exit:** the error envelope on stdout (and a text line on stderr).
 
-To be specified.
+### Error envelope
+
+`{"error": {"code": "...", "message": "...", "reason": "...", "details": {...}, "lower_error": {...}}}` (`schemas/cli/error.json`). `code` is one of `usage`, `config_invalid`, `invalid_pr`, `not_found`, `host_failed`, `tool_missing` (with `details.install`), `tool_too_old` (with `details.required` and `details.found`), `contract` (a forgectl result violated the documented shape; per call, never exit 12 for a poll alone), `store_too_new` (a database from a newer version, exit 12), `state_unsafe` (exit 12, Files), `refused` (with `reason`), `internal`. `lower_error` carries forgectl's own `code`, `reason`, `retry_after` and `message` when a forgectl call caused the error. Messages are sanitized one-line text.
+
+### Result objects
+
+The result objects of `watch add`, `watch remove`, `label add|remove`, `prune`, `cron install|uninstall`, `list` and `show` are defined by `schemas/cli/<command>.json`, which are normative for their field names. Rules that go beyond the schemas: every mutating command prints `changed` (true or false); a PR stored without a digest (added with `--no-baseline`, not yet polled) prints `null` for `state`, `draft`, `ci_state`, `head_sha` and `last_polled_at`; `events.more` is always present; a `poll` that exits 0 with `already_running` prints the full report shape; only `prs.skipped_locked` can be non-zero.
+
+### Poll report
+
+`poll --json` prints: `already_running`, `started_at`, `duration_ms`, `hosts`, `prs`, `events`, `hooks`, `failed`, `full_pass`, `truncated`, `deferred` and, with `--pr`, `polled`. Definitions:
+
+- `hosts.<h>`: `queried` (a listing was made), `snapshots`, `skipped` (`no_credential`, `not_in_scope` or null), `incomplete_listing`, `paused_until`, `last_full_at`, `requests_estimate` (Pacing and backoff), `errors` (an array of `{code, pr, retry_after}`).
+- `prs`: `snapshotted` (successful snapshots), `unchanged` (snapshots that produced no events), `skipped_locked`, `skipped_conflict`, `unreachable` (PRs that became unreachable this cycle), `incomplete` (Digest: a database-wide current count, not per cycle; `post-poll` `degraded` likewise).
+- `events`: counts by type, zero-filled over all ten types in the event order. `hooks`: `run`, `skipped` (hooks skipped by a cap or by the drain bound), `failed` (runs that exited non-zero, timed out or failed to spawn). `failed`: the PRs, scopes or hosts left unchecked, each with the failure code; `ref` is as defined in Failures. `full_pass` is true when any host did a full pass. `truncated` is true when `poll.max_duration` or `poll.max_snapshots` stopped new snapshots, and `deferred` counts the snapshots not started because of either bound. `polled` is whether the `--pr` PR was refreshed.
+- `list` and `show` rows carry `last_polled_at` (a row's last committed snapshot) and `last_full_at` (the host's, copied).
+
+Exit codes are as in Failures. Golden poll reports are part of the test suite.
 
 ## Hooks
 
-Names, when they fire, and payload schemas in [schemas/hooks/](../schemas/hooks/).
+Hook points (design guide section 8). All are post-hooks that report a change that already happened: they cannot veto, escalate or undo anything, and their failures are logged and warned, never fatal.
 
-To be specified.
+| Hook | Fires | Payload |
+|---|---|---|
+| `on-pushed`, `on-comment`, `on-review_comment`, `on-review`, `on-approved`, `on-changes_requested`, `on-ci`, `on-ready`, `on-merged`, `on-closed` | once per stored event of that type, after its transaction committed (never from `watch add`) | the event (Events) plus `tool`, `hook`, `object_type: pr`, `object_id` (the `pr_id`) and `event_id` |
+| `post-poll` | once at the end of a `poll` that had a failed object (other than an already `unreachable` PR), a host error or a newly unreachable PR (Poll cycle, step 8) | counts (excluding itself), per-host error codes, `degraded`, `unreachable` (pr, pr_id, code), no host text; its `object_id` is the poll's `started_at` |
+
+- **Delivery** is at-most-once. Events are committed first; hooks run afterward, one invocation per event. If `poll` is killed, the events are safe but their hooks are not re-run; a consumer that needs a guarantee reads `events` with a cursor. The payload carries `event_id` (the same value as the event's `id`) as the deduplication key.
+- **Timing.** After each PR's transaction commits, its hooks are queued in event order. A pool of `hooks.concurrency` workers (default 4) runs them while snapshots continue; the poll exits after the pool drains, and each hook is bounded by its timeout (`hooks.<name>.timeout`, 1 to 600 seconds, default 30). Hooks that are exempt from the caps (Cap) are queued ahead of the others. After `poll.max_duration` plus 2 minutes from the poll's start no further non-exempt hook is started (the rest are skipped with a `hook_cap` record); exempt hooks are still started and are bounded by their timeout. At a hook's timeout its process group gets SIGTERM, then SIGKILL after 5 seconds, only while its leader is unreaped; after SIGKILL the pool waits at most 5 more seconds, then abandons the slot and writes `hook_run` with `exit_code: null` and `timed_out: true`. Only the hook's leader process is bounded: a hook must not leave background work. `async: true` (the default) means "in the pool, concurrently with other hooks"; `async: false` means one at a time, in queue order across PRs, never concurrently with another `async: false` hook of the same poll process (two polls can overlap, and then two such hooks can run together); `async: true` hooks are never held back by it. Hook results are ignored. Order across hooks of one PR is queue order only for `async: false`; consumers order by `seq`.
+- **Process.** `sh -c`, own session, stdin a pipe (pr-watch ignores SIGPIPE and writes the payload without blocking the coordinator, with a deadline), stdout and stderr to `/dev/null`, `close_fds`, cwd an empty private directory `<state dir>/hooks-cwd` (mode 0700, created if missing), non-absolute `PATH` entries dropped from the hook environment, no template substitution. A hook never receives untrusted text on argv or in the environment.
+- **Environment.** Clean: `PATH`, `HOME`, `LANG`, `TERM`, `XDG_*`, `PR_WATCH_HOOK=<hook>`, `PR_WATCH_ID=<object id>` (the `pr_id`; for `post-poll` the poll's `started_at`), `PR_WATCH_EVENT_ID=<event id>` (empty for `post-poll`), `PR_WATCH_OBJECT_TYPE` (`pr` or `poll`), plus names in `hooks.env_allow`. They never include forgectl's token variables. This is stricter than design guide section 8 (which says hooks inherit the environment minus token variables); the deviation is intended.
+- **Cap.** At most `hooks.max_per_poll` (default 50; 0 means no hook runs) hook invocations start in one poll, and at most `hooks.max_per_pr_per_poll` (default 10) per PR, so a flooded PR cannot use the whole budget. `merged`, `closed` and `post-poll` hooks are not counted and never skipped by either cap (decided by the hook's name, whether it is configured or added with `--hook`) (there is at most one `merged` or `closed` per PR and one `post-poll` per poll). The rest are skipped; one `hook_cap` log record names the number skipped and the first and last skipped event ids; the report counts them in `hooks.skipped`; their events are stored.
+- **Logging.** Every hook run writes a `hook_run` record (event id, hook, exit code or null, `timed_out`, duration). `post-poll` and `--hook` runs are hooks; the cap and its exemptions apply by hook name to every run, whatever its origin.
+- **Hook authors.** Never interpolate payload fields into a shell command line or a template; use `jq -r ... | tool --stdin`. A hook receives labels and watch ids in the payload and filters on them itself.
+- **Deviations from the design guide.** (1) `async: true` means "in the pool, concurrently", and the poll waits for the pool (guide section 8: detached); (2) hook stdout goes to `/dev/null`, so no `decision_id` or JSON stdout is read; (3) the environment is cleaner than guide section 8 (Environment).
+
+Payload shapes are in `schemas/hooks/<hook>.json`; the event object is `schemas/event.json`. Every field that carries host text (`author.login`, `reviewer.login`, `path`, check names, `blocked_by.detail`) is marked `x-untrusted`.
 
 ## Config
 
-Keys and defaults; schema in [schemas/config.json](../schemas/config.json).
+File `~/.config/pr-watch/config.yaml` plus `config.d/*.yaml` (design guide section 5). Keys (schema `schemas/config.json`, example `config.example.yaml`; every value shown is the default, and unset keys use the stated built-ins):
 
-To be specified.
+```yaml
+poll:
+  interval_hint: 5m        # the cron install default only (the `--every` forms: Nm with N dividing 60, Nh with N dividing 24)
+  # full_every: 6          # cycles between full passes, per host; unset: 6 on GitHub, 12 on GitLab
+  # concurrency: 4         # snapshot workers per host; unset: 4 on GitHub, 2 on GitLab
+  host_low_water: 100      # forgectl rate_limit.remaining below this: snapshot only what must be
+  overlap: 60s             # subtracted from the host-time watermark of a per-PR repo scope (covers search index lag)
+  hosts_ttl: 1h            # how long whoami's host list is cached
+  max_duration: 15m        # the cycle stops starting snapshots after this
+  max_snapshots: 40        # snapshots started per host and cycle; deferred ones keep their triggers (0 to 1000; 0 is unlimited)
+hosts:                     # per-host overrides
+  # <host>: {full_every: 12, concurrency: 2}
+retention:
+  events: 30d              # at least 30d
+expiry:
+  after_terminal: 7d
+failures:
+  unreachable_after: 5
+detect_force_push: false   # call forgectl compare to fill `forced`
+ci:
+  settle_polls: 1
+  pending_max_age: 6h      # an unsettled PR is snapshotted every cycle for at most this long
+forgectl:
+  timeout: 120s            # forgectl --timeout per call
+  max_output_mib: 32       # bytes read from one forgectl call (1 to 256)
+hooks:
+  max_per_poll: 50         # 0: no hook runs
+  max_per_pr_per_poll: 10  # 1 to 1000
+  concurrency: 4           # 1 to 32
+  env_allow: []
+  # on-approved: [{cmd: "...", timeout: 30, async: true}]
+cron:
+  env_file: null
+repos:                     # per-repo overrides (design guide section 5)
+  # <host/path>: {detect_force_push: true, ci: {settle_polls: 2}, failures: {unreachable_after: 8}}
+```
+
+A hook's `timeout` is an integer number of seconds (1 to 600); every other duration is a string (`5m`, `30d`). `retention.events` below `30d` (or not a whole number of days) is invalid config (exit 2, `code: config_invalid`), not clamped. `poll.interval_hint` accepts only the `--every` forms (`Nm` with N dividing 60, `Nh` with N dividing 24), else `config_invalid`. `forgectl.min_version` is not a config key (`MIN_FORGECTL` is a constant of the release). `me.name` is an optional key (the default owner's name). Built-in per-host defaults when not set: `full_every` 6 on GitHub and 12 on GitLab, `concurrency` 4 on GitHub and 2 on GitLab (backend from `whoami`). Per-repo overrides apply to `detect_force_push`, `ci.settle_polls` and `failures.unreachable_after`. The identity ("me") is forgectl's: set `me` and `hosts.<host>.me` in forgectl's config (setting `hosts.<host>.me` saves one request per snapshot on GitHub); pr-watch has no `me` key of its own, apart from `me.name` used for the default owner. Invalid config fails fast naming the key. pr-watch holds no credentials: git-host access is forgectl's.
+
+- **Precedence:** `repos.<id>` and `hosts.<h>` entries, then `PR_WATCH_*` environment, then the config files (`config.d` after the main file), then built-ins; no CLI flag overrides a config key (only `--hook` adds a hook).
+- A config file, a `--config` file or the `config.d` directory owned by another user or writable by group or others is refused when it is loaded (exit 2 `config_invalid`).
+- `hooks.env_allow` names starting with `PR_WATCH_`, `LD_` or `DYLD_` are rejected (`config_invalid`); names containing `TOKEN`, `SECRET`, `KEY` or `PASSWORD` produce a `config_warning`.
 
 ## Environment variables
 
-To be specified.
+Config keys may be set as `PR_WATCH_<KEY>` (nested keys joined with `__`, for example `PR_WATCH_POLL__CONCURRENCY`). Only scalar keys of `poll`, `retention`, `expiry`, `failures`, `ci`, `forgectl`, `detect_force_push`, `hooks.max_per_poll`, `hooks.max_per_pr_per_poll`, `hooks.concurrency` and `me.name` can be set this way; never `hooks.<name>` lists, `hooks.env_allow`, `cron.*`, `hosts` or `repos`. Booleans are `true` or `false`, integers decimal, durations as in the file. `PR_WATCH_HOOK`, `PR_WATCH_ID`, `PR_WATCH_EVENT_ID` and `PR_WATCH_OBJECT_TYPE` are set for hooks only, are not config keys and are ignored by the loader (so a hook that runs `pr-watch` is not confused); any other unknown `PR_WATCH_*` name is ignored with a `config_warning` record. pr-watch passes its own environment through to forgectl unchanged (forgectl reads its token variables from it); `FORGECTL_GH_BIN` and `FORGECTL_GLAB_BIN` therefore apply. A required variable that forgectl needs and is missing surfaces as forgectl's `auth_required`.
+
+## Audit and log
+
+pr-watch takes no external action, so it writes no `audit.jsonl`. `log.jsonl` (`schemas/log.json`) is a public, append-only record of polls (start, end, per-host summary), snapshot failures, state changes of a PR (`status` transitions), hook runs (event id, hook, exit code, duration), `hook_cap`, `part_incomplete`, `commit_skipped`, host failures and configuration warnings; it never holds host text beyond the one-line fields. `log.jsonl` rotates at 10 MiB, keeping 3 files. A `snapshot_failed` record is written for the first failure of a streak, when its code changes, and when the count reaches a multiple of `failures.unreachable_after`; hook runs and `part_incomplete` are one record each. The event stream itself is the product: it lives in `state.db`, is read through `events`, and `export` prints it.
+
+## Files
+
+- `~/.config/pr-watch/config.yaml`, `config.d/*.yaml`.
+- `~/.local/state/pr-watch/state.db`: private (SQLite, WAL, versioned additive migrations); the tables are listed in State. No alias table is needed (Identifiers).
+- `~/.local/state/pr-watch/log.jsonl`: public, with the rotated `log.jsonl.1` to `log.jsonl.3`.
+- `~/.local/state/pr-watch/cron.lock` and `~/.local/state/pr-watch/hooks-cwd/` (the empty working directory of hooks).
+- pr-watch creates directories with umask 077 (directories are mode 0700, files 0600). One rule for refusals: the state directory, `state.db`, the log directory and `cron.lock` are checked on start, and one not owned by the user, group- or world-writable, or a symlink is refused (exit 12, `code: state_unsafe`); the config file, `config.d` and a `--config` file are checked when loaded and refused with exit 2 `config_invalid` (Config). `-wal` and `-shm` inherit the database mode. SQLite settings: `busy_timeout` 5000 ms, `journal_size_limit` 64 MiB, `wal_checkpoint(TRUNCATE)` at the end of `poll` and `prune`; queries are parameterized. XDG variables are respected; macOS uses the same paths.
 
 ## Labels
 
-To be specified.
+Design guide section 9 applies to watches: repeated `--label key=value` on `watch add`, `label add` and `label remove`, a stored set owned by the (watch, owner) pair that added each label (Watches, owners and members), returned verbatim in `--json`, filtered with repeatable `--label` (AND). A PR's labels on an event are the union over its watches at detection time. No key has built-in meaning. The design guide's label multiset is replaced by sets per (watch, owner); `label remove` by one owner does not remove a label another owner holds. Convention for consumers: label your watches with a key that names you (for example `consumer=review-respond`), so one `events --label` call selects your PRs, and a consumer's labels vanish with its reference.
+
+## TUI
+
+None in 0.x. A `browse` TUI, if wanted, is a 1.x item and follows design guide section 10.
+
+## Consumer notes
+
+- Events are edge-triggered hints, not state: they can be late (up to `full_every` cycles), absent (at-most-once hooks, incomplete parts, a reopened PR), duplicated across a store reset, and never authorization. Readiness changes with no event (a thread resolved, `blocked_by`, `mergeable`, a base moved, a withdrawn approval, a late GitLab approval) mean a consumer that merges or notifies on readiness re-reads forgectl `show` and re-evaluates on a schedule as well as on `approved`, `ci`, `ready` and `pushed`, and pins the head sha it evaluated (`--expected-head`).
+- First run: store the head cursor from `events` (no `--since`) before `watch add` (or take the `cursor` from the `watch add` result); existing comments and reviews at first sight never produce events, so a consumer reads current state through forgectl; a consumer keeps a set of handled comment ids (ids are unordered; no watermark).
+- A PR's activity before its first snapshot is not an event; a PR opened and commented on within one interval is baselined with the comment already seen.
+- Not events in 0.x: a PR opened, reopened, retargeted or renamed, a review requested, a PR moved back to draft, an approval withdrawn or a review dismissed, a PR becoming unreachable or recovering (`post-poll` names newly unreachable PRs), a mergeability or readiness change. Consumers re-read forgectl.
+- `pr` on an event is as of detection; match on `pr_id`. `author` and `reviewer` carry `id` (compare ids, else logins case-insensitively). `is_bot: null` is not a human.
+- A fresh `last_poll_finished_at` does not mean every host or PR was observed (a paused host, per-PR failures and `truncated` all exit 0): before treating silence as quiet, read per-host `paused_until` and `last_enumerated_at` and the PRs' `status` and `failure_count` in `list`.
+- `watch remove` is idempotent. A re-added expired PR can emit `merged` again.
+- `poll --pr` under `already_running` did not refresh the PR (`polled: false`); `events` and `list` carry `last_poll_finished_at`.
+- Hook recipe: route only `type`, `pr`, `pr_id`, `repo`, ids and shas into notifications; never author, path or check names. Map type to a notification level (`merged` info, `closed` info, `approved` info, `changes_requested` warn, `ci` warn when `to` is `failing` else info, `pushed` info, `ready` info, comments info); build the link from `repo` and `pr` with your own host table (GitHub `https://<host>/<owner>/<repo>/pull/<N>`, GitLab `https://<host>/<path>/-/merge_requests/<N>`), or read it from forgectl; events carry no `backend`.
+- A hook-wired consumer that must not miss a comment, push or approval also reads `events` with its cursor; the hook is an early nudge (hooks are at-most-once and capped).
+- A reopened PR emits `pushed` if its head changed and nothing else; read comments, reviews and CI through forgectl when `baselined_at` changes.
+- Labels and owners select, they do not authenticate: a consumer acts on a PR only if its own records name it; an event does not say who authored the PR (read it through forgectl).
+- Silent baselines: keep `(pr_id, baselined_at)`; when a `pr_id` is new or its `baselined_at` changed (first sight, a reopen, a late part baseline) read comments, reviews and CI through forgectl for that PR and add the ids to your handled set.
+- An author that cannot be identified (`author.id` and `login` null) is neither own nor eligible: notify only.
+- After `gap` with a different `store_id` every watch is lost: re-add your watches first, then reset your cursor, then re-read your PRs.
+- A comment named by an event can be deleted or edited before you fetch it: missing in forgectl means handled.
+- `watch.labels` is the union over owners; label your own watches with a key that names you.
+- A query watch is ready when `enumerated_at` is non-null and `pending_baseline` is 0. The `cursor` of a `watch add` result is for a consumer that has no stored cursor; one that holds a cursor ignores it.
+
+## Upgrades
+
+- Migrations are additive and run on first use; a database written by a newer version is refused (exit 12, `code: store_too_new`, naming the versions) rather than read.
+- `--json` outputs and hook payloads follow semver; new fields are additive (consumers ignore unknown fields). A new event type is a minor change; consumers must ignore types they do not know.
+- A new forgectl minimum is a minor change recorded in the changelog and `MIN_FORGECTL`.
+- A deleted or recreated `state.db` creates a new `store_id` (every cursor reports `gap` once). A restored backup keeps its old `store_id`: cursors beyond its head report `gap`, but a consumer whose cursor is below the restored head and which already saw later events can miss events; this is a residual risk, so a restore should be followed by consumers re-syncing.
+
+## Residual risks
+
+- **Late detection.** A change the cheap trigger cannot see (CI completion, GitLab approvals) is found by the unsettled rule or the full pass, up to `poll.full_every` cycles late (about 30 minutes at the defaults on GitHub, an hour on GitLab).
+- **At-most-once hooks.** A killed poll leaves stored events whose hooks never ran; a SIGKILL of the poll loses queued hooks; a skipped hook is logged (Hooks, Cap).
+- **GitLab approvals.** `approvals_at_head` is `null` (unknown) where the project does not reset approvals on push; an `approved` event there says nothing about the head. GitLab transition shapes for new notes, new checks and head changes were not observed live in the design spikes (the server was quiet) and are a `live` regression item.
+- **Enumeration limits.** GitHub search caps at 1000 results and, for a search not scoped to one repository, GitHub may search only a limited number of repositories so results beyond them can be missed while `complete` is true (forgectl's UNVERIFIED risk); a query watch can therefore miss an open PR; `list` prints `last_enumerated_at` per host. A query watch narrowed with `--repo` to a repo that is later renamed or deleted finds no members, and its existing members reach `left_count` 2 after two listings and are snapshotted once; an open one that no longer matches is dropped from the query. A per-PR repo scope whose first listing is wide (the watermark starts at a quiet PR's `updated_at`) costs up to 10 requests once.
+- **Clock drift.** No enumeration uses the local clock; a host clock jump is the host's problem.
+- **Edits are invisible.** An edited or deleted comment is not an event; a minimized comment stays in `seen`.
+- **Reopen.** A closed PR that is reopened is re-baselined: comments, approvals and CI changes while it was closed are not reported (a changed head is: `pushed`), and a PR reopened after `expiry.after_terminal` re-enters as a new silent baseline. A merged PR is final.
+- **Large snapshots.** pr-watch reads at most `forgectl.max_output_mib` (default 32) MiB from one forgectl call and kills that child's group above it (`too_large`, counted toward `unreachable`). For such a PR it then calls `forgectl show <pr>` and detects only `merged` and `closed` (Failures); every other event is absent while it stays over the cap (an author who pads a public PR with comments can cause this; the condition is visible as `last_failure_code: too_large` and `unreachable`). Memory: the in-flight bytes are the sum over hosts of that host's pool size, each worker holding up to the cap plus its parse, about one to two times the bytes (measured: 31 MiB of comments cost about 63 MiB extra to parse), so a worker peaks near 100 MiB at the default cap; the default pools (GitHub 4, GitLab 2) are about 600 MiB in the worst case; size the pools and the cap for it.
+- **Persistent incomplete parts.** A part forgectl cannot list completely never produces events (Digest); the condition is visible in `list`, `show`, the report and `log.jsonl`.
+- **Unreachable rows are permanent.** An `unreachable` PR never expires by itself (a deleted repo stays visible until its watch is removed, `list --status unreachable` shows it, and `post-poll` named it once); it costs one snapshot per full pass.
+- **Silent baselines.** First sight, a reopen and a late part baseline drop activity without an event; `baselined_at` marks them.
+- **Early green.** `passing` can be an early green: it does not say every expected check registered (Events).
+- **Repo rename.** A repo rename changes `pr` on later events; consumers key on `pr_id` (agent-spawn `pr=` labels hold the `pr` string and must be refreshed by the consumer). GitHub can reuse a renamed repo's old name for another repo; a stale name never authorizes anything. From the rename to the next full pass the cheap trigger may be blind for the renamed repo's per-PR PRs (a listing of the old name can return nothing); detection runs at full-pass cadence until the first snapshot refreshes `repo`.
+- **Restore of a backup** (Upgrades) can lose events for a consumer that was ahead of the backup.
+- **Same-user processes** can read and edit `state.db`; the event stream is not tamper-proof.
+- **forgectl as a boundary.** pr-watch trusts forgectl's sanitizing of one-line text and its classification of failures; a forgectl bug that returns unsanitized text would reach event payloads (the schemas bound the length of every text field to 256 characters).
+
+## Platform notes
+
+Linux, WSL and macOS behave the same; nothing here depends on tmux, inotify or a notifier. cron needs `forgectl` on its `PATH` (`cron install` writes the directory when it is safe). WSL: keep the state dir on the Linux filesystem, not under `/mnt/c`.

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/watch-add.json",
+  "title": "watch add --json",
+  "description": "changed is false when the owner and labels were already present. baselined is false for a query watch, for --no-baseline and when a digest already existed. pr is the PR row (state, status, terminal_at and terminal_kind of an existing terminal row, for which no event is emitted), null for a query watch. cursor is the events head read at the start of the same transaction as the write: for a consumer with no stored cursor; one that holds a cursor ignores it.",
+  "type": "object",
+  "properties": {
+    "watch": {
+      "$ref": "../defs.json#/$defs/watch"
+    },
+    "created": {
+      "type": "boolean"
+    },
+    "changed": {
+      "type": "boolean"
+    },
+    "owner": {
+      "$ref": "../defs.json#/$defs/owner"
+    },
+    "baselined": {
+      "type": "boolean"
+    },
+    "events_emitted": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "cursor": {
+      "$ref": "../defs.json#/$defs/cursor"
+    },
+    "pr": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/pr_row"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "watch",
+    "created",
+    "changed",
+    "owner",
+    "baselined",
+    "events_emitted",
+    "cursor",
+    "pr"
+  ]
+}

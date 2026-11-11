@@ -1,0 +1,600 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/defs.json",
+  "title": "pr-watch shared definitions",
+  "description": "Not an output on its own. Shared definitions referenced by the CLI, hook, event and log schemas. config.json embeds its own copies.",
+  "$defs": {
+    "host": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$",
+      "description": "Lowercase host, optional :port."
+    },
+    "repo_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|$))[A-Za-z0-9._-]+)+$",
+      "description": "host/<full project path>."
+    },
+    "pr": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|#))[A-Za-z0-9._-]+)+#[1-9][0-9]{0,9}$",
+      "description": "Canonical PR form host/<full project path>#N (GitLab numbers without !)."
+    },
+    "pr_id": {
+      "type": "string",
+      "pattern": "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9:/_=.+-]{0,127}$",
+      "description": "Opaque, stable PR id reported by forgectl. Starts with an alphanumeric, no '..'; never used in argv or a path."
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "ts": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$",
+      "description": "UTC, YYYY-MM-DDTHH:MM:SS.ffffffZ."
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+      "description": "0 or an integer and a unit (ms, s, m, h, d)."
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^ev-[a-z2-7]{12}$"
+    },
+    "watch_id": {
+      "type": "string",
+      "pattern": "^w-[a-z2-7]{10}$"
+    },
+    "cursor": {
+      "type": "string",
+      "pattern": "^v1\\.[a-z2-7]{8}\\.[0-9]{1,18}$",
+      "description": "Opaque to consumers: store and return verbatim."
+    },
+    "owner": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.:@-]{0,63}$"
+    },
+    "label": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,31}=[A-Za-z0-9._:@/#+-]{1,128}$",
+      "description": "key=value."
+    },
+    "labels": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/label"
+      },
+      "uniqueItems": true,
+      "description": "A set, returned verbatim."
+    },
+    "forgectl_id": {
+      "type": "string",
+      "pattern": "^(?:gh:(?:ic|rc|rt|r):[A-Za-z0-9_=-]{1,100}|gl:d:[0-9a-f]{40}|gl:n:[1-9][0-9]{0,18})$",
+      "description": "forgectl's opaque comment, thread or review id."
+    },
+    "account_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9:/_=-]{1,128}$"
+    },
+    "login": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 256,
+      "x-untrusted": true,
+      "description": "Untrusted one-line host text, already sanitized by forgectl."
+    },
+    "path": {
+      "type": "string",
+      "maxLength": 256,
+      "x-untrusted": true,
+      "description": "Untrusted one-line file path, already sanitized by forgectl."
+    },
+    "check_name": {
+      "type": "string",
+      "maxLength": 256,
+      "x-untrusted": true,
+      "description": "Untrusted one-line check name, already sanitized by forgectl."
+    },
+    "event_type": {
+      "enum": [
+        "pushed",
+        "comment",
+        "review_comment",
+        "review",
+        "approved",
+        "changes_requested",
+        "ci",
+        "ready",
+        "merged",
+        "closed"
+      ]
+    },
+    "ci_state": {
+      "enum": [
+        "passing",
+        "failing",
+        "pending",
+        "none"
+      ]
+    },
+    "check_state": {
+      "type": "string",
+      "pattern": "^[a-z_]{1,32}$",
+      "description": "forgectl's check state, passed through."
+    },
+    "review_state": {
+      "enum": [
+        "approved",
+        "changes_requested",
+        "commented",
+        "dismissed"
+      ]
+    },
+    "reviewer_state": {
+      "enum": [
+        "approved",
+        "changes_requested",
+        "dismissed"
+      ],
+      "description": "State of a latest_by_reviewer entry."
+    },
+    "part": {
+      "enum": [
+        "reviews",
+        "threads",
+        "ci"
+      ],
+      "description": "A forgectl snapshot part that can be listed in incomplete."
+    },
+    "pr_state": {
+      "enum": [
+        "open",
+        "closed",
+        "merged"
+      ]
+    },
+    "pr_status": {
+      "enum": [
+        "active",
+        "terminal",
+        "unreachable"
+      ]
+    },
+    "failure_code": {
+      "type": "string",
+      "pattern": "^[a-z_]{1,64}$",
+      "description": "A forgectl or pr-watch error code."
+    },
+    "error_code": {
+      "enum": [
+        "usage",
+        "config_invalid",
+        "invalid_pr",
+        "not_found",
+        "host_failed",
+        "tool_missing",
+        "tool_too_old",
+        "contract",
+        "store_too_new",
+        "state_unsafe",
+        "refused",
+        "internal"
+      ]
+    },
+    "watch_key": {
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^(?:mine\\+open(?:;host=[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:,[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?)*)?(?:;repo=[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|,|;|$))[A-Za-z0-9._-]+)+(?:,[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|,|;|$))[A-Za-z0-9._-]+)+)*)?|(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9:/_=.+-]{0,127})$",
+      "description": "pr_id for a per-PR watch, else the canonical query string."
+    },
+    "author": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/account_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "login": {
+          "$ref": "#/$defs/login"
+        },
+        "is_bot": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Consumers must treat null as a bot."
+        }
+      },
+      "required": [
+        "id",
+        "login",
+        "is_bot"
+      ],
+      "additionalProperties": false
+    },
+    "check_change": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/check_name"
+        },
+        "from": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/check_state"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "to": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/check_state"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "from",
+        "to"
+      ],
+      "additionalProperties": false
+    },
+    "blocked_by_item": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z_]{1,64}$"
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 256,
+          "x-untrusted": true
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "additionalProperties": false,
+      "description": "As forgectl prints it; detail accompanies code: other."
+    },
+    "blocked_by": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/blocked_by_item"
+      }
+    },
+    "event": {
+      "$ref": "event.json"
+    },
+    "watch": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/watch_id"
+        },
+        "kind": {
+          "enum": [
+            "pr",
+            "query"
+          ]
+        },
+        "key": {
+          "$ref": "#/$defs/watch_key"
+        },
+        "pr": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/pr"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owners": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/owner"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "labels": {
+          "$ref": "#/$defs/labels"
+        },
+        "members": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Member count for a query watch, null for a per-PR watch."
+        },
+        "created_at": {
+          "$ref": "#/$defs/ts"
+        },
+        "enumerated_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Query watch: the oldest hosts.last_enumerated_at over the hosts it lists; null while any is null or older than created_at, and for a per-PR watch."
+        },
+        "pending_baseline": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Query watch: members with no digest; null for a per-PR watch. A query watch is ready when enumerated_at is non-null and pending_baseline is 0."
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "key",
+        "pr",
+        "owners",
+        "labels",
+        "members",
+        "created_at",
+        "enumerated_at",
+        "pending_baseline"
+      ],
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "query"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "key": {
+            "pattern": "^mine\\+open(?:;host=[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:,[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?)*)?(?:;repo=[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|,|;|$))[A-Za-z0-9._-]+)+(?:,[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?!\\.\\.?(?:/|,|;|$))[A-Za-z0-9._-]+)+)*)?$"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "key": {
+            "pattern": "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9:/_=.+-]{0,127}$"
+          }
+        }
+      }
+    },
+    "pr_row": {
+      "type": "object",
+      "properties": {
+        "pr": {
+          "$ref": "#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "#/$defs/pr_id"
+        },
+        "status": {
+          "$ref": "#/$defs/pr_status"
+        },
+        "state": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/pr_state"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "draft": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "ci_state": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ci_state"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The digest's ci.state; null while a CI hold is in progress (ci_stale true) and before the first snapshot."
+        },
+        "head_sha": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_polled_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_full_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ci_head_sha": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The digest's ci.head_sha (forgectl's; may differ from head_sha for a GitLab merged-results pipeline, which is information, not staleness)."
+        },
+        "ci_stale": {
+          "type": "boolean",
+          "description": "True while a CI hold is in progress."
+        },
+        "ci_stuck": {
+          "type": "boolean",
+          "description": "True when the PR is unsettled and has been for at least ci.pending_max_age; it is then snapshotted only on full passes."
+        },
+        "terminal_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "terminal_kind": {
+          "oneOf": [
+            {
+              "enum": [
+                "merged",
+                "closed"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baselined_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baselined": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "reviews": {
+                  "type": "boolean"
+                },
+                "threads": {
+                  "type": "boolean"
+                },
+                "ci": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "reviews",
+                "threads",
+                "ci"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "From the digest; null before the first snapshot."
+        },
+        "incomplete": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/part"
+          },
+          "uniqueItems": true
+        },
+        "incomplete_snapshots": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failures": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/watch_id"
+          }
+        }
+      },
+      "required": [
+        "pr",
+        "pr_id",
+        "status",
+        "state",
+        "draft",
+        "ci_state",
+        "ci_head_sha",
+        "ci_stale",
+        "ci_stuck",
+        "head_sha",
+        "last_polled_at",
+        "last_full_at",
+        "incomplete",
+        "incomplete_snapshots",
+        "failures",
+        "sources",
+        "terminal_at",
+        "terminal_kind",
+        "baselined_at",
+        "baselined"
+      ],
+      "additionalProperties": false,
+      "description": "state, draft, ci_state, ci_head_sha and head_sha and last_polled_at are null until the first snapshot (watch add --no-baseline). ci_state is null while a CI hold keeps a stale state (ci_stale true)."
+    }
+  }
+}

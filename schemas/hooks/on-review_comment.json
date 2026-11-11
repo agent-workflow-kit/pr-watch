@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/hooks/on-review_comment.json",
+  "title": "on-review_comment hook payload (stdin)",
+  "description": "After the event's transaction committed. At-most-once delivery. Host text fields are untrusted.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "pr-watch"
+    },
+    "hook": {
+      "const": "on-review_comment"
+    },
+    "object_type": {
+      "const": "pr"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/pr_id"
+    },
+    "event_id": {
+      "$ref": "../defs.json#/$defs/event_id",
+      "description": "Same value as id; the deduplication key."
+    },
+    "id": {
+      "$ref": "../defs.json#/$defs/event_id"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "type": {
+      "const": "review_comment"
+    },
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "pr_id": {
+      "$ref": "../defs.json#/$defs/pr_id"
+    },
+    "repo": {
+      "$ref": "../defs.json#/$defs/repo_id"
+    },
+    "detected_at": {
+      "$ref": "../defs.json#/$defs/ts"
+    },
+    "occurred_at": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/ts"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "labels": {
+      "$ref": "../defs.json#/$defs/labels"
+    },
+    "head_sha": {
+      "$ref": "../defs.json#/$defs/sha"
+    },
+    "watches": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/watch_id"
+      },
+      "uniqueItems": true
+    },
+    "comment_id": {
+      "$ref": "../defs.json#/$defs/forgectl_id"
+    },
+    "thread_id": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/forgectl_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "author": {
+      "$ref": "../defs.json#/$defs/author"
+    },
+    "path": {
+      "$ref": "../defs.json#/$defs/path"
+    },
+    "line": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "side": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z_]{1,16}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "commit_sha": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/sha"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "event_id",
+    "id",
+    "seq",
+    "type",
+    "pr",
+    "pr_id",
+    "repo",
+    "detected_at",
+    "occurred_at",
+    "labels",
+    "head_sha",
+    "watches",
+    "comment_id",
+    "thread_id",
+    "author",
+    "path",
+    "line",
+    "side",
+    "commit_sha"
+  ]
+}

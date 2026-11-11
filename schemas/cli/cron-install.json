@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/cron-install.json",
+  "title": "cron install --json",
+  "description": "lines are the managed block's lines as written. replaced is true when a block existed and was replaced; changed is true when the crontab text changed (an identical re-install is replaced true, changed false). previous_every is null when the old first line had no every=. warnings names a pr-watch poll line outside the block.",
+  "type": "object",
+  "properties": {
+    "installed": {
+      "const": true
+    },
+    "changed": {
+      "type": "boolean"
+    },
+    "every": {
+      "$ref": "../defs.json#/$defs/duration"
+    },
+    "replaced": {
+      "type": "boolean"
+    },
+    "previous_every": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/duration"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "lines": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 4096
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 1024
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "installed",
+    "changed",
+    "every",
+    "replaced",
+    "previous_every",
+    "lines",
+    "warnings"
+  ]
+}

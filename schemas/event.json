@@ -1,0 +1,912 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/event.json",
+  "title": "pr-watch event",
+  "description": "One detected difference on a PR. Fixed in-snapshot order: pushed, review, comment, review_comment, approved, changes_requested, ci, ready, merged, closed. Closed shape of this version; consumers must ignore unknown fields and types and must not validate strictly.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "pushed"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "repo": {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        "detected_at": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "occurred_at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "$ref": "defs.json#/$defs/labels"
+        },
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "watches": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/watch_id"
+          },
+          "uniqueItems": true
+        },
+        "from_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "to_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "forced": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "seq",
+        "type",
+        "pr",
+        "pr_id",
+        "repo",
+        "detected_at",
+        "occurred_at",
+        "labels",
+        "head_sha",
+        "watches",
+        "from_sha",
+        "to_sha",
+        "forced"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "comment"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "repo": {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        "detected_at": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "occurred_at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "$ref": "defs.json#/$defs/labels"
+        },
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "watches": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/watch_id"
+          },
+          "uniqueItems": true
+        },
+        "comment_id": {
+          "$ref": "defs.json#/$defs/forgectl_id"
+        },
+        "thread_id": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/forgectl_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "author": {
+          "$ref": "defs.json#/$defs/author"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "seq",
+        "type",
+        "pr",
+        "pr_id",
+        "repo",
+        "detected_at",
+        "occurred_at",
+        "labels",
+        "head_sha",
+        "watches",
+        "comment_id",
+        "thread_id",
+        "author"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "review_comment"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "repo": {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        "detected_at": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "occurred_at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "$ref": "defs.json#/$defs/labels"
+        },
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "watches": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/watch_id"
+          },
+          "uniqueItems": true
+        },
+        "comment_id": {
+          "$ref": "defs.json#/$defs/forgectl_id"
+        },
+        "thread_id": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/forgectl_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "author": {
+          "$ref": "defs.json#/$defs/author"
+        },
+        "path": {
+          "$ref": "defs.json#/$defs/path"
+        },
+        "line": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "side": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z_]{1,16}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "commit_sha": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "seq",
+        "type",
+        "pr",
+        "pr_id",
+        "repo",
+        "detected_at",
+        "occurred_at",
+        "labels",
+        "head_sha",
+        "watches",
+        "comment_id",
+        "thread_id",
+        "author",
+        "path",
+        "line",
+        "side",
+        "commit_sha"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "review"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "repo": {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        "detected_at": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "occurred_at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "$ref": "defs.json#/$defs/labels"
+        },
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "watches": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/watch_id"
+          },
+          "uniqueItems": true
+        },
+        "review_id": {
+          "$ref": "defs.json#/$defs/forgectl_id"
+        },
+        "author": {
+          "$ref": "defs.json#/$defs/author"
+        },
+        "review_state": {
+          "$ref": "defs.json#/$defs/review_state"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "seq",
+        "type",
+        "pr",
+        "pr_id",
+        "repo",
+        "detected_at",
+        "occurred_at",
+        "labels",
+        "head_sha",
+        "watches",
+        "review_id",
+        "author",
+        "review_state"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "approved"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "repo": {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        "detected_at": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "occurred_at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "$ref": "defs.json#/$defs/labels"
+        },
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "watches": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/watch_id"
+          },
+          "uniqueItems": true
+        },
+        "reviewer": {
+          "$ref": "defs.json#/$defs/author"
+        },
+        "commit_sha": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "can_push": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "approvals_at_head": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "seq",
+        "type",
+        "pr",
+        "pr_id",
+        "repo",
+        "detected_at",
+        "occurred_at",
+        "labels",
+        "head_sha",
+        "watches",
+        "reviewer",
+        "commit_sha",
+        "at",
+        "can_push",
+        "approvals_at_head"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "changes_requested"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "repo": {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        "detected_at": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "occurred_at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "$ref": "defs.json#/$defs/labels"
+        },
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "watches": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/watch_id"
+          },
+          "uniqueItems": true
+        },
+        "reviewer": {
+          "$ref": "defs.json#/$defs/author"
+        },
+        "commit_sha": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "can_push": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "seq",
+        "type",
+        "pr",
+        "pr_id",
+        "repo",
+        "detected_at",
+        "occurred_at",
+        "labels",
+        "head_sha",
+        "watches",
+        "reviewer",
+        "commit_sha",
+        "at",
+        "can_push"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "ci"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "repo": {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        "detected_at": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "occurred_at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "$ref": "defs.json#/$defs/labels"
+        },
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "watches": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/watch_id"
+          },
+          "uniqueItems": true
+        },
+        "from": {
+          "$ref": "defs.json#/$defs/ci_state"
+        },
+        "to": {
+          "$ref": "defs.json#/$defs/ci_state"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/check_change"
+          },
+          "maxItems": 20
+        },
+        "checks_more": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "passing": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "failing": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "pending": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "passing",
+            "failing",
+            "pending"
+          ]
+        },
+        "for_head": {
+          "$ref": "defs.json#/$defs/sha",
+          "description": "forgectl's ci.head_sha."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "seq",
+        "type",
+        "pr",
+        "pr_id",
+        "repo",
+        "detected_at",
+        "occurred_at",
+        "labels",
+        "head_sha",
+        "watches",
+        "from",
+        "to",
+        "checks",
+        "counts",
+        "for_head"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "ready"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "repo": {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        "detected_at": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "occurred_at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "$ref": "defs.json#/$defs/labels"
+        },
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "watches": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/watch_id"
+          },
+          "uniqueItems": true
+        },
+        "from_blocked_by": {
+          "$ref": "defs.json#/$defs/blocked_by"
+        },
+        "blocked_by": {
+          "$ref": "defs.json#/$defs/blocked_by"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "seq",
+        "type",
+        "pr",
+        "pr_id",
+        "repo",
+        "detected_at",
+        "occurred_at",
+        "labels",
+        "head_sha",
+        "watches",
+        "from_blocked_by",
+        "blocked_by"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "merged"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "repo": {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        "detected_at": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "occurred_at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "$ref": "defs.json#/$defs/labels"
+        },
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "watches": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/watch_id"
+          },
+          "uniqueItems": true
+        },
+        "merged_head_sha": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "merge_commit_sha": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "seq",
+        "type",
+        "pr",
+        "pr_id",
+        "repo",
+        "detected_at",
+        "occurred_at",
+        "labels",
+        "head_sha",
+        "watches",
+        "merged_head_sha",
+        "merge_commit_sha"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "closed"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "repo": {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        "detected_at": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "occurred_at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "$ref": "defs.json#/$defs/labels"
+        },
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "watches": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/watch_id"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "seq",
+        "type",
+        "pr",
+        "pr_id",
+        "repo",
+        "detected_at",
+        "occurred_at",
+        "labels",
+        "head_sha",
+        "watches"
+      ]
+    }
+  ],
+  "discriminator": {
+    "propertyName": "type"
+  }
+}

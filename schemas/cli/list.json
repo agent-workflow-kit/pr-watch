@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/list.json",
+  "title": "list --json",
+  "type": "object",
+  "properties": {
+    "watches": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/watch"
+      }
+    },
+    "prs": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/pr_row"
+      }
+    },
+    "last_poll_finished_at": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/ts"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "hosts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "$ref": "../defs.json#/$defs/host"
+          },
+          "paused_until": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/ts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_enumerated_at": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/ts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_full_at": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/ts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "host",
+          "paused_until",
+          "last_enumerated_at",
+          "last_full_at"
+        ]
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "watches",
+    "prs",
+    "last_poll_finished_at",
+    "hosts"
+  ]
+}

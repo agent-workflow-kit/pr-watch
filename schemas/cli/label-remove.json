@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/label-remove.json",
+  "title": "label remove --json",
+  "description": "watch.labels is the set after the change; changed is false when nothing was removed. label remove is idempotent: an owner that holds no reference (not_held) or a PR with no watch (no_watch) is exit 0 with changed false; watch is then null.",
+  "type": "object",
+  "properties": {
+    "watch": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/watch"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "owner": {
+      "$ref": "../defs.json#/$defs/owner"
+    },
+    "changed": {
+      "type": "boolean"
+    },
+    "reason": {
+      "oneOf": [
+        {
+          "enum": [
+            "not_held",
+            "no_watch"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "watch",
+    "owner",
+    "changed",
+    "reason"
+  ]
+}
