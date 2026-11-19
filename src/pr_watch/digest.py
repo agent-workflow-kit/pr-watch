@@ -17,7 +17,8 @@ pass is replaced by the empty shape (`ci` all null or empty, `{}`), so a corrupt
 never reaches the output.
 
 Seams: the digest built here has `ci.hold` 0 and `ci.hold_to` null; the CI hold (which keeps the
-previous `ci` and counts snapshots) is applied by the diff. TODO(#15): CI hold over this digest.
+previous `ci` and counts snapshots) is applied by the diff; `diff(...).digest` is the digest
+to store.
 TODO(#14): the diff reads new comments and reviews from the snapshot, filtered by `comment_ids`
 and `review_ids`, against `seen`.
 """
@@ -277,8 +278,10 @@ def _blocked_by(value: object) -> object:
     return [{"code": c} if not d else {"code": c, "detail": d} for c, d in kept]
 
 
-def _checks(ci: Mapping[str, Any]) -> tuple[dict[str, dict[str, str]], int]:
-    found: dict[str, tuple[str, str]] = {}  # key -> (name, state)
+def counted_checks(ci: Mapping[str, Any]) -> dict[str, tuple[str, str]]:
+    """Key -> (full name, state) of the counted checks of a readable `ci`, uncapped. Checks that
+    share a key merge, the worst state winning, whatever the order."""
+    found: dict[str, tuple[str, str]] = {}
     for item in ci["checks"]:
         data = _dict(item)
         name = data.get("name")
@@ -290,6 +293,11 @@ def _checks(ci: Mapping[str, Any]) -> tuple[dict[str, dict[str, str]], int]:
         key = check_key(name, data.get("url"))
         if key not in found or _CHECK_RANK[state] > _CHECK_RANK[found[key][1]]:
             found[key] = (name, state)
+    return found
+
+
+def _checks(ci: Mapping[str, Any]) -> tuple[dict[str, dict[str, str]], int]:
+    found = counted_checks(ci)
     keys = sorted(found)
     kept = {
         k: {"name": bounded_one_line(found[k][0], MAX_FIELD_CHARS), "state": found[k][1]}
@@ -390,6 +398,41 @@ def _rank(entry: Mapping[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _reviewer_entry(item: object) -> dict[str, Any]:
+    data = _dict(item)
+    commit_sha = _nullable(_sha)(data.get("commit_sha"))
+    at = _nullable(_ts)(data.get("at"))
+    can_push = data.get("can_push")
+    state = data.get("state")
+    return {
+        "state": state if isinstance(state, str) and state in _REVIEWER_STATES else None,
+        "commit_sha": None if commit_sha is _BAD else commit_sha,
+        "at": None if at is _BAD else at,
+        "can_push": can_push if isinstance(can_push, bool) else None,
+    }
+
+
+def _login_text(value: object) -> str:
+    return bounded_one_line(value, MAX_FIELD_CHARS) if isinstance(value, str) else ""
+
+
+def winning_reviewer_item(snapshot: Mapping[str, Any], key: str) -> Mapping[str, Any] | None:
+    """The `latest_by_reviewer` item the digest builder keeps for reviewer `key` (the highest
+    `_rank` among the items with that key), or null when no item has it. Items that tie on
+    `_rank` (the rank carries no login) are ordered by their sanitized login, the larger wins,
+    so the choice never depends on input order."""
+    items = snapshot.get("latest_by_reviewer")
+    best: tuple[tuple[Any, ...], Mapping[str, Any]] | None = None
+    for item in items if isinstance(items, list) else ():
+        if reviewer_key(item) != key:
+            continue
+        login = _dict(item).get("login")
+        rank = (*_rank(_reviewer_entry(item)), _login_text(login))
+        if best is None or rank > best[0]:
+            best = (rank, _dict(item))
+    return best[1] if best else None
+
+
 def _reviewers(snapshot: Mapping[str, Any], previous: Mapping[str, Any]) -> dict[str, Any]:
     old = _previous_reviewers(previous)
     best: dict[str, dict[str, Any]] = {}
@@ -397,17 +440,7 @@ def _reviewers(snapshot: Mapping[str, Any], previous: Mapping[str, Any]) -> dict
         key = reviewer_key(item)
         if key is None:
             continue
-        data = _dict(item)
-        commit_sha = _nullable(_sha)(data.get("commit_sha"))
-        at = _nullable(_ts)(data.get("at"))
-        can_push = data.get("can_push")
-        state = data.get("state")
-        entry = {
-            "state": state if isinstance(state, str) and state in _REVIEWER_STATES else None,
-            "commit_sha": None if commit_sha is _BAD else commit_sha,
-            "at": None if at is _BAD else at,
-            "can_push": can_push if isinstance(can_push, bool) else None,
-        }
+        entry = _reviewer_entry(item)
         if key not in best or _rank(entry) > _rank(best[key]):
             best[key] = entry
     out: dict[str, Any] = {}
