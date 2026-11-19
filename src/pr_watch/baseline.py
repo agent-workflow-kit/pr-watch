@@ -12,7 +12,9 @@ here:
   `persistent` lists the parts whose count just reached `persistent_after` (the poller logs one
   `part_incomplete` record for each; none once the resulting state is terminal). `persistent_after`
   is required: the repo's `failures.unreachable_after` (default 5); a bool, non-int or value < 1
-  raises ValueError.
+  raises ValueError. `persistent` fires only on exact equality and is suppressed for terminal
+  results, so a part that crosses the threshold while the PR is closed is not reported after a
+  later reopen (known, accepted).
 - **Baselines.** The digest's per-part `baselined` flags are `build_digest`'s; `baselined_at` is set
   to `now` when this snapshot baselined a part that was not baselined (first sight, a late part
   baseline) or silently re-baselined the row (`rebaseline`, or a reopen); otherwise it is kept.

@@ -845,7 +845,8 @@ def test_review_after_incomplete_reviews_baseline_is_silent() -> None:
 
 
 def test_event_ref_is_capped_at_256_like_the_row() -> None:
-    long_repo = "github.com/" + "o" * 300
-    new = gh(repo=long_repo, pr=f"{long_repo}#7")
-    assert run(gh(), with_(new, head={"sha": sha(2)})) == []
-    assert run(gh(), with_(new, head={"sha": sha(2)})).dropped
+    # `pr` and `pr_id` stay short and valid: only the `len(repo) <= 256` check can drop it.
+    new = gh()
+    new["repo"] = "github.com/" + "o" * 300
+    result = run(gh(), with_(new, head={"sha": sha(2)}))
+    assert result == [] and result.dropped == (Drop("pushed", "invalid_identity"),)
