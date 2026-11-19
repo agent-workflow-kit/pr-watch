@@ -473,7 +473,7 @@ def test_prs_repo_listing(fake: FakeForgectl, client) -> None:
 
 def test_whoami_result(fake: FakeForgectl, client) -> None:
     result = ok(client.whoami(), "whoami")
-    assert "github.com" in [h["host"] for h in result["hosts"]]
+    assert any(h["host"] == "github.com" for h in result["hosts"])
 
 
 def test_compare_result(fake: FakeForgectl, client) -> None:
