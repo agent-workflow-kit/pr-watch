@@ -15,7 +15,7 @@ the final component is refused.
 Other modules use `open_state_dir` for the descriptor, `StateDir.path_for` for a path SQLite needs,
 and `verify_file` for any file they open.
 
-todo(#11): check `state.db` with `verify_file` when the store opens it (deferred to that issue).
+`store.open_store` checks `state.db` with `verify_file` (docs/interface.md, Files).
 """
 
 from __future__ import annotations
