@@ -314,13 +314,15 @@ def _previous_ci(previous: Mapping[str, Any]) -> dict[str, Any]:
         return _empty_ci()
     checks = kept["checks"]
     well_formed = (
-        all(isinstance(kept[k], str) or kept[k] is None for k in ("state", "head_sha", "hold_to"))
+        all(isinstance(kept[k], str) or kept[k] is None for k in ("head_sha", "hold_to"))
+        and (kept["state"] is None or kept["state"] in _CI_STATES)
         and all(_count(kept[k]) is not _BAD for k in ("hold", "checks_more"))
         and isinstance(checks, dict)
         and all(
             isinstance(v, dict)
             and set(v) == {"name", "state"}
-            and all(isinstance(x, str) for x in v.values())
+            and isinstance(v["name"], str)
+            and v["state"] in (*_CHECK_STATES, "unknown")
             for v in checks.values()
         )
     )
@@ -335,8 +337,20 @@ def _previous_reviewers(previous: Mapping[str, Any]) -> dict[str, Any]:
         kept = _clean_json(previous.get("reviewers"))
     except ValueError:
         return {}
-    ok = isinstance(kept, dict) and len(kept) <= MAX_REVIEWERS
-    return kept if ok and all(isinstance(v, dict) for v in kept.values()) else {}
+    if not isinstance(kept, dict) or len(kept) > MAX_REVIEWERS:
+        return {}
+    return {k: v for k, v in kept.items() if _valid_reviewer_entry(v)}
+
+
+def _valid_reviewer_entry(entry: object) -> bool:
+    """A previous reviewer entry as `_reviewers` writes it: exactly its four keys, known values."""
+    return (
+        isinstance(entry, dict)
+        and set(entry) == {"state", "commit_sha", "at", "can_push"}
+        and entry["state"] in (*_REVIEWER_STATES, "unknown")
+        and all(entry[k] is None or isinstance(entry[k], str) for k in ("commit_sha", "at"))
+        and (entry["can_push"] is None or isinstance(entry["can_push"], bool))
+    )
 
 
 def _ci(ci: Mapping[str, Any]) -> dict[str, Any]:

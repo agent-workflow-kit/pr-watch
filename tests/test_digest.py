@@ -862,3 +862,67 @@ def test_checks_beyond_the_cap_keep_the_smallest_keys_and_only_those_get_display
         check_key(f"job-{i}", f"https://example.org/{i}") for i in range(MAX_CHECKS + 5)
     )
     assert sorted(d["ci"]["checks"]) == expected[:MAX_CHECKS]
+
+
+_GOOD_REVIEWER = {"state": "approved", "commit_sha": None, "at": None, "can_push": None}
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {**_GOOD_REVIEWER, "state": "brand_new"},
+        {**_GOOD_REVIEWER, "state": None},
+        {**_GOOD_REVIEWER, "state": ["approved"]},
+        {**_GOOD_REVIEWER, "commit_sha": 5},
+        {**_GOOD_REVIEWER, "at": 5},
+        {**_GOOD_REVIEWER, "can_push": "yes"},
+        {**_GOOD_REVIEWER, "extra": 1},
+        {"state": "approved"},
+    ],
+)
+def test_invalid_previous_reviewer_entry_is_dropped(entry: dict[str, Any]) -> None:
+    previous = build_digest(gh())
+    key = next(iter(previous["reviewers"]))
+    previous["reviewers"] = {key: entry}
+    d = build_digest(gh(incomplete=["reviews"], complete=False), previous)
+    assert d["reviewers"] == {}
+    snap = gh()
+    snap["latest_by_reviewer"][0]["state"] = "brand_new"
+    assert build_digest(snap, previous)["reviewers"][key]["state"] == "unknown"
+
+
+def test_previous_reviewer_entry_with_unknown_state_is_valid() -> None:
+    previous = build_digest(gh())
+    key = next(iter(previous["reviewers"]))
+    previous["reviewers"] = {key: {**_GOOD_REVIEWER, "state": "unknown", "can_push": True}}
+    d = build_digest(gh(incomplete=["reviews"], complete=False), previous)
+    assert d["reviewers"] == previous["reviewers"]
+
+
+@pytest.mark.parametrize("state", ["exploding", 5, ["passing"]])
+def test_previous_ci_with_an_invalid_state_falls_back_to_the_empty_ci(state: Any) -> None:
+    previous = build_digest(with_checks(gh(), [check("a", "failing")]))
+    previous["ci"]["state"] = state
+    assert build_digest(gh(incomplete=["ci"], complete=False), previous)["ci"] == EMPTY_CI
+
+
+def test_previous_ci_with_a_null_state_is_valid() -> None:
+    previous = build_digest(gh())
+    previous["ci"]["state"] = None
+    d = build_digest(gh(incomplete=["ci"], complete=False), previous)
+    assert d["ci"] == previous["ci"]
+
+
+def test_previous_ci_with_an_invalid_check_state_falls_back_to_the_empty_ci() -> None:
+    previous = build_digest(with_checks(gh(), [check("a", "failing")]))
+    key = next(iter(previous["ci"]["checks"]))
+    previous["ci"]["checks"][key]["state"] = "exploding"
+    assert build_digest(gh(incomplete=["ci"], complete=False), previous)["ci"] == EMPTY_CI
+
+
+def test_previous_ci_with_an_unknown_check_state_is_valid() -> None:
+    previous = build_digest(with_checks(gh(), [check("a", "failing")]))
+    key = next(iter(previous["ci"]["checks"]))
+    previous["ci"]["checks"][key]["state"] = "unknown"
+    d = build_digest(gh(incomplete=["ci"], complete=False), previous)
+    assert d["ci"] == previous["ci"]
