@@ -49,6 +49,7 @@ from .refs import (
     parse_type,
     parse_watch_id,
     resolve_owner,
+    watch_key,
 )
 
 PROG = "pr-watch"
@@ -482,6 +483,7 @@ def _query_filters(args: argparse.Namespace) -> None:
     args.host = _each(args.host, parse_host)
     args.repo = _each(args.repo, parse_repo)
     _check_filter_hosts(args)
+    watch_key(args.host or [], args.repo or [])  # refuses filters that make a key too long
 
 
 def _check_watch_values(args: argparse.Namespace) -> None:
@@ -630,11 +632,19 @@ def _execute(argv: Sequence[str]) -> int:
     except UsageError as exc:
         exc.usage = exc.usage or leaf.format_usage()
         raise
+    defaulted = args.command in OWNER_DEFAULTED
+    interactive = _stdin_is_tty()
+    if defaulted and args.owner is None and not interactive:
+        # Needs no config: refuse before the config is read, so a broken file cannot mask it.
+        try:
+            resolve_owner(None, interactive=False, me_name=None)
+        except RefError as exc:
+            raise ref_error_to_cli(exc, leaf.format_usage()) from None
     loaded = load_config(args.config)
-    if args.command in OWNER_DEFAULTED:
+    if defaulted:
         try:
             args.owner = resolve_owner(
-                args.owner, interactive=_stdin_is_tty(), me_name=loaded.config.me.name
+                args.owner, interactive=interactive, me_name=loaded.config.me.name
             )
         except RefError as exc:
             raise ref_error_to_cli(exc, leaf.format_usage()) from None

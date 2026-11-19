@@ -99,7 +99,13 @@ def _never_echoes(exc: RefError, value: str) -> None:
         ("https://gitlab.com/g/s/p/-/merge_requests/9", "gitlab.com/g/s/p#9"),
         ("https://gitlab.com/g/p/merge_requests/9/diffs", "gitlab.com/g/p#9"),
         ("https://gitlab.com/g/p/-/merge_requests/9/pipelines/", "gitlab.com/g/p#9"),
-        ("HTTPS://gitlab.com/g/p/-/merge_requests/9", "gitlab.com/g/p#9"),
+        ("https://GitLab.com/g/p/-/merge_requests/9", "gitlab.com/g/p#9"),
+        ("github.com/o/-r#1", "github.com/o/-r#1"),
+        ("https://github.com/o/-r/pull/1", "github.com/o/-r#1"),
+        ("https://www.github.com/o/r/pull/1", "github.com/o/r#1"),
+        ("https://h.test/o/r/pull/1", "h.test/o/r#1"),
+        ("https://h.test/g/p/-/merge_requests/1", "h.test/g/p#1"),
+        ("h.test/a/-c#1", "h.test/a/-c#1"),
     ],
 )
 def test_parse_pr_accepts_and_canonicalizes(text: str, canonical: str) -> None:
@@ -132,7 +138,13 @@ def test_parse_pr_accepts_and_canonicalizes(text: str, canonical: str) -> None:
         "github.com/../r#1",
         "github.com/o/r/..#1",
         "github.com/-o/r#1",
-        "github.com/o/-r#1",
+        "gitlab.com/g/-s#1",
+        "h.test/a/b/-c#1",
+        "HTTPS://github.com/o/r/pull/1",
+        "HTTPS://gitlab.com/g/p/-/merge_requests/1",
+        "https://github.com/g/p/-/merge_requests/1",
+        "https://gitlab.com/o/r/pull/1",
+        "https://www.gitlab.com/o/r/pull/1",
         "github.com/o/r.git#1",
         "github.com/o/r%2e#1",
         "github.com/o/r@x#1",
@@ -242,6 +254,7 @@ def test_parse_reference_pr_url_or_pr_id() -> None:
     [
         *HOSTILE,
         "https://github.com/o/r/issues/1",  # URL-shaped: never falls back to a pr_id
+        "HTTPS://github.com/o/r/pull/1",
         "https://github.com/o/r",
         "github.com/o/r#0",  # `#` present: a PR form, never a pr_id
         "..",
@@ -370,6 +383,7 @@ def test_parse_host_refuses(text: str) -> None:
         ("h.test:443/g/p", "h.test/g/p"),
         ("h.test/a.b/c_d-e", "h.test/a.b/c_d-e"),
         ("h.test/.hidden/x", "h.test/.hidden/x"),
+        ("github.com/o/-r", "github.com/o/-r"),
     ],
 )
 def test_parse_repo(text: str, repo: str) -> None:
@@ -392,7 +406,8 @@ def test_parse_repo(text: str, repo: str) -> None:
         "github.com/o/../r",
         "github.com/o/r/../..",
         "github.com/-o/r",
-        "github.com/o/-r",
+        "gitlab.com/g/-s",
+        "h.test/a/b/-c",
         "github.com/o/--config=/x",
         "github.com/o/r.git",
         "github.com/o/r#1",
@@ -682,6 +697,13 @@ def test_parse_hook() -> None:
         "on-pushed=echo\r",
         "on-pushed=echo‮",
         "on-pushed=" + "x" * 4097,
+        "on-pushed=\u00a0",
+        "on-pushed=\u3000",
+        "on-pushed=\u200b",
+        "on-pushed=\u2028",
+        "on-pushed=\u2800",
+        "on-pushed=\u115f\u1160\u3164\uffa0 ",
+        "on-pushed=echo\u200b",
     ],
 )
 def test_parse_hook_refuses(text: str) -> None:
@@ -733,7 +755,7 @@ def test_watch_key_grammar_matches_the_schema(key: str) -> None:
 
 def test_watch_key_is_ordered_by_bytes_not_locale() -> None:
     assert watch_key(["b.test", "B.test"], []) == "mine+open;host=b.test"
-    assert watch_key([], ["h.test/B/x", "h.test/a/x"]) == "mine+open;repo=h.test/B/x,h.test/a/x"
+    assert watch_key([], ["h.test/B/x", "h.test/a/x"]) == "mine+open;repo=h.test/a/x,h.test/b/x"
 
 
 def test_validators_do_not_hang_on_adversarial_input() -> None:
@@ -742,3 +764,61 @@ def test_validators_do_not_hang_on_adversarial_input() -> None:
     nasty_url = "https://github.com/" + "a-" * 400 + "/pull/1"
     assert _err(parse_pr, nasty_url).code == "invalid_pr"
     assert _err(parse_pr, "https://gitlab.com/" + "a/" * 400 + "-/merge_requests/x").code
+
+
+# --- review round 1 ---------------------------------------------------------------------------
+
+
+def test_r1_url_forms_with_a_leading_dash_repo_name() -> None:
+    assert parse_pr("github.com/o/-r#1").canonical == "github.com/o/-r#1"
+    assert parse_pr("https://github.com/o/-r/pull/1").canonical == "github.com/o/-r#1"
+    assert parse_pr("h.test/a/-c#1").number == 1
+
+
+@pytest.mark.parametrize(
+    "text", ["https://github.com/-o/r/pull/1", "https://gitlab.com/g/-s/-/merge_requests/1"]
+)
+def test_r1_url_forms_refused(text: str) -> None:
+    assert _err(parse_pr, text).code == "invalid_pr"
+
+
+def test_r7_repo_id_is_capped_as_a_whole() -> None:
+    host = "h.test/"
+    path = "a" * (255 - len(host))
+    assert parse_repo(host + path) == host + path
+    assert _err(parse_repo, host + path + "a").kind == "bad_repo"
+    assert parse_pr(f"{host}{path}#1").repo == host + path
+    assert _err(parse_pr, f"{host}{path}a#1").code == "invalid_pr"
+    assert parse_pr(f"https://{host}{path}/-/merge_requests/1").repo == host + path
+    assert _err(parse_pr, f"https://{host}{path}a/-/merge_requests/1").code == "invalid_pr"
+
+
+def test_r8_watch_key_folds_the_case_of_repos() -> None:
+    assert watch_key([], ["h.test/O/R", "h.test/o/r"]) == "mine+open;repo=h.test/o/r"
+    assert watch_key([], ["h.test/B/x", "h.test/a/x"]) == "mine+open;repo=h.test/a/x,h.test/b/x"
+
+
+def test_r9_watch_key_longer_than_4096_is_usage() -> None:
+    repos = [f"h.test/o/{'r' * 100}{i:03d}" for i in range(50)]
+    exc = _err(watch_key, [], repos)
+    assert (exc.code, exc.kind) == ("usage", "filters_too_long")
+    assert len(watch_key([], repos[:30])) <= 4096
+
+
+def test_r14_hook_names_are_shared_with_config() -> None:
+    from pr_watch import config
+
+    assert set(refs.HOOK_NAMES) == set(config.HOOK_NAMES)
+    assert len(refs.HOOK_NAMES) == len(set(refs.HOOK_NAMES))
+
+
+@pytest.mark.parametrize("cmd", ["\u00a0", "\u3000", "\u200b", "\u2028", "\u2800", "", " \n"])
+def test_r2_check_hook_cmd_refuses(cmd: str) -> None:
+    assert not refs.check_hook_cmd(cmd)
+
+
+def test_r2_check_hook_cmd_accepts() -> None:
+    assert refs.check_hook_cmd("echo hi")
+    assert refs.check_hook_cmd("a\n\tb")
+    assert refs.check_hook_cmd("\u00a0echo")
+    assert refs.check_hook_cmd("echo \u00e9")

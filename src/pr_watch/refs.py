@@ -13,7 +13,9 @@ follows:
   strings), so the caller never passes input text on. A `pr_id` is a separate type (`PrId`) that
   cannot be mistaken for a PR reference, and is for offline matching only: never argv, never a path.
 - pr-watch never relies on `--` before positionals (design.md, Live verification V1): a value
-  that starts with `-` is refused here, so no value can be read as an option.
+  that starts with `-` is refused here, so no value can be read as an option. The canonical
+  argv token starts with the host, so a path segment that starts with `-` cannot be read as an
+  option; it is still refused except where a GitHub repo name needs it (see `_norm_path`).
 
 The grammars are those of the schema's `defs.json`, tightened to what forgectl accepts at tag
 v0.55.3 (userinfo, `%`, `\\`, whitespace and non-ASCII are refused in URLs; a `www.` prefix
@@ -93,6 +95,25 @@ _REPO_RE: Final = re.compile(REPO)
 _DURATION_RE: Final = re.compile(DURATION)
 _INTERVAL_RE: Final = re.compile(INTERVAL)
 _CMD_RE: Final = re.compile(CMD)
+_REFUSED_CMD_CATEGORIES: Final = frozenset({"Cf", "Zl", "Zp", "Cs"})
+# Characters that draw nothing although they are not whitespace.
+_INVISIBLE: Final = frozenset("\u2800\u115f\u1160\u3164\uffa0")
+
+
+def check_hook_cmd(cmd: str) -> bool:
+    """Whether `cmd` is an acceptable hook command (the one rule of `--hook` and of config).
+
+    The schema pattern (`CMD`) and the length, then no format, line or paragraph separator or
+    surrogate character, and at least one character that is not whitespace, a space separator
+    or invisible."""
+    if len(cmd) > MAX_HOOK_CMD_CHARS or not _CMD_RE.fullmatch(cmd):
+        return False
+    if any(unicodedata.category(ch) in _REFUSED_CMD_CATEGORIES for ch in cmd):
+        return False
+    return any(
+        not ch.isspace() and ch not in _INVISIBLE and unicodedata.category(ch) != "Zs" for ch in cmd
+    )
+
 
 EVENT_TYPES: Final = (
     "pushed",
@@ -123,6 +144,7 @@ MAX_HOST_CHARS: Final = 253 + 6  # name and `:65535`
 MAX_REPO_CHARS: Final = 255
 MAX_SEGMENTS: Final = 20
 MAX_HOOK_CMD_CHARS: Final = 4096
+MAX_WATCH_KEY_CHARS: Final = 4096  # maxLength of `watch_key` in schemas/defs.json
 MAX_OWNER_CHARS: Final = 64
 _HUMAN_PREFIX: Final = "human:"
 _NUMBER: Final = r"[1-9][0-9]{0,9}"
@@ -157,18 +179,24 @@ def _norm_host(text: str) -> str | None:
     return f"{name}:{port}" if port else name
 
 
-def _norm_path(path: str, *, leading_slash: bool = False) -> str | None:
-    """The path (`o/r`, `g/s/p`) when every segment is acceptable, else None. A segment is
-    `[A-Za-z0-9._-]+`, not `.` or `..`, not starting with `-` (an option), and the last one is
-    not a `.git` name. Both backends' rules at once: the conservative reading, since the
-    backend of a host is config."""
+def _norm_path(path: str, host: str, *, leading_slash: bool = False) -> str | None:
+    """The path (`o/r`, `g/s/p`) of a repo on the normalized `host` when every segment is
+    acceptable, else None. A segment is `[A-Za-z0-9._-]+` and not `.` or `..`; the last one is
+    not a `.git` name; `host/path` is at most 255 characters. A segment starting with `-` is
+    refused (an option, and not a legal name on most backends), except the repo name of a
+    two-segment path on a host that is not gitlab.com (GitHub allows it; the backend of other
+    hosts is config, so the conservative reading is a later refusal, never an injection: the
+    argv token starts with the host). The first segment never starts with `-`."""
     if leading_slash:
         path = path[1:]
     segments = path.split("/")
-    if not 1 <= len(segments) <= MAX_SEGMENTS or len(path) > MAX_REPO_CHARS:
+    if not 1 <= len(segments) <= MAX_SEGMENTS or len(host) + 1 + len(path) > MAX_REPO_CHARS:
         return None
-    for segment in segments:
-        if not _SEGMENT.fullmatch(segment) or segment in (".", "..") or segment.startswith("-"):
+    dash_allowed_last = len(segments) == 2 and host != "gitlab.com"
+    for index, segment in enumerate(segments):
+        if not _SEGMENT.fullmatch(segment) or segment in (".", ".."):
+            return None
+        if segment.startswith("-") and not (index == 1 and dash_allowed_last):
             return None
     if segments[-1].lower().endswith(".git"):
         return None
@@ -214,7 +242,8 @@ class PrId:
     value: str
 
 
-_URL: Final = re.compile(r"https://([^/?#]+)(/[^?#]*)(?:\?([^#]*))?(?:#(.*))?", re.IGNORECASE)
+# The scheme is case-sensitive, as in forgectl; the host is lowercased by `_norm_host`.
+_URL: Final = re.compile(r"https://([^/?#]+)(/[^?#]*)(?:\?([^#]*))?(?:#(.*))?")
 _GITHUB_URL: Final = re.compile(
     rf"(/[^/]+/[^/]+)/pull/({_NUMBER})(?:/files|/commits|/commits/[0-9a-fA-F]{{7,40}}"
     r"|/checks|\.diff|\.patch)?"
@@ -238,13 +267,14 @@ def _from_url(text: str) -> PrRef | None:
         return None
     if rest.endswith("/"):
         rest = rest[:-1]
-    if github := _GITHUB_URL.fullmatch(rest):
-        path = _norm_path(github[1], leading_slash=True)
+    # On the two built-in hosts the URL kind must match the host; other hosts take either.
+    if host != "gitlab.com" and (github := _GITHUB_URL.fullmatch(rest)):
+        path = _norm_path(github[1], host, leading_slash=True)
         if path is None or path.count("/") != 1:
             return None
         return PrRef(host, path, int(github[2]))
-    if gitlab := _GITLAB_URL.fullmatch(rest):
-        path = _norm_path(gitlab[1], leading_slash=True)
+    if host != "github.com" and (gitlab := _GITLAB_URL.fullmatch(rest)):
+        path = _norm_path(gitlab[1], host, leading_slash=True)
         if path is None or {"-", "merge_requests"} & set(path.split("/")):
             return None
         return PrRef(host, path, int(gitlab[2]))
@@ -261,12 +291,12 @@ def parse_pr(text: str) -> PrRef:
     if not _PRINTABLE_ASCII.fullmatch(text) or len(text) > MAX_PR_CHARS or text.startswith("-"):
         raise _bad_pr()
     if _is_url_form(text):
-        ref = _from_url(text)
+        ref = _from_url(text) if text.startswith("https://") else None
     else:
         ref = None
         if match := _PR_FORM.fullmatch(text):
             host = _norm_host(match[1])
-            path = _norm_path(match[2], leading_slash=True)
+            path = _norm_path(match[2], host, leading_slash=True) if host is not None else None
             if host is not None and path is not None:
                 ref = PrRef(host, path, int(match[3]))
     if ref is None:
@@ -321,7 +351,7 @@ def parse_repo(text: str) -> str:
     """A `--repo` value: `host/<full project path>`, host lowercased."""
     host_text, slash, path_text = text.partition("/")
     host = _norm_host(host_text)
-    path = _norm_path(path_text) if slash else None
+    path = _norm_path(path_text, host) if slash and host is not None else None
     if host is None or path is None or not _REPO_RE.fullmatch(f"{host}/{path}"):
         raise _usage("bad_repo", "--repo must be host/<project path>")
     return f"{host}/{path}"
@@ -435,13 +465,7 @@ def parse_hook(text: str) -> tuple[str, str]:
     characters without control, format or separator characters. CMD is a static trusted
     string that is never put in argv; control characters are refused anyway."""
     name, sep, cmd = text.partition("=")
-    if (
-        not sep
-        or name not in HOOK_NAMES
-        or len(cmd) > MAX_HOOK_CMD_CHARS
-        or not _CMD_RE.fullmatch(cmd)
-        or any(unicodedata.category(ch) in ("Cf", "Zl", "Zp", "Cs") for ch in cmd)
-    ):
+    if not sep or name not in HOOK_NAMES or not check_hook_cmd(cmd):
         raise _usage("bad_hook", "--hook must be NAME=CMD with a hook name and a plain command")
     return name, cmd
 
@@ -463,12 +487,16 @@ WATCH_KEY: Final = re.compile(
 def watch_key(hosts: Iterable[str], repos: Iterable[str]) -> str:
     """The canonical key of the query watch `--mine --open`: `mine+open`, then, when filters
     were given, `;host=<h>,...;repo=<id>,...` with each list sorted (by code point) and
-    deduplicated. Hosts and repos are the validated values of `parse_host` and `parse_repo`."""
+    deduplicated; repos are ASCII-lowercased first (hosts already are), so `h/O/R` and `h/o/r`
+    are one key. Hosts and repos are the validated values of `parse_host` and `parse_repo`.
+    A key over 4096 characters raises RefError `usage` (`filters_too_long`)."""
     key = "mine+open"
     host_list = sorted({_ascii_lower(h) for h in hosts})
-    repo_list = sorted(set(repos))
+    repo_list = sorted({_ascii_lower(r) for r in repos})
     if host_list:
         key += ";host=" + ",".join(host_list)
     if repo_list:
         key += ";repo=" + ",".join(repo_list)
+    if len(key) > MAX_WATCH_KEY_CHARS:
+        raise _usage("filters_too_long", "the --host and --repo filters are too long together")
     return key

@@ -45,6 +45,7 @@ from .refs import (
     HOST,
     INTERVAL,
     REPO,
+    check_hook_cmd,
     duration_ms,
     ecma,
     interval_divides,
@@ -182,6 +183,13 @@ class HookCmd(_Model):
     cmd: str = Field(min_length=1, max_length=4096, pattern=_CMD)
     timeout: int = Field(default=30, ge=1, le=600)
     async_: bool = Field(default=True, alias="async")
+
+    @field_validator("cmd", mode="after")
+    @classmethod
+    def _cmd_is_a_plain_command(cls, value: str) -> str:
+        if not check_hook_cmd(value):
+            raise ValueError("must be a plain command (no format or separator characters)")
+        return value
 
 
 class Hooks(_Model):

@@ -262,3 +262,80 @@ def test_commands_without_owner_defaulting_keep_none(
     monkeypatch.setattr(cli_module, "_stdin_is_tty", lambda: False)
     assert run(capsys, "list")[0] == 0
     assert seen[-1].owner is None
+
+
+# --- review round 1 ---------------------------------------------------------------------------
+
+
+def test_r6_owner_required_is_raised_before_the_config_is_read(
+    capsys: pytest.CaptureFixture[str],
+    seen: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    monkeypatch.setattr(cli_module, "_stdin_is_tty", lambda: False)
+    broken = tmp_path / "broken.yaml"
+    broken.write_text("poll: [unclosed\n")
+    code, out, _ = run(capsys, "--json", "--config", str(broken), "watch", "add", "o/r#1")
+    assert code == 2
+    error = json.loads(out)["error"]
+    assert (error["code"], error["details"]["kind"]) == ("usage", "owner_required")
+    assert_valid("cli/error", json.loads(out))
+
+
+def test_r9_filters_too_long_is_a_usage_error(
+    capsys: pytest.CaptureFixture[str], seen: list[Any]
+) -> None:
+    argv = ["watch", "add", "--mine", "--open", *OWNER]
+    for i in range(50):
+        argv += ["--repo", f"h.test/o/{'r' * 100}{i:03d}"]
+    refused(capsys, seen, "usage", "filters_too_long", *argv)
+
+
+def test_r1_dash_names_through_the_cli(capsys: pytest.CaptureFixture[str], seen: list[Any]) -> None:
+    assert run(capsys, "show", "github.com/o/-r#1")[0] == 0
+    seen.clear()
+    refused(capsys, seen, "invalid_pr", "bad_pr", "show", "github.com/-o/r#1")
+    refused(capsys, seen, "usage", "bad_repo", "poll", "--repo", "gitlab.com/g/-s")
+
+
+def test_r15_every_refusal_envelope_matches_the_error_schema(
+    capsys: pytest.CaptureFixture[str], seen: list[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli_module, "_stdin_is_tty", lambda: False)
+    cases = [
+        (["watch", "add", "o/r#1"], "owner_required"),
+        (["show", "a b"], "bad_pr"),
+        (["poll", "--repo", "x"], "bad_repo"),
+        (["list", "--owner=-x"], "bad_owner"),
+        (["poll", "--hook", "on-x=y"], "bad_hook"),
+        (["events", "--limit", "0"], "bad_limit"),
+        (["watch", "add", "--mine", "--open", "--host", "a.test", "--repo", "b.test/x/y", *OWNER],
+         "bad_combination"),
+        (["cron", "install", "--every", "7m"], "bad_every"),
+        (["export", "--since", "5"], "bad_duration"),
+        (["label", "add", "--watch", "w-x", "k=v", *OWNER], "bad_watch_id"),
+        (["watch", "add", "--mine", "--open", "--host=-x", *OWNER], "bad_host"),
+    ]  # fmt: skip
+    for argv, kind in cases:
+        _, out, _ = run(capsys, "--json", *argv)
+        doc = json.loads(out)
+        assert_valid("cli/error", doc)
+        assert doc["error"]["details"]["kind"] == kind, argv
+
+
+def test_r15_ambiguous_reference_envelope_matches_the_error_schema(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pr_watch.refs import match_stored
+
+    def handler(ctx: Context, args: Any) -> int:
+        match_stored(args.pr, [("h.test/o/r#1", "id-1"), ("h.test/o/r#1", "id-2")])
+        return 0
+
+    monkeypatch.setitem(HANDLERS, "show", handler)
+    code, out, _ = run(capsys, "--json", "show", "h.test/o/r#1")
+    assert code == 2
+    doc = json.loads(out)
+    assert_valid("cli/error", doc)
+    assert doc["error"]["details"]["kind"] == "ambiguous_reference"

@@ -36,9 +36,10 @@ Third parties: none directly (git-host access is forgectl's). Dependencies of th
 
 Value validation (`refs`, implementation readings where the interface is silent; always the narrower one):
 
-- A path segment starting with `-` is refused in every PR, URL and repo form (backend unknown offline), and a last segment ending in `.git` is refused.
-- URLs follow forgectl v0.55.3: ASCII only; `@`, `\\`, `%`, whitespace refused; query and fragment limited to `[A-Za-z0-9._~=&-]`; only forgectl's suffixes are accepted after the number (so a stray trailing path is refused rather than ignored). `:443` and a `www.` before `github.com` or `gitlab.com` are dropped; other ports must be 1 to 65535 without a leading zero.
-- An owner given with `--owner` is never lowercased or cleaned: it matches the owner grammar or is `usage` (`bad_owner`). The default `human:<name>` cuts the cleaned name to 58 characters so the whole owner stays within 64.
+- Path segments, URL grammar, host normalization and the hook-command rule are defined in [Identifiers](interface.md#identifiers) (leading `-` and `.git`, the 255-character cap, the URL suffixes, `www.` and `:443`, `check_hook_cmd`); this list only records the reasons. The reading is always the narrower one: the `.git` refusal narrows the schema's `repo_id` and `pr` patterns on purpose.
+- `-` is refused in a first segment always, and in a later segment except a two-segment path on a host that is not `gitlab.com` (a GitHub repo name may start with `-`; the backend is known only after config, so a later stage may refuse more). The canonical argv token starts with the host, so no value can be read as an option.
+- An owner given with `--owner` is never lowercased or cleaned: it matches the owner grammar or is `usage` (`bad_owner`). The default `human:<name>` cuts the cleaned name to 58 characters so the whole owner stays within 64. Deviation from the design guide (section 6 actor rule, which replaces with `_` and does not lowercase): the owner grammar is lowercase and its charset allows `-`, so the cleaning lowercases ASCII only and replaces other characters with `-`; this repo's interface is normative.
+- `--hook` and config hook commands share `refs.check_hook_cmd`; `watch_key` lowercases repos and refuses a key over 4096 characters (`filters_too_long`).
 - Every refusal is `RefError` with fixed text and a `details.kind`; no message contains the value.
 
 ## Resolved open topics
