@@ -17,7 +17,8 @@ pass is replaced by the empty shape (`ci` all null or empty, `{}`), so a corrupt
 never reaches the output.
 
 Seams: the digest built here has `ci.hold` 0 and `ci.hold_to` null; the CI hold (which keeps the
-previous `ci` and counts snapshots) is applied by the diff. TODO(#15): CI hold over this digest.
+previous `ci` and counts snapshots) is applied by the diff; `diff(...).digest` is the digest
+to store.
 TODO(#14): the diff reads new comments and reviews from the snapshot, filtered by `comment_ids`
 and `review_ids`, against `seen`.
 """
@@ -277,8 +278,10 @@ def _blocked_by(value: object) -> object:
     return [{"code": c} if not d else {"code": c, "detail": d} for c, d in kept]
 
 
-def _checks(ci: Mapping[str, Any]) -> tuple[dict[str, dict[str, str]], int]:
-    found: dict[str, tuple[str, str]] = {}  # key -> (name, state)
+def counted_checks(ci: Mapping[str, Any]) -> dict[str, tuple[str, str]]:
+    """Key -> (full name, state) of the counted checks of a readable `ci`, uncapped. Checks that
+    share a key merge, the worst state winning, whatever the order."""
+    found: dict[str, tuple[str, str]] = {}
     for item in ci["checks"]:
         data = _dict(item)
         name = data.get("name")
@@ -290,6 +293,11 @@ def _checks(ci: Mapping[str, Any]) -> tuple[dict[str, dict[str, str]], int]:
         key = check_key(name, data.get("url"))
         if key not in found or _CHECK_RANK[state] > _CHECK_RANK[found[key][1]]:
             found[key] = (name, state)
+    return found
+
+
+def _checks(ci: Mapping[str, Any]) -> tuple[dict[str, dict[str, str]], int]:
+    found = counted_checks(ci)
     keys = sorted(found)
     kept = {
         k: {"name": bounded_one_line(found[k][0], MAX_FIELD_CHARS), "state": found[k][1]}
