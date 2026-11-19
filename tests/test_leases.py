@@ -67,7 +67,8 @@ def fake_proc(
 
 def insert_row(store: Store, ident: ProcessIdentity, expires: datetime, pr_id: str = PR_ID) -> None:
     store.conn.execute(
-        "INSERT OR REPLACE INTO leases VALUES (?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO leases (pr_id, holder_pid, holder_start, boot_id, expires_at) "
+        "VALUES (?, ?, ?, ?, ?)",
         (pr_id, ident.pid, ident.start, ident.boot_id, format_ts(expires)),
     )
 
@@ -203,6 +204,33 @@ def test_a_clock_stepped_back_does_not_pin_a_lease(store: Store, tmp_path: Path)
     assert leases.acquire(PR_ID) is not None
 
 
+def test_a_smaller_ttl_contender_does_not_take_a_live_holders_lease(
+    store: Store, tmp_path: Path
+) -> None:
+    proc = fake_proc(tmp_path / "proc", procs={1: ("me", 100, "S"), 2: ("other", 200, "S")})
+    short = Leases(
+        store,
+        timedelta(minutes=1),
+        clock=Clock(),
+        proc=proc,
+        identity=ProcessIdentity(1, "100", "boot-a"),
+    )
+    insert_row(store, ProcessIdentity(2, "200", "boot-a"), NOW + TTL)  # written with a 6m ttl
+    assert short.acquire(PR_ID) is None
+
+
+@pytest.mark.parametrize("empty", ["start", "boot"])
+def test_an_empty_identity_field_with_a_live_pid_is_takeable(
+    store: Store, tmp_path: Path, empty: str
+) -> None:
+    leases = make(store, tmp_path, Clock())
+    ident = ProcessIdentity(
+        2, "" if empty == "start" else "200", "" if empty == "boot" else "boot-a"
+    )
+    insert_row(store, ident, NOW + TTL)
+    assert leases.acquire(PR_ID) is not None
+
+
 def test_a_garbage_expiry_is_expired(store: Store, tmp_path: Path) -> None:
     leases = make(store, tmp_path, Clock())
     insert_row(store, ProcessIdentity(2, "200", "boot-a"), NOW + TTL)
@@ -301,15 +329,17 @@ def spawn(code: str, *args: str) -> subprocess.Popen[str]:
 def test_two_processes_racing_for_a_lease_exactly_one_wins(state: StateDir) -> None:
     with open_store(state):
         pass
-    procs = [spawn(RACER, str(state.path), "0.5") for _ in range(3)]
+    procs = [spawn(RACER, str(state.path), "120") for _ in range(3)]  # all stay alive
     try:
         results = []
         for p in procs:
             assert p.stdout is not None
             results.append(p.stdout.readline().strip())
     finally:
-        for p in procs:
-            p.wait(timeout=30)
+        for p in procs:  # the exact children we started
+            if p.poll() is None:
+                p.kill()
+                p.wait(timeout=30)
     assert sorted(results) == ["lost", "lost", "won"]
 
 
@@ -327,6 +357,94 @@ def test_a_killed_holder_is_taken_over_by_pid_and_start_time(state: StateDir) ->
             if holder.poll() is None:
                 holder.kill()
                 holder.wait(timeout=30)
+
+
+TAKEOVER_CHILD = """
+    import sys, time
+    from datetime import timedelta
+    from pathlib import Path
+    from pr_watch.commit import commit_snapshot
+    from pr_watch.leases import Leases
+    from pr_watch.state_dir import open_state_dir
+    from pr_watch.store import NewEvent, open_store
+    s = open_store(open_state_dir(Path(sys.argv[1])), busy_timeout_ms=20000)
+    assert Leases(s, timedelta(minutes=5)).acquire("PR_abc123") is not None
+    rev = s.conn.execute("SELECT rev FROM prs WHERE pr_id = 'PR_abc123'").fetchone()[0]
+    print("held", flush=True)
+    sys.stdin.readline()  # the parent has taken over and committed
+    r = commit_snapshot(
+        s, pr_id="PR_abc123", expected_rev=rev, snapshot_pr_id="PR_abc123",
+        fields={"digest": "child"},
+        prepare=lambda conn: [NewEvent("closed", "PR_abc123", "github.com/o/r#1",
+            {"repo": "github.com/o/r", "occurred_at": None, "head_sha": "a" * 40, "watches": []})],
+    )
+    print("committed" if r.committed else r.reason.value, flush=True)
+"""
+
+
+def test_takeover_of_a_live_holder_yields_no_duplicate_events(
+    state: StateDir, tmp_path: Path
+) -> None:
+    from pr_watch.commit import commit_snapshot
+    from pr_watch.store import NewEvent
+
+    pr = "PR_abc123"
+    with open_store(state) as s:
+        s.conn.execute(
+            "INSERT INTO watches VALUES ('w-aaaaaaaaaa', 'pr', 'github.com/o/r#1', "
+            "'2026-01-01T00:00:00.000000Z')"
+        )
+        s.conn.execute("INSERT INTO prs (pr_id, pr, repo, host) VALUES (?, 'p', 'r', 'h')", (pr,))
+        s.conn.execute("INSERT INTO sources (pr_id, watch_id) VALUES (?, 'w-aaaaaaaaaa')", (pr,))
+    env = {**os.environ, "HOME": str(tmp_path / "h"), "XDG_CONFIG_HOME": str(tmp_path / "c")}
+    child = subprocess.Popen(
+        [sys.executable, "-c", textwrap.dedent(TAKEOVER_CHILD), str(state.path)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        assert child.stdout is not None and child.stdin is not None
+        assert child.stdout.readline().strip() == "held"  # alive, rev 0 recorded
+        with open_store(state, busy_timeout_ms=20000) as s:
+            clock = Clock(datetime.now(UTC))
+            leases = Leases(s, timedelta(minutes=5), clock=clock)
+            assert leases.acquire(pr) is None  # live and unexpired
+            clock.now += timedelta(minutes=6)  # expiry: taken over although the child lives
+            assert leases.acquire(pr) is not None
+            event = NewEvent(
+                "closed",
+                pr,
+                "github.com/o/r#1",
+                {
+                    "repo": "github.com/o/r",
+                    "occurred_at": None,
+                    "head_sha": "a" * 40,
+                    "watches": [],
+                },
+            )
+            first = commit_snapshot(
+                s,
+                pr_id=pr,
+                expected_rev=0,
+                snapshot_pr_id=pr,
+                fields={"digest": "parent"},
+                prepare=lambda conn: [event],
+            )
+            assert first.committed
+        child.stdin.write("go\n")
+        child.stdin.flush()
+        assert child.stdout.readline().strip() == "revision"
+        child.wait(timeout=30)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=30)
+    with open_store(state) as s:
+        assert s.conn.execute("SELECT count(*) FROM events").fetchone()[0] == 1
+        assert s.conn.execute("SELECT digest FROM prs").fetchone()[0] == "parent"
 
 
 def test_a_row_with_a_non_numeric_pid_is_takeable(store: Store, tmp_path: Path) -> None:

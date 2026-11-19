@@ -15,8 +15,9 @@ checklist, #32, covers the boot-id substitute).
 
 Expiry uses the wall clock, since the row is shared between processes (a monotonic clock is
 per-boot and per-process). A clock stepped backwards would leave a lease with an expiry far in the
-future; an expiry more than `ttl + FUTURE_SLACK` ahead of now is therefore treated as expired, and
-so is an unparseable one. Takeover is always safe (compare-and-set), so these err toward progress.
+future; an expiry more than `MAX_LEASE_TTL + FUTURE_SLACK` ahead of now is therefore treated as
+expired, and so is an unparseable one. Takeover is always safe (compare-and-set), so these err
+toward progress.
 
 Like store.py this module never opens a descriptor on `state.db`, `-wal` or `-shm` (closing one
 drops SQLite's locks); it reads only `/proc` files and goes through `Store.transaction()`.
@@ -37,6 +38,10 @@ from .store import Store, format_ts
 
 UNKNOWN: Final = "unknown"
 FUTURE_SLACK: Final = timedelta(seconds=60)
+# The longest lease any process may write; a longer `ttl` is capped to it. The future-expiry check
+# uses this fixed value, never the contender's own ttl: a contender with a shorter ttl must not
+# take over a live holder's unexpired lease (docs/interface.md allows no cap on `forgectl.timeout`).
+MAX_LEASE_TTL: Final = timedelta(hours=1)
 _STAT_START_INDEX: Final = 19  # starttime is field 22; the fields after "(comm)" begin at field 3
 _DEAD_STATES: Final = frozenset({"Z", "X", "x"})
 
@@ -139,7 +144,7 @@ class Leases:
         if ttl <= timedelta(0):
             raise ValueError("a lease ttl must be positive")
         self.store = store
-        self.ttl = ttl
+        self.ttl = min(ttl, MAX_LEASE_TTL)
         self.clock = clock or (lambda: datetime.now(UTC))
         self.proc = proc or ProcFs()
         self.identity = identity or self.proc.identity()
@@ -150,11 +155,13 @@ class Leases:
         expires = _parse(stamp)
         if expires is None:
             return True
-        return expires <= now or expires - now > self.ttl + FUTURE_SLACK
+        return expires <= now or expires - now > MAX_LEASE_TTL + FUTURE_SLACK
 
     def _holder_liveness(self, pid: int, start: str, boot_id: str) -> Liveness:
         mine = self.identity
-        if UNKNOWN in (start, boot_id, mine.boot_id) or not boot_id:
+        if not start or not boot_id:
+            return Liveness.DEAD  # a row no process could have written
+        if UNKNOWN in (start, boot_id, mine.boot_id):
             return Liveness.UNKNOWN
         if boot_id != mine.boot_id:
             return Liveness.DEAD
@@ -185,7 +192,11 @@ class Leases:
                 (pr_id,),
             ).fetchone()
             if found is None:
-                conn.execute("INSERT INTO leases VALUES (?, ?, ?, ?, ?)", (pr_id, *values))
+                conn.execute(
+                    "INSERT INTO leases (pr_id, holder_pid, holder_start, boot_id, expires_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (pr_id, *values),
+                )
             elif self._takeable(found, now):
                 conn.execute(
                     "UPDATE leases SET holder_pid = ?, holder_start = ?, boot_id = ?, "
