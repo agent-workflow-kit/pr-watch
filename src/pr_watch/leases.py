@@ -8,10 +8,10 @@ not the holder is alive: that is safe because every commit is a compare-and-set 
 Liveness comes from `/proc` (Linux): the start time is field 22 of `/proc/<pid>/stat` (clock ticks
 since boot) and the boot id is `/proc/sys/kernel/random/boot_id`. A pid that exists with another
 start time is a reused pid (dead holder); another boot id is a rebooted machine (dead holder).
-Where `/proc` is missing (macOS) the interface names the boot time as the boot id but gives no way
-to read a start time, and no subprocess may run outside the gateway: the identity is then
-`unknown`, and an unknown holder counts as alive until its lease expires (conservative; the macOS
-checklist, #32, covers the boot-id substitute).
+Where `/proc` is missing (macOS) there is no way to read a start time or boot id, and no
+subprocess may run outside the gateway: the identity is then `unknown`, and an unknown holder
+counts as alive until its lease expires (conservative; the macOS checklist, #32, covers a
+substitute).
 
 Expiry uses the wall clock, since the row is shared between processes (a monotonic clock is
 per-boot and per-process). A clock stepped backwards would leave a lease with an expiry far in the
