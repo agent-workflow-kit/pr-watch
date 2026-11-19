@@ -365,7 +365,10 @@ def _merged(ctx: Ctx) -> list[dict[str, Any]]:
 
 
 def _closed(ctx: Ctx) -> list[dict[str, Any]]:
-    if not _became(ctx, "closed", ("open",)):
+    # a reactivated row (`rebaseline`) stored `closed` and closed again before this snapshot: the
+    # reopen was never seen, but the consumer has not seen this closing either, so it fires once
+    again = ctx.rebaseline and ctx.old.get("state") == "closed" and ctx.new.get("state") == "closed"
+    if not again and not _became(ctx, "closed", ("open",)):
         return []
     return [{"occurred_at": _ts(ctx.snap.get("closed_at"))}]
 
@@ -571,8 +574,7 @@ def plan_ci(
     return CiPlan({**copy.deepcopy(dict(stored)), "hold": count, "hold_to": after}, False)
 
 
-# The documented in-snapshot order. TODO(#16): reopen (a closed PR that is open again is a silent
-# re-baseline except pushed), rename by pr_id, incomplete-part counters.
+# The documented in-snapshot order.
 RULES: Final[tuple[Rule, ...]] = (
     Rule("pushed", _pushed),
     Rule("review", _review),
@@ -588,6 +590,12 @@ RULES: Final[tuple[Rule, ...]] = (
 
 
 # --- entry point -------------------------------------------------------------------------------
+
+
+def _reopened(stored: Mapping[str, Any] | None, new: Mapping[str, Any]) -> bool:
+    """A stored `closed` that the snapshot shows `open` again: a reopen, with or without the
+    row's `rebaseline` flag (a reactivation sets it; this covers a row that missed it)."""
+    return stored is not None and stored.get("state") == "closed" and new.get("state") == "open"
 
 
 def diff(
@@ -611,7 +619,7 @@ def diff(
     snap = _map(snapshot)
     repo, pr, pr_id = snap.get("repo"), snap.get("pr"), snap.get("pr_id")
     identity_ok = bool(
-        isinstance(repo, str) and REPO_RE.match(repo)
+        isinstance(repo, str) and len(repo) <= 256 and REPO_RE.match(repo)
         and isinstance(pr, str) and len(pr) <= 256 and PR_RE.match(pr)
         and isinstance(pr_id, str) and PR_ID_RE.match(pr_id)
     )  # fmt: skip
@@ -619,6 +627,13 @@ def diff(
     first = stored is None
     result = DiffResult()
     result.digest = copy.deepcopy(dict(new))
+    if _reopened(stored, new):
+        # a reopen is a silent re-baseline: parts that stay incomplete must not keep a baseline
+        rebaseline = True
+        flags = dict(_map(result.digest.get("baselined")))
+        for part in incomplete_parts(snap):
+            flags[part] = False
+        result.digest["baselined"] = flags
     if stored is not None and stored.get("state") == "merged":
         return result
     head = _sha(new.get("head_sha")) or (_sha(stored.get("head_sha")) if stored else None)

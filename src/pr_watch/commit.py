@@ -35,13 +35,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
 
-from .store import NewEvent, Store, StoredEvent, classify_error
+from .store import PR_RE, REPO_RE, NewEvent, Store, StoredEvent, classify_error
 
 # Columns of `prs` the snapshot-commit transaction writes (interface, State, transaction 2).
-# Identity (`pr_id`, `pr`, `repo`, `host`), `rev` and the columns owned by enumeration and the
+# `pr` and `repo` are refreshed from every snapshot (a rename or move keeps the `pr_id`). Identity
+# (`pr_id`, `host`), `rev` and the columns owned by enumeration and the
 # failure path (`listed_updated_at`, `last_attempt_at`, `last_failure_code`) are never writable.
 WRITABLE_FIELDS: Final = frozenset(
     {
+        "pr",
+        "repo",
         "status",
         "terminal_at",
         "terminal_kind",
@@ -121,6 +124,9 @@ def _check(
     return None
 
 
+_REF_FIELDS: Final = {"pr": PR_RE, "repo": REPO_RE}
+
+
 def commit_snapshot(
     store: Store,
     *,
@@ -141,6 +147,10 @@ def commit_snapshot(
             raise ValueError(f"{name!r} is not a column a snapshot commit may write")
         if value is not None and not isinstance(value, int | float | str | bytes):
             raise TypeError(f"field {name!r} must be None, int, float, str or bytes")
+        if name in _REF_FIELDS:
+            ok = isinstance(value, str) and len(value) <= 256 and _REF_FIELDS[name].match(value)
+            if not ok:
+                raise ValueError(f"field {name!r} is not a valid reference")
     if fields.get("terminal_kind") == "closed" and snapshot_updated_at is None:
         raise ValueError("a closed snapshot needs snapshot_updated_at")
     discard: DiscardReason | None = None

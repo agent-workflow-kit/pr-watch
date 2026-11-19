@@ -269,8 +269,6 @@ def test_prepare_may_write_in_the_same_transaction(store: Store) -> None:
     [
         "rev",
         "pr_id",
-        "pr",
-        "repo",
         "host",
         "listed_updated_at",
         "last_attempt_at",
@@ -286,6 +284,13 @@ def test_only_known_digest_columns_may_be_written(store: Store, key: str) -> Non
     with pytest.raises(ValueError):
         commit(store, fields={key: "x"})
     assert tuple(prs_row(store) or ())[0] == 0
+
+
+def test_a_rename_refreshes_pr_and_repo_but_never_the_identity(store: Store) -> None:
+    seed(store)
+    commit(store, fields={"pr": "github.com/o/new#1", "repo": "github.com/o/new"})
+    row = store.conn.execute("SELECT pr_id, pr, repo, host FROM prs").fetchone()
+    assert tuple(row) == (PR_ID, "github.com/o/new#1", "github.com/o/new", "h")
 
 
 def test_a_commit_inside_an_open_transaction_is_refused(store: Store) -> None:
