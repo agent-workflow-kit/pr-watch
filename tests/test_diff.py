@@ -13,11 +13,10 @@ from typing import Any
 
 import pytest
 
-from pr_watch import diff as diff_module
-from pr_watch.diff import RULES, DiffEvent, diff, forced_from_compare
+from pr_watch.diff import RULES, DiffEvent, DiffResult, Drop, diff, forced_from_compare
 from pr_watch.digest import build_digest
 from pr_watch.state_dir import StateDir, open_state_dir
-from pr_watch.store import Store, open_store
+from pr_watch.store import MAX_SAFE_INT, Store, open_store
 from tests.forgectl_support import new_pr, sha
 from tests.harness import schema_errors
 
@@ -100,7 +99,7 @@ def run(
     old_snap: dict[str, Any] | None,
     new_snap: dict[str, Any],
     **kw: Any,
-) -> list[DiffEvent]:
+) -> DiffResult:
     old = build_digest(old_snap) if old_snap is not None else None
     rebaseline = bool(kw.get("rebaseline"))
     new = build_digest(new_snap, old, rebaseline=rebaseline)
@@ -225,9 +224,31 @@ def test_forced_from_compare_table(status: str | None, expected: bool | None) ->
     assert forced_from_compare(status) is expected
 
 
-def test_pushed_64_hex_head_is_dropped_not_invalid() -> None:
-    # schemas/defs.json sha is 40 hex; an event that cannot validate is never produced
-    assert run(gh(), gh(head={"sha": "b" * 64})) == []
+def test_pushed_64_hex_head_validates_against_the_schema(store: Store) -> None:
+    # schemas/defs.json sha is 40 or 64 lowercase hex (a sha-256 repository)
+    old_snap, new_snap = gh(head={"sha": "a" * 64}), gh(head={"sha": "b" * 64})
+    (event,) = run(old_snap, new_snap)
+    assert event.payload["head_sha"] == "b" * 64
+    with store.transaction():
+        stored = store.append_event(event.to_new_event(labels=(), watches=(WATCH,)))
+    assert schema_errors("event", stored.to_json()) == []
+
+
+def test_41_hex_sha_is_refused_by_schema_digest_and_diff() -> None:
+    assert schema_errors("defs", "b" * 41, "sha") != []
+    assert schema_errors("defs", "b" * 40, "sha") == []
+    assert schema_errors("defs", "b" * 64, "sha") == []
+    snap = gh(head={"sha": "b" * 41})
+    assert build_digest(snap)["head_sha"] is None
+    result = run(gh(), snap)
+    assert result == [] and result.dropped == ()
+
+
+def test_mixed_length_push_is_one_valid_event(store: Store) -> None:
+    (event,) = run(gh(), gh(head={"sha": "b" * 64}))
+    with store.transaction():
+        stored = store.append_event(event.to_new_event(labels=(), watches=(WATCH,)))
+    assert schema_errors("event", stored.to_json()) == []
 
 
 # --- comment and review_comment ----------------------------------------------------------------
@@ -521,11 +542,20 @@ def test_merged_is_final(then: str) -> None:
     assert run(old, with_(gh(head={"sha": sha(2)}), state=then)) == []
 
 
-def test_unknown_old_state_emits_no_terminal_event() -> None:
+def test_unknown_old_state_is_first_sight_for_terminal_events() -> None:
     old = build_digest(gh(state="weird"))
     assert old["state"] is None
     new_snap = merged_snap(gh())
-    assert diff(old, build_digest(new_snap, old), new_snap) == []
+    assert types(diff(old, build_digest(new_snap, old), new_snap)) == ["merged"]
+
+
+def test_unknown_old_state_chain_emits_merged_once() -> None:
+    first = build_digest(gh(state="weird"))
+    merged = merged_snap(gh())
+    second = build_digest(merged, first)
+    assert types(diff(first, second, merged)) == ["merged"]
+    third = build_digest(merged, second)
+    assert diff(second, third, merged) == []
 
 
 @pytest.mark.parametrize("backend", [gh, gl])
@@ -681,6 +711,118 @@ def test_to_new_event_carries_identity_and_watches() -> None:
     assert "watches" not in event.payload
 
 
-def test_module_has_follow_up_seams() -> None:
-    source = Path(diff_module.__file__).read_text(encoding="utf-8")
-    assert "TODO(#15)" in source and "TODO(#16)" in source
+# --- dropped events (never silent) ------------------------------------------------------------
+
+
+def test_result_is_a_list_with_dropped_defaulting_to_empty() -> None:
+    result = run(gh(), merged_snap(gh()))
+    assert types(result) == ["merged"]
+    assert result.dropped == ()
+
+
+def test_invalid_identity_drops_the_event_with_a_reason_code() -> None:
+    new_snap = merged_snap(gh())
+    new_snap["pr_id"] = "bad id"
+    result = run(gh(), new_snap)
+    assert result == []
+    assert result.dropped == (Drop("merged", "invalid_identity"),)
+
+
+def test_review_with_unknown_state_or_bad_id_is_dropped_with_reasons() -> None:
+    result = run(gh(), plus_reviews(gh(), review(state="pending")))
+    assert result == [] and result.dropped == (Drop("review", "invalid_review_state"),)
+    result = run(gh(), plus_reviews(gh(), review(rid="gh:r:" + "a" * 120)))
+    assert result == [] and result.dropped == (Drop("review", "invalid_review_id"),)
+
+
+def test_comment_with_invalid_id_is_dropped_once_under_its_kind() -> None:
+    result = run(gh(), plus_threads(gh(), general("gh:ic:" + "a" * 120)))
+    assert result.dropped == (Drop("comment", "invalid_comment_id"),)
+    odd = inline("gh:rc:" + "a" * 120)
+    result = run(gh(), plus_threads(gh(), odd))
+    assert result.dropped == (Drop("review_comment", "invalid_comment_id"),)
+
+
+def test_drop_carries_no_host_text() -> None:
+    result = run(gh(), plus_threads(gh(), general("gh:ic:" + "evil" * 30)))
+    assert all(set(vars(d)) == {"type", "reason"} for d in result.dropped)
+    assert "evil" not in repr(result.dropped)
+
+
+def test_minimized_comment_is_not_a_drop() -> None:
+    new = plus_threads(gh(), general("gh:ic:IC_min", minimized=True))
+    assert run(gh(), new).dropped == ()
+
+
+# --- review_comment line bound (R1) -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("line", "kept"), [(MAX_SAFE_INT, True), (MAX_SAFE_INT + 1, False), (0, True)]
+)
+def test_review_comment_line_bounded_by_store_limit(line: int, kept: bool, store: Store) -> None:
+    odd = inline()
+    odd["line"] = line
+    (event,) = run(gh(), plus_threads(gh(), odd))
+    assert event.payload["line"] == (line if kept else None)
+    with store.transaction():
+        stored = store.append_event(event.to_new_event(labels=(), watches=(WATCH,)))
+    assert schema_errors("event", stored.to_json()) == []
+
+
+# --- invalid new head (R3) ---------------------------------------------------------------------
+
+
+def null_head_pair() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    old_snap = gh()
+    new_snap = plus_threads(old_snap, general())
+    old = build_digest(old_snap)
+    new = build_digest(new_snap, old)
+    new["head_sha"] = None
+    return old, new, new_snap
+
+
+def test_null_new_head_falls_back_to_the_old_head_for_other_events() -> None:
+    old, new, new_snap = null_head_pair()
+    result = diff(old, new, new_snap)
+    assert types(result) == ["comment"]
+    assert result[0].payload["head_sha"] == old["head_sha"]
+    assert result.dropped == ()
+
+
+def test_null_new_head_still_suppresses_pushed() -> None:
+    old, new, new_snap = null_head_pair()
+    assert "pushed" not in types(diff(old, new, new_snap))
+
+
+def test_no_valid_head_anywhere_drops_non_pushed_events_with_a_reason() -> None:
+    old, new, new_snap = null_head_pair()
+    old["head_sha"] = None
+    result = diff(old, new, new_snap)
+    assert result == []
+    assert result.dropped == (Drop("comment", "invalid_head_sha"),)
+
+
+def test_first_sight_terminal_with_null_head_is_dropped_with_a_reason() -> None:
+    snap = merged_snap(gh())
+    new = build_digest(snap)
+    new["head_sha"] = None
+    result = diff(None, new, snap)
+    assert result == [] and result.dropped == (Drop("merged", "invalid_head_sha"),)
+
+
+# --- review is GitHub only (R4), reviews gate (R6) ---------------------------------------------
+
+
+def test_gitlab_never_emits_review_even_with_a_github_style_id() -> None:
+    result = run(gl(), plus_reviews(gl(), review("gh:r:PRR_odd")))
+    assert [e for e in result if e.type == "review"] == []
+
+
+def test_review_after_incomplete_reviews_baseline_is_silent() -> None:
+    old_snap = gh()
+    old_snap["incomplete"] = ["reviews"]
+    old = build_digest(old_snap)
+    assert old["baselined"]["reviews"] is False
+    new_snap = plus_reviews(gh(), review())
+    assert diff(old, build_digest(new_snap, old), new_snap) == []
