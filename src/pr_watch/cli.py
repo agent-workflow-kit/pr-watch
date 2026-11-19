@@ -3,7 +3,10 @@
 Shape of the frame (docs/interface.md: Commands, Exit codes, Output by exit code):
 
 - `build_parser` declares every command and global flag. Values are parsed as plain strings;
-  validating them (references, labels, cursors, durations) belongs to their owners.
+  `validate_values` then checks every one with `refs` (before the config is read) and replaces it
+  with its validated form: `PrRef`/`PrId` for references, `Label` for labels, lowercase hosts,
+  canonical repos, ints for `--limit`. An owner default (`human:<me.name>`) is resolved after
+  the config is read. Handlers see only validated values.
 - `HANDLERS` maps a command path (`"watch add"`) to `handler(ctx, args) -> exit code`. A later
   issue replaces its command's stub with one small function. A handler prints its result with
   `ctx.emit` and returns 0 (or its own code, as `poll` does for exit 12 with a report), or raises
@@ -30,6 +33,24 @@ from typing import Any, NoReturn
 
 from . import __version__
 from .config import ConfigError, LoadedConfig, load_config
+from .refs import (
+    RefError,
+    parse_cursor,
+    parse_duration,
+    parse_every,
+    parse_hook,
+    parse_host,
+    parse_label,
+    parse_limit,
+    parse_owner,
+    parse_pr,
+    parse_reference,
+    parse_repo,
+    parse_type,
+    parse_watch_id,
+    resolve_owner,
+    watch_key,
+)
 
 PROG = "pr-watch"
 DESCRIPTION = "Watches PRs for changes and exposes them as events and hooks."
@@ -439,6 +460,118 @@ SHAPE_CHECKS: dict[str, Callable[[argparse.Namespace], None]] = {
 }
 
 
+# --- value validation (refs) --------------------------------------------------------------------
+
+
+def _each(values: list[str] | None, parse: Callable[[str], Any]) -> list[Any] | None:
+    return None if values is None else [parse(value) for value in values]
+
+
+def _one(value: str | None, parse: Callable[[str], Any]) -> Any:
+    return None if value is None else parse(value)
+
+
+def _check_filter_hosts(args: argparse.Namespace) -> None:
+    """A `--repo` whose host is not in a given `--host` list is a usage error."""
+    if args.host and args.repo:
+        hosts = set(args.host)
+        if any(repo.partition("/")[0] not in hosts for repo in args.repo):
+            raise _shape_error("bad_combination", "--repo names a host that --host does not list")
+
+
+def _query_filters(args: argparse.Namespace) -> None:
+    args.host = _each(args.host, parse_host)
+    args.repo = _each(args.repo, parse_repo)
+    _check_filter_hosts(args)
+    watch_key(args.host or [], args.repo or [])  # refuses filters that make a key too long
+
+
+def _check_watch_values(args: argparse.Namespace) -> None:
+    args.pr = _one(args.pr, parse_pr if args.command == "watch add" else parse_reference)
+    _query_filters(args)
+    args.label = _each(getattr(args, "label", None), parse_label)
+    args.owner = _one(args.owner, parse_owner)
+
+
+def _check_poll_values(args: argparse.Namespace) -> None:
+    args.pr = _one(args.pr, parse_pr)
+    args.repo = _one(args.repo, parse_repo)
+    args.hook = _each(args.hook, parse_hook)
+
+
+def _check_list_values(args: argparse.Namespace) -> None:
+    args.label = _each(args.label, parse_label)
+    args.owner = _one(args.owner, parse_owner)
+    args.pr = _one(args.pr, parse_reference)
+
+
+def _check_show_values(args: argparse.Namespace) -> None:
+    args.pr = parse_reference(args.pr)
+
+
+def _check_filter_values(args: argparse.Namespace) -> None:
+    args.label = _each(args.label, parse_label)
+    args.pr = _each(args.pr, parse_reference)
+    args.type = _each(args.type, parse_type)
+
+
+def _check_events_values(args: argparse.Namespace) -> None:
+    _check_filter_values(args)
+    args.since = _one(args.since, parse_cursor)
+    args.limit = _one(args.limit, parse_limit)
+
+
+def _check_export_values(args: argparse.Namespace) -> None:
+    _check_filter_values(args)
+    args.since = _one(args.since, parse_duration)
+
+
+def _check_label_values(args: argparse.Namespace) -> None:
+    args.pr = _one(args.pr, parse_reference)
+    args.watch = _one(args.watch, parse_watch_id)
+    args.labels = [parse_label(item) for item in args.labels]
+    args.owner = _one(args.owner, parse_owner)
+
+
+def _check_cron_values(args: argparse.Namespace) -> None:
+    args.every = _one(args.every, parse_every)
+
+
+VALUE_CHECKS: dict[str, Callable[[argparse.Namespace], None]] = {
+    "watch add": _check_watch_values,
+    "watch remove": _check_watch_values,
+    "poll": _check_poll_values,
+    "list": _check_list_values,
+    "show": _check_show_values,
+    "events": _check_events_values,
+    "export": _check_export_values,
+    "label add": _check_label_values,
+    "label remove": _check_label_values,
+    "cron install": _check_cron_values,
+}
+# Commands whose `--owner` defaults to `human:<me.name>` on a terminal (Identifiers: Owner).
+OWNER_DEFAULTED = frozenset({"watch add", "watch remove", "label add", "label remove"})
+
+
+def validate_values(args: argparse.Namespace) -> None:
+    """Replace every raw value in `args` with its validated form (refs). Raises RefError."""
+    VALUE_CHECKS.get(args.command, lambda _: None)(args)
+
+
+def ref_error_to_cli(exc: RefError, usage: str = "") -> CliError:
+    """The envelope error of a refused value. The message is fixed text, never the value."""
+    if exc.code == "usage":
+        return UsageError(str(exc), usage=usage, kind=exc.kind)
+    return CliError(exc.code, str(exc), details={"kind": exc.kind})
+
+
+def _stdin_is_tty() -> bool:
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
 # --- main ------------------------------------------------------------------------------------
 
 
@@ -493,10 +626,28 @@ def _execute(argv: Sequence[str]) -> int:
         SHAPE_CHECKS.get(args.command, lambda _: None)(args)
         if args.verbose and args.quiet:
             raise _shape_error("conflicting_flags", "--verbose and --quiet cannot be combined")
+        validate_values(args)
+    except RefError as exc:
+        raise ref_error_to_cli(exc, leaf.format_usage()) from None
     except UsageError as exc:
         exc.usage = exc.usage or leaf.format_usage()
         raise
+    defaulted = args.command in OWNER_DEFAULTED
+    interactive = _stdin_is_tty()
+    if defaulted and args.owner is None and not interactive:
+        # Needs no config: refuse before the config is read, so a broken file cannot mask it.
+        try:
+            resolve_owner(None, interactive=False, me_name=None)
+        except RefError as exc:
+            raise ref_error_to_cli(exc, leaf.format_usage()) from None
     loaded = load_config(args.config)
+    if defaulted:
+        try:
+            args.owner = resolve_owner(
+                args.owner, interactive=interactive, me_name=loaded.config.me.name
+            )
+        except RefError as exc:
+            raise ref_error_to_cli(exc, leaf.format_usage()) from None
     ctx = Context(json=args.json, quiet=args.quiet, verbose=args.verbose, loaded=loaded)
     return HANDLERS[args.command](ctx, args)
 
@@ -512,6 +663,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _report(exc, _wants_json(args))
     except ConfigError as exc:
         return _report(config_error_to_cli(exc), _wants_json(args))
+    except RefError as exc:  # raised by a handler that validates a stored value
+        return _report(ref_error_to_cli(exc), _wants_json(args))
     except Exception as exc:
         # Never traceback or exception text: it can carry host text or values.
         name = type(exc).__name__

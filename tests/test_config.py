@@ -1156,6 +1156,12 @@ def test_r2_blank_hook_commands_are_refused(cfgdir: Path, write: Write, cmd: str
     assert err.key == "hooks.on-ci.0.cmd"
 
 
+@pytest.mark.parametrize("cmd", ["\\u00a0", "\\u3000", "\\u200b", "\\u2028", "\\u2800"])
+def test_r2_invisible_only_hook_commands_are_refused(cfgdir: Path, write: Write, cmd: str) -> None:
+    err = invalid(cfgdir, write, f'hooks: {{on-ci: [{{cmd: "{cmd}"}}]}}\n')
+    assert err.key == "hooks.on-ci.0.cmd"
+
+
 def test_r2_env_me_name_with_control_characters_is_refused(isolated_env: Path) -> None:
     with pytest.raises(ConfigError, match="PR_WATCH_ME__NAME"):
         load(env={"PR_WATCH_ME__NAME": "a\x00b"})

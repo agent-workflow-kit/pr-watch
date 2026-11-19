@@ -34,6 +34,14 @@ Third parties: none directly (git-host access is forgectl's). Dependencies of th
 | D-14 | Membership: enumeration adds and marks (`left_count`, two consecutive complete listings), only a snapshot commit removes a source | a merged member must keep its source so its event is stored; no enumeration-time removal | [Watches, owners and members](interface.md#watches-owners-and-members) |
 | D-15 | Deviations from the design guide are recorded in Hooks and Labels of the interface | one place for the differences | [Hooks](interface.md#hooks), [Labels](interface.md#labels) |
 
+Value validation (`refs`, implementation readings where the interface is silent; always the narrower one):
+
+- Path segments, URL grammar, host normalization and the hook-command rule are defined in [Identifiers](interface.md#identifiers) (leading `-` and `.git`, the 255-character cap, the URL suffixes, `www.` and `:443`, `check_hook_cmd`); this list only records the reasons. The reading is always the narrower one: the `.git` refusal narrows the schema's `repo_id` and `pr` patterns on purpose.
+- `-` is refused in a first segment always, and in a later segment except a two-segment path on a host that is not `gitlab.com` (a GitHub repo name may start with `-`; the backend is known only after config, so a later stage may refuse more). The canonical argv token starts with the host, so no value can be read as an option.
+- An owner given with `--owner` is never lowercased or cleaned: it matches the owner grammar or is `usage` (`bad_owner`). The default `human:<name>` cuts the cleaned name to 58 characters so the whole owner stays within 64. Deviation from the design guide (section 6 actor rule, which replaces with `_` and does not lowercase): the owner grammar is lowercase and its charset allows `-`, so the cleaning lowercases ASCII only and replaces other characters with `-`; this repo's interface is normative.
+- `--hook` and config hook commands share `refs.check_hook_cmd`; `watch_key` lowercases repos and refuses a key over 4096 characters (`filters_too_long`).
+- Every refusal is `RefError` with fixed text and a `details.kind`; no message contains the value.
+
 ## Resolved open topics
 
 - **Polling cadence:** a 5 minute hint, per-host full-pass interval, unsettled PRs every cycle (D-1, D-2; [Pacing and backoff](interface.md#pacing-and-backoff)).
