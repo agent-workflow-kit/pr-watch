@@ -25,10 +25,10 @@ read-only commands do not wait for a commit. The version is re-read under the lo
 processes opening a new file at once migrate it once.
 
 Transactions. `Store.transaction()` is `BEGIN IMMEDIATE` ... `COMMIT`; writers are serialized, so
-event sequence numbers are assigned in commit order. The compare-and-set commit and the leases are
-built on it by #12; `append_event` must run inside it, so an event is stored in the same
-transaction as the digest it belongs to (docs/interface.md, Locks and commit). A trigger drops a
-`prs` row in the transaction that deletes its last `sources` row.
+event sequence numbers are assigned in commit order. The compare-and-set commit (commit.py) and the
+leases (leases.py) are built on it; `append_event` must run inside it, so an event is stored in the
+same transaction as the digest it belongs to (docs/interface.md, Locks and commit). A trigger
+drops a `prs` row in the transaction that deletes its last `sources` row.
 
 A corrupt, non-SQLite or foreign file and a database busy beyond the timeout report as `internal`
 (exit 1); the interface names no code for them.
@@ -211,7 +211,7 @@ _V1_STATEMENTS: Final = (
         DELETE FROM prs WHERE pr_id = OLD.pr_id
             AND NOT EXISTS (SELECT 1 FROM sources WHERE pr_id = OLD.pr_id);
     END""",
-    # #12 owns the lease semantics; the holder identity is (pid, start time, boot id).
+    # Lease semantics are in leases.py; the holder identity is (pid, start time, boot id).
     """CREATE TABLE leases (
         pr_id TEXT PRIMARY KEY NOT NULL,
         holder_pid INTEGER NOT NULL,
@@ -303,7 +303,7 @@ def _refuse(exc: OSError) -> StateDirError:
     return StateDirError(f"{DB_NAME} cannot be opened ({one_line(exc.strerror or '', 100)})")
 
 
-def _classify(exc: sqlite3.Error) -> StoreError:
+def classify_error(exc: sqlite3.Error) -> StoreError:
     """Map a sqlite error to a store error without echoing its text beyond a short tag."""
     if isinstance(exc, sqlite3.OperationalError):
         name = getattr(exc, "sqlite_errorname", "") or ""
@@ -452,12 +452,12 @@ def _peek(path: Path, busy_ms: int, latest: int) -> None:
     try:
         conn = sqlite3.connect(uri, uri=True, timeout=busy_ms / 1000, isolation_level=None)
     except sqlite3.Error as exc:
-        raise _classify(exc) from None
+        raise classify_error(exc) from None
     try:
         conn.execute(f"PRAGMA busy_timeout = {int(busy_ms)}")
         _read_version(conn, latest)
     except sqlite3.Error as exc:
-        raise _classify(exc) from None
+        raise classify_error(exc) from None
     finally:
         conn.close()
 
@@ -467,7 +467,7 @@ def _connect(path: Path, busy_ms: int) -> sqlite3.Connection:
         conn = sqlite3.connect(str(path), timeout=busy_ms / 1000, isolation_level=None)
         conn.execute(f"PRAGMA busy_timeout = {int(busy_ms)}")
     except sqlite3.Error as exc:
-        raise _classify(exc) from None
+        raise classify_error(exc) from None
     return conn
 
 
@@ -496,7 +496,7 @@ def _initialize(
             _apply_migrations(conn, migrations)
         return _finish(conn, path, latest)
     except sqlite3.Error as exc:
-        raise _classify(exc) from None
+        raise classify_error(exc) from None
 
 
 def _finish(conn: sqlite3.Connection, path: Path, latest: int) -> Store:
@@ -673,7 +673,7 @@ class Store:
         try:
             self.conn.execute("BEGIN IMMEDIATE")
         except sqlite3.Error as exc:
-            raise _classify(exc) from None
+            raise classify_error(exc) from None
         try:
             yield self.conn
         except BaseException:
@@ -683,7 +683,7 @@ class Store:
             self.conn.execute("COMMIT")
         except sqlite3.Error as exc:
             self._rollback()
-            raise _classify(exc) from None
+            raise classify_error(exc) from None
 
     def _rollback(self) -> None:
         if self.conn.in_transaction:
@@ -718,9 +718,9 @@ class Store:
             except sqlite3.IntegrityError as exc:
                 if _is_event_id_collision(exc):
                     continue  # about 2**-60: draw another id
-                raise _classify(exc) from None
+                raise classify_error(exc) from None
             except sqlite3.Error as exc:
-                raise _classify(exc) from None
+                raise classify_error(exc) from None
             seq = cur.lastrowid
             if seq is None:
                 raise StoreError("event insert returned no sequence number")
