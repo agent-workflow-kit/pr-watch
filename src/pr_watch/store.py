@@ -25,10 +25,10 @@ read-only commands do not wait for a commit. The version is re-read under the lo
 processes opening a new file at once migrate it once.
 
 Transactions. `Store.transaction()` is `BEGIN IMMEDIATE` ... `COMMIT`; writers are serialized, so
-event sequence numbers are assigned in commit order. The compare-and-set commit and the leases are
-built on it by #12; `append_event` must run inside it, so an event is stored in the same
-transaction as the digest it belongs to (docs/interface.md, Locks and commit). A trigger drops a
-`prs` row in the transaction that deletes its last `sources` row.
+event sequence numbers are assigned in commit order. The compare-and-set commit (commit.py) and the
+leases (leases.py) are built on it; `append_event` must run inside it, so an event is stored in the
+same transaction as the digest it belongs to (docs/interface.md, Locks and commit). A trigger
+drops a `prs` row in the transaction that deletes its last `sources` row.
 
 A corrupt, non-SQLite or foreign file and a database busy beyond the timeout report as `internal`
 (exit 1); the interface names no code for them.
