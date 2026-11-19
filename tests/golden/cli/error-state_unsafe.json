@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "state_unsafe",
+    "message": "state directory is unsafe",
+    "reason": null
+  }
+}

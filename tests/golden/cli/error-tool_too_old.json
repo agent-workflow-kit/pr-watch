@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "tool_too_old",
+    "message": "forgectl too old",
+    "reason": null,
+    "details": {
+      "required": "1.2.0",
+      "found": "1.0.0"
+    }
+  }
+}

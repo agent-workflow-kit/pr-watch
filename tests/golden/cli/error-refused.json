@@ -1,0 +1,13 @@
+{
+  "error": {
+    "code": "refused",
+    "message": "refused by forgectl",
+    "reason": "unknown_host",
+    "lower_error": {
+      "code": null,
+      "reason": "unknown_host",
+      "retry_after": null,
+      "message": null
+    }
+  }
+}
