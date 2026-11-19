@@ -715,9 +715,9 @@ def test_a_term_ignoring_hang_is_killed_by_sigkill(fake: FakeForgectl) -> None:
     fake.hang("snapshot", seconds=60, ignore_term=True)
     # The deadline runs from the spawn, and the fake installs its SIGTERM-ignore handler only
     # after the interpreter has started; on a loaded machine a short deadline fires first and the
-    # fake dies of SIGTERM (issue #56). 5 s is far above any start-up time seen, even at a load
-    # average of 30 under nice 19, and the `ready` call-log record below proves the handler was in
-    # place, so the test cannot pass by the wrong route.
+    # fake exits on SIGTERM (issue #56). The 5 s margin (1 s timeout + 4 s slack) is far above any
+    # start-up time. returncode == -SIGKILL already shows SIGTERM was ignored; the `ready` record
+    # and the missing exit record below corroborate it.
     client = make_client(timeout_ms=1000, deadline_slack=4.0, term_grace=0.2)
     out = client.snapshot(REF)
     assert out.local == "killed" and out.returncode == -signal.SIGKILL

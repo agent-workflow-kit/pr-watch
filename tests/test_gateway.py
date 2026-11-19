@@ -260,11 +260,11 @@ def test_child_ignoring_sigterm_is_killed_after_two_seconds(reaper: Reaper) -> N
     result = sh("trap '' TERM; echo ready; while :; do sleep 0.05; done", timeout=1.5)
     assert result.stdout == "ready\n"
     assert result.timed_out and result.returncode == -signal.SIGKILL
-    assert 2.0 <= result.elapsed - 1.5 < 10.0  # SIGTERM at the deadline, SIGKILL 2 s later
+    assert 2.0 <= result.elapsed - 1.5 < 5.0  # SIGTERM at the deadline, SIGKILL 2 s later
 
 
 def test_the_whole_group_dies_not_just_the_leader(reaper: Reaper) -> None:
-    result = sh("sleep 60 & echo $!; wait", timeout=0.5)
+    result = sh("sleep 60 & echo $!; wait", timeout=3.0)  # upper bound only: start-up must fit
     grandchild = int(result.stdout)
     reaper.track(grandchild)
     assert result.timed_out
@@ -291,7 +291,7 @@ def test_a_leader_that_exited_normally_is_not_waited_out_and_nothing_is_signalle
     result = sh(f"sleep 4 & echo $! > {pidfile}; echo done", timeout=2)
     reaper.track(int(pidfile.read_text()))
     assert (result.stdout, result.returncode, result.timed_out) == ("done\n", 0, False)
-    assert result.elapsed < 1.5
+    assert result.elapsed < 3.5  # did not wait for the 4 s pipe holder
     assert sent == []
 
 
@@ -326,7 +326,7 @@ def test_output_written_before_a_normal_exit_is_fully_drained(reaper: Reaper) ->
 
 def test_stop_kills_a_sigterm_ignoring_descendant_after_the_leader_exits(reaper: Reaper) -> None:
     # The leader dies on SIGTERM; its child ignores SIGTERM and holds the pipes.
-    result = sh("sh -c 'trap \"\" TERM; echo $$; exec sleep 60' & wait", timeout=1.5)
+    result = sh("sh -c 'trap \"\" TERM; echo $$; exec sleep 60' & wait", timeout=3.0)
     grandchild = int(result.stdout)
     reaper.track(grandchild)
     assert result.timed_out
@@ -348,7 +348,7 @@ def test_the_group_is_signalled_while_the_leader_is_a_zombie_never_after_the_rea
         real(pgid, sig)
 
     monkeypatch.setattr(gateway, "_killpg", spy)
-    result = sh("sh -c 'trap \"\" TERM; echo $$; exec sleep 60' & wait", timeout=1.5)
+    result = sh("sh -c 'trap \"\" TERM; echo $$; exec sleep 60' & wait", timeout=3.0)
     reaper.track(int(result.stdout))
     assert [sig for sig, _ in states] == [signal.SIGTERM, signal.SIGKILL]
     assert all(state is not None for _, state in states)  # /proc entry still there: unreaped
