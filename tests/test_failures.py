@@ -102,7 +102,9 @@ def test_every_code_the_five_commands_can_emit_has_its_own_row() -> None:
 @pytest.mark.parametrize("code", sorted(pinned_codes()))
 def test_every_pinned_code_is_decided_for_every_call(code: str, call: str) -> None:
     decision = f.decide_code(code, None, call)
-    assert decision.code == code
+    # `not_found` of a host call is the `internal` row and is reported as `internal`
+    expected = "internal" if code == "not_found" and call in ("query", "whoami") else code
+    assert decision.code == expected
     assert decision.effect.cli_code in EXIT_CODES
 
 
@@ -190,9 +192,7 @@ TRANSIENT_CODES = ["network_error", "upstream_error", "internal", "something_new
 @pytest.mark.parametrize("code", TRANSIENT_CODES)
 def test_transient_codes(code: str) -> None:
     pr = f.decide(out(code), "pr").effect
-    assert (pr.scope, pr.counter, pr.record, pr.retry, pr.poll_exit) == (
-        "pr", "increment", True, True, 0,
-    )  # fmt: skip
+    assert (pr.scope, pr.counter, pr.record, pr.poll_exit) == ("pr", "increment", True, 0)
     assert pr.failed_kind == "pr" and not pr.commit and not pr.fallback_show
     repo = f.decide(out(code), "repo").effect
     assert (repo.scope, repo.counter, repo.failed_kind, repo.poll_exit) == (
@@ -282,9 +282,7 @@ def test_a_signaled_forgectl_is_interrupted_not_counted(returncode: int) -> None
     d = f.decide(raw(returncode), "pr")
     assert d.row == "interrupted" and d.code == "interrupted"
     e = d.effect
-    assert (e.counter, e.pause, e.retry, e.poll_exit, e.failed_kind) == (
-        "none", "none", True, 0, "pr",
-    )  # fmt: skip
+    assert (e.counter, e.pause, e.poll_exit, e.failed_kind) == ("none", "none", 0, "pr")
     assert f.decide(raw(returncode), "repo").effect.failed_kind == "repo"
     q = f.decide(raw(returncode), "query").effect
     assert (q.failed_kind, q.poll_exit, q.counter) == ("query", 0, "none")
@@ -295,6 +293,19 @@ def test_a_signaled_forgectl_is_interrupted_not_counted(returncode: int) -> None
 def test_an_outcome_with_nothing_to_read_below_129_is_conservatively_internal() -> None:
     d = f.decide(raw(1), "pr")
     assert d.row == "transient" and d.code == "internal"
+
+
+@pytest.mark.parametrize("call", ["query", "whoami"])
+def test_not_found_of_a_host_call_is_reported_as_internal(call: str) -> None:
+    assert f.decide(out("not_found"), call).code == "internal"
+    assert f.decide(out("not_found"), "pr").code == "not_found"
+    assert f.decide(out("not_found"), "repo").code == "not_found"
+
+
+def test_usage_codes_are_reported_as_forgectls_own() -> None:
+    for code in ("usage", "invalid_pr", "config_invalid"):
+        for call in CALLS:
+            assert f.decide(out(code), call).code == code
 
 
 @pytest.mark.parametrize("code", ["usage", "invalid_pr", "config_invalid"])
@@ -310,18 +321,22 @@ def test_a_rejected_stored_reference_is_internal_plus_a_contract_warning(code: s
 def test_forgectls_own_config_invalid_stops_the_poll(call: str) -> None:
     e = f.decide(out("config_invalid"), call).effect
     assert e.stop_poll and e.poll_exit == 12 and e.cli_code == "host_failed"
+    assert e.failed_kind == "host"
     for code in ("usage", "invalid_pr"):
         u = f.decide(out(code), call).effect
         assert not u.stop_poll and u.warn_contract
 
 
 def test_version_failures_are_tool_wide_and_exit_12() -> None:
+    m = f.decide_tool(ToolMissing("gone")).effect
+    assert (m.stop_poll, m.poll_exit, m.cli_code, m.scope) == (True, 12, "tool_missing", "poll")
+    o = f.decide_tool(ToolTooOld("0.1.0", "0.55")).effect
+    assert (o.stop_poll, o.poll_exit, o.cli_code) == (True, 12, "tool_too_old")
     for call in CALLS:
-        m = f.decide_tool(ToolMissing("gone")).effect
-        assert (m.stop_poll, m.poll_exit, m.cli_code, m.scope) == (True, 12, "tool_missing", "poll")
-        o = f.decide_tool(ToolTooOld("0.1.0", "0.55")).effect
-        assert (o.stop_poll, o.poll_exit, o.cli_code) == (True, 12, "tool_too_old")
-        assert call in f.ROWS["tool_missing"].effects
+        assert f.ROWS["tool_missing"].effects[call].stop_poll
+        assert f.ROWS["tool_too_old"].effects[call].stop_poll
+        assert f.ROWS["tool_missing"].effects[call].cli_code == "tool_missing"
+        assert f.ROWS["tool_too_old"].effects[call].cli_code == "tool_too_old"
     assert f.decide_tool(ToolMissing("x")).code == "tool_missing"
     assert f.decide_tool(ToolTooOld("0.1.0", "0.55")).code == "tool_too_old"
 
@@ -331,8 +346,35 @@ def test_partial_results_are_used_and_their_errors_decided_by_the_host_column() 
     d = f.decide(partial, "query")
     assert d.row == "partial" and d.effect.use_result and d.effect.poll_exit == 0
     assert f.decide(partial, "whoami").effect.use_result
-    with pytest.raises(ValueError):
-        f.decide(partial, "pr")
+    repo = f.decide(partial, "repo").effect
+    assert (repo.scope, repo.use_result, repo.counter, repo.poll_exit) == ("repo", True, "none", 0)
+
+
+def test_a_pr_call_with_a_result_at_a_nonzero_exit_is_a_contract_failure() -> None:
+    for code in (12, 2, None):
+        d = f.decide(Outcome(command="snapshot", returncode=code, result={}), "pr")
+        assert d.row == "contract" and d.code == "contract"
+        assert d.effect.counter == "increment"
+    d = f.decide(Outcome(command="prs", returncode=None, result={}), "query")
+    assert d.row == "contract"
+
+
+@pytest.mark.parametrize("call", ["repo", "query", "whoami"])
+@pytest.mark.parametrize(
+    "code,reason",
+    [
+        ("rate_limited", None), ("auth_required", None), ("not_found", None),
+        ("refused", "unknown_host"), ("network_error", None), ("config_invalid", None),
+    ],
+)  # fmt: skip
+def test_partial_errors_entries_classify_as_the_same_call_kind(
+    call: str, code: str, reason: str | None
+) -> None:
+    # `partial` only matters for a multi-host ask; pr-watch asks about one host (AC4), so
+    # `errors` entries are decided one by one with the call kind of the listing.
+    entry = f.decide_code(code, reason, call)
+    assert entry.effect == f.ROWS[entry.row].effects[call]
+    assert entry.effect.use_result is False
 
 
 def test_a_failure_never_commits_or_changes_a_prs_state_by_itself() -> None:
@@ -343,7 +385,6 @@ def test_a_failure_never_commits_or_changes_a_prs_state_by_itself() -> None:
         for call in CALLS:
             e = f.decide(outcome, call).effect
             assert not e.commit and not e.use_result
-            assert not hasattr(e, "event")
             if call != "pr":
                 assert e.counter == "none" and not e.fallback_show and not e.record
             if e.scope != "pr":
@@ -412,6 +453,13 @@ def test_pause_without_retry_after_doubles_from_a_minute_to_fifteen() -> None:
     assert seen == [60.0, 120.0, 240.0, 480.0, 900.0, 900.0, 900.0]
 
 
+def test_pause_without_retry_after_is_never_below_a_minute() -> None:
+    assert f.host_pause(None, 1) == (60.0, 60)
+    assert f.host_pause(None, 29) == (60.0, 60)
+    assert f.host_pause(None, 30) == (60.0, 60)
+    assert f.host_pause(None, 31) == (62.0, 62)
+
+
 def test_pause_rejects_nonsense() -> None:
     for bad in (-1.0, float("nan"), float("inf")):
         with pytest.raises(ValueError):
@@ -422,14 +470,34 @@ def test_pause_rejects_nonsense() -> None:
 
 def test_counter_rises_resets_and_makes_a_pr_unreachable_at_the_threshold() -> None:
     inc = f.decide(out("network_error"), "pr").effect
-    assert f.apply_counter(inc, 0, 5) == (1, False)
-    assert f.apply_counter(inc, 3, 5) == (4, False)
-    assert f.apply_counter(inc, 4, 5) == (5, True)
-    assert f.apply_counter(inc, 5, 5) == (6, True)
+    assert f.apply_counter(inc, 0, 5, "active") == (1, False)
+    assert f.apply_counter(inc, 3, 5, "active") == (4, False)
+    assert f.apply_counter(inc, 4, 5, "active") == (5, True)
+    assert f.apply_counter(inc, 5, 5, "active") == (6, False)
     none = f.decide(out("rate_limited"), "pr").effect
-    assert f.apply_counter(none, 4, 5) == (4, False)
+    assert f.apply_counter(none, 4, 5, "active") == (4, False)
     ok = f.decide(Outcome(command="snapshot", returncode=0, result={}), "pr").effect
-    assert f.apply_counter(ok, 9, 5) == (0, False)
+    assert f.apply_counter(ok, 9, 5, "unreachable") == (0, False)
+
+
+@pytest.mark.parametrize("status", ["terminal", "unreachable"])
+def test_only_an_active_pr_becomes_unreachable(status: str) -> None:
+    inc = f.decide(out("network_error"), "pr").effect
+    assert f.apply_counter(inc, 4, 5, status) == (5, False)
+
+
+# --- the snapshot_failed record rule ----------------------------------------------------------
+
+
+def test_should_record_first_failure_code_change_and_multiples() -> None:
+    assert f.should_record(None, "internal", 1, 5)
+    assert f.should_record("internal", "internal", 1, 5)  # a new streak after a success
+    assert not f.should_record("internal", "internal", 2, 5)
+    assert not f.should_record("internal", "internal", 4, 5)
+    assert f.should_record("internal", "internal", 5, 5)
+    assert f.should_record("internal", "internal", 10, 5)
+    assert f.should_record("internal", "contract", 3, 5)
+    assert not f.should_record("internal", "internal", 6, 5)
 
 
 # --- direct commands: the envelope ----------------------------------------------------------
@@ -462,6 +530,31 @@ def test_direct_command_error_codes() -> None:
         error = f.to_cli_error(f.decide(outcome, "pr"))
         assert (error.code, error.exit_code) == (code, exit_code), outcome
         assert envelope_errors(error) == [], outcome
+
+
+def test_a_refusal_with_any_reason_ends_a_direct_command_as_refused() -> None:
+    error = f.to_cli_error(f.decide(out("refused", reason="too_large"), "pr"))
+    assert (error.code, error.exit_code, error.reason) == ("refused", 20, "too_large")
+    assert error.lower_error is not None and error.lower_error["reason"] == "too_large"
+    assert envelope_errors(error) == []
+    odd = f.to_cli_error(f.decide(out("refused", reason="Not A Reason"), "pr"))
+    assert odd.code == "host_failed"
+    # the poller-facing decision stays the default row
+    assert f.decide(out("refused", reason="too_large"), "pr").row == "transient"
+
+
+def test_a_too_large_show_does_not_ask_for_another_show() -> None:
+    show = Outcome(command="show", returncode=None, local="too_large")
+    d = f.decide(show, "pr")
+    assert d.code == "too_large" and d.effect.counter == "increment"
+    assert not d.effect.fallback_show
+    assert f.decide(local("too_large"), "pr").effect.fallback_show
+
+
+def test_pr_id_changed_message_says_what_happened() -> None:
+    error = f.to_cli_error(f.decide_local("pr_id_changed", "pr"))
+    assert error.message == "the stored PR id differs from the PR the reference now names"
+    assert error.code == "host_failed" and envelope_errors(error) == []
 
 
 def test_refused_carries_the_reason_and_lower_error() -> None:

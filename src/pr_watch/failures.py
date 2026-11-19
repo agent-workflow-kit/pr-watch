@@ -9,9 +9,10 @@ call. The poller (and the direct commands) never branch on a forgectl code thems
 - `pause`: `retry_after` means the host is paused (`host_pause` computes how long);
 - `cancel_host`: the rest of the host's queue and listings are cancelled this cycle;
 - `failed_kind`: the `failed[]` entry of the poll report (`pr`, `repo`, `query`, `host`);
-- `record`: a `snapshot_failed` log record and `last_failure_code`; `prominent`: a prominent report
+- `record`: the failure is eligible for a `snapshot_failed` record and `last_failure_code`
+  (`should_record` says whether this failure is actually written); `prominent`: a prominent report
   entry and a `post-poll` mention; `log_error`: a `log.jsonl` error text; `warn_contract`: a
-  `contract` warning; `fallback_show`: the over-cap `show` fallback; `retry`: tried next cycle;
+  `contract` warning; `fallback_show`: the over-cap `show` fallback;
 - `poll_exit`: 12 when this effect makes `poll` exit 12, else 0; `stop_poll`: the poll ends now;
 - `commit` / `use_result`: a success (commit it) or a partial `prs`/`whoami` object (use it);
 - `cli_code`: the error envelope code a direct command (`watch add`) ends with, whose exit code is
@@ -30,14 +31,22 @@ Judgment calls where the interface is silent (kept conservative):
 
 - Exit 137 is the `transient` row with code `killed` (the interface lists it there); any other
   exit above 128 is `interrupted`, with code `interrupted` and no counter.
-- A permanent PR failure (`not_found`, `permission_denied`, `unknown_host`, `pr_id_changed`) has
-  `retry` False; the PR is still polled by its triggers until it becomes `unreachable`.
+- A permanent PR failure (`not_found`, `permission_denied`, `unknown_host`, `pr_id_changed`) is
+  polled as usual and counted until the PR becomes `unreachable`.
+- The reported code is forgectl's own code (usage, invalid_pr and config_invalid included), except
+  that `not_found` on a host call is the `internal` row and is reported as `internal`.
+- A `partial` result of a PR call, or at no exit code, is a `contract` failure.
+- A `refused` code with a reason ends a direct command as `refused` with that reason; the poller
+  still uses the default row.
 - `usage` and `invalid_pr` of a host call are the `transient` host row plus a `contract` warning;
   only forgectl's own `config_invalid` stops the poll.
-- A `refused` code with any reason but `unknown_host` is the default row.
+- A `refused` code with any reason but `unknown_host` is the default row for the poller.
 - `pr_id_changed` ends a direct command as `host_failed` (exit 12, nothing recorded).
-- Every counted per-PR failure gets a `snapshot_failed` record, and `interrupted` PRs are listed
-  in `failed[]` (left unchecked) without a record.
+- Every counted per-PR failure is eligible for a `snapshot_failed` record, written only as
+  `should_record` says (first failure of a streak, a code change, a multiple of
+  `unreachable_after`); `interrupted` PRs are listed in `failed[]` (left unchecked) without one.
+- `usage`, `invalid_pr` and `config_invalid` of a direct command end as `internal` (exit 1): direct
+  commands validate references first, so forgectl rejecting one is a bug, not host trouble.
 """
 
 from __future__ import annotations
@@ -70,7 +79,6 @@ class Effect:
     failed_kind: str | None = None
     record: bool = False
     prominent: bool = False
-    retry: bool = False
     poll_exit: int = 0
     log_error: str | None = None
     warn_contract: bool = False
@@ -100,9 +108,7 @@ def _all(effect: Effect) -> dict[str, Effect]:
 
 
 _FAILED = Effect(cli_code="host_failed")
-_PR_COUNTED = replace(
-    _FAILED, scope="pr", counter="increment", failed_kind="pr", record=True, retry=True
-)
+_PR_COUNTED = replace(_FAILED, scope="pr", counter="increment", failed_kind="pr", record=True)
 _REPO_FAILED = replace(_FAILED, scope="repo", failed_kind="repo")
 _QUERY_FAILED = replace(_FAILED, scope="host", failed_kind="query", poll_exit=12)
 _WHOAMI_FAILED = replace(_FAILED, scope="host", failed_kind="host", poll_exit=12)
@@ -113,7 +119,7 @@ _TRANSIENT = {
     "query": _QUERY_FAILED,
     "whoami": _WHOAMI_FAILED,
 }
-_PERMANENT_PR = replace(_PR_COUNTED, retry=False)
+_PERMANENT_PR = _PR_COUNTED
 
 
 def _with(base: Mapping[str, Effect], **changes: Any) -> dict[str, Effect]:
@@ -159,6 +165,7 @@ ROWS: Final[Mapping[str, Row]] = MappingProxyType(
             None,
             None,
             {
+                "repo": Effect(scope="repo", use_result=True),
                 "query": Effect(scope="host", use_result=True),
                 "whoami": Effect(scope="host", use_result=True),
             },
@@ -215,10 +222,10 @@ ROWS: Final[Mapping[str, Row]] = MappingProxyType(
             _D_SIGNALED,
             "interrupted",
             {
-                "pr": replace(_FAILED, scope="pr", failed_kind="pr", retry=True),
-                "repo": replace(_FAILED, scope="repo", failed_kind="repo", retry=True),
-                "query": replace(_FAILED, scope="host", failed_kind="query", retry=True),
-                "whoami": replace(_FAILED, scope="host", failed_kind="host", retry=True),
+                "pr": replace(_FAILED, scope="pr", failed_kind="pr"),
+                "repo": replace(_FAILED, scope="repo", failed_kind="repo"),
+                "query": replace(_FAILED, scope="host", failed_kind="query"),
+                "whoami": replace(_FAILED, scope="host", failed_kind="host"),
             },
         ),
         "usage_rejected": _row(
@@ -236,8 +243,8 @@ ROWS: Final[Mapping[str, Row]] = MappingProxyType(
             {
                 "pr": _USAGE_PR,
                 "repo": _USAGE_REPO,
-                "query": replace(_TOOL_WIDE, cli_code="host_failed"),
-                "whoami": replace(_TOOL_WIDE, cli_code="host_failed"),
+                "query": replace(_TOOL_WIDE, cli_code="host_failed", failed_kind="host"),
+                "whoami": replace(_TOOL_WIDE, cli_code="host_failed", failed_kind="host"),
             },
         ),
         "tool_missing": _row(
@@ -327,6 +334,8 @@ def decide_code(code: str, reason: str | None, call: str) -> Decision:
     else:
         row = CODE_ROWS.get(code, DEFAULT_ROW)
     shown = code if _CODE.fullmatch(code) else "internal"
+    if row == "not_found" and call in ("query", "whoami"):
+        shown = "internal"  # the interface: `not_found` of a host call is `internal`
     return _decision(row, call, shown)
 
 
@@ -344,12 +353,19 @@ def decide_tool(exc: ToolError) -> Decision:
 
 
 def decide(outcome: Outcome, call: str) -> Decision:
-    """The decision for one forgectl call's `Outcome`."""
+    """The decision for one forgectl call's `Outcome`.
+
+    There is no "pr-watch was signalled" input: the poller checks its own signal state before it
+    classifies an exit above 128 and stops instead of asking here."""
     if not isinstance(outcome, Outcome):
         raise TypeError("decide needs an Outcome")
     _check_call(call)
     if outcome.local == "too_large":
-        return _decision("too_large", call, "too_large")
+        decision = _decision("too_large", call, "too_large")
+        if outcome.command != "snapshot" and decision.effect.fallback_show:
+            # a too_large `show` must not request another `show`
+            decision = replace(decision, effect=replace(decision.effect, fallback_show=False))
+        return decision
     if outcome.local == "killed":
         return _decision("transient", call, "killed")
     if outcome.local == "contract":
@@ -358,8 +374,11 @@ def decide(outcome: Outcome, call: str) -> Decision:
         return _decision("transient", call, "internal")
     code = outcome.returncode
     if outcome.result is not None:
-        row = "success" if code == 0 else "partial"
-        return _decision(row, call, None)
+        if code == 0:
+            return _decision("success", call, None)
+        if call == "pr" or code is None:  # only a listing or `whoami` has a partial result
+            return _decision("contract", call, "contract", detail=outcome.detail)
+        return _decision("partial", call, None)
     if outcome.error is not None:
         decision = decide_code(outcome.error.code, outcome.error.reason, call)
         return replace(decision, retry_after=outcome.error.retry_after, error=outcome.error)
@@ -385,18 +404,35 @@ def host_pause(retry_after: float | None, pause_step: int) -> tuple[float, int]:
         if isinstance(retry_after, bool) or not math.isfinite(retry_after) or retry_after < 0:
             raise ValueError("retry_after must be a finite non-negative number")
         return min(float(retry_after), MAX_PAUSE), pause_step
-    step = BACKOFF_START if pause_step == 0 else min(pause_step * 2, BACKOFF_MAX)
+    step = max(BACKOFF_START, min(pause_step * 2, BACKOFF_MAX))
     return float(step), step
 
 
-def apply_counter(effect: Effect, count: int, unreachable_after: int) -> tuple[int, bool]:
-    """(new `failure_count`, becomes `unreachable`) after an effect on a PR."""
+def apply_counter(
+    effect: Effect, count: int, unreachable_after: int, status: str
+) -> tuple[int, bool]:
+    """(new `failure_count`, becomes `unreachable`) after an effect on a PR whose current status
+    is `status`. A PR becomes unreachable once, when the count crosses `unreachable_after`, and
+    only while it is `active`; a `terminal` or `unreachable` PR never does."""
     if effect.counter == "reset":
         return 0, False
     if effect.counter == "increment":
         new = count + 1
-        return new, new >= unreachable_after
+        return new, status == "active" and count < unreachable_after <= new
     return count, False
+
+
+def should_record(
+    prev_code: str | None, new_code: str | None, new_count: int, unreachable_after: int
+) -> bool:
+    """Whether a counted failure writes its `snapshot_failed` record (the interface's log rule):
+    the first failure of a streak (`new_count` 1), a change of code, and every multiple of
+    `unreachable_after`. `Effect.record` only says the failure is eligible."""
+    return (
+        new_count == 1
+        or prev_code != new_code
+        or (unreachable_after > 0 and new_count % unreachable_after == 0)
+    )
 
 
 # --- direct commands ----------------------------------------------------------------------------
@@ -430,6 +466,8 @@ def to_cli_error(decision: Decision) -> CliError:
         message = str(tool) if tool else "forgectl is too old"
     elif code == "contract":
         message = decision.detail or _MESSAGES["contract"]
+    elif code == "host_failed" and decision.row == "pr_id_changed":
+        message = "the stored PR id differs from the PR the reference now names"
     elif code == "host_failed":
         message = f"forgectl failed ({decision.code})"
     else:
@@ -442,10 +480,19 @@ def to_cli_error(decision: Decision) -> CliError:
             "retry_after": error.retry_after,
             "message": error.message,
         }
+    reason = None
+    if error is not None and error.code == "refused" and isinstance(error.reason, str):
+        if _CODE.fullmatch(error.reason):
+            reason = error.reason
+    if reason is None and code == "refused":
+        reason = "unknown_host"  # the `unknown_host` row with no error to read the reason from
+    if reason is not None:
+        code = "refused"  # any refusal reason ends a direct command as `refused` (exit 20)
+        message = _MESSAGES["refused"]
     return CliError(
         code,
         message,
-        reason="unknown_host" if code == "refused" else None,
+        reason=reason,
         details=details,
         lower_error=lower,
     )
