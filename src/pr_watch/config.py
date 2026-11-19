@@ -178,6 +178,13 @@ class Forgectl(_Model):
     timeout: Duration = "120s"
     max_output_mib: int = Field(default=32, ge=1, le=256)
 
+    @field_validator("timeout", mode="after")
+    @classmethod
+    def _timeout_is_positive(cls, value: str) -> str:
+        if duration_ms(value) < 1:
+            raise ValueError("must be at least 1ms (forgectl refuses a zero timeout)")
+        return value
+
 
 class HookCmd(_Model):
     cmd: str = Field(min_length=1, max_length=4096, pattern=_CMD)
