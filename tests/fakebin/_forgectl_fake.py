@@ -15,12 +15,34 @@ Models: `--version`, `prs` (all flags but `--query` and `--default-query`), `sho
 
 Data and failure scripts come from a scenario directory (`FAKE_FORGECTL_DIR`, else
 `$HOME/.fake-forgectl`) holding `scenario.json`; every call is appended to `calls.jsonl` there.
-tests/forgectl_support.py is the driver that writes both and reads the log.
+tests/forgectl_support.py is the driver that writes both and reads the log. The scenario is
+validated once per run: an unknown rule match key, an action kind the command cannot honor, an
+unknown action field, a malformed scenario or state file, or an error envelope real forgectl
+cannot print for that command, all exit 98 (never a traceback, never a silent no-op).
+
+Rules and counters: a rule's `after` and `times` count matching *asks*, and `prs` asks once per
+host queried, so with two hosts a rule for `prs` without a `host` match counts each host's turn
+in sorted host order. A `hang` of `prs` on one of several hosts ends as that host's `errors[]`
+item (exit 12 `partial_results`), as a real host timeout would; a hang that never ends (huge
+`seconds`) still hangs the process, bounded only by MAX_HANG_SECONDS.
+
+Process behavior: the handlers for SIGINT, SIGTERM and SIGHUP are installed at once, whereas real
+forgectl has a startup window of about 0.8 s before its handlers exist (a SIGTERM then kills it
+by signal, status -15, not exit 143) and a 2 s KILL_GRACE when it ends a child on the way out.
+The fake models neither window; `term_delay` (scenario option, seconds) makes it take that long
+between the signal and exit 128+N, for a client that must tell a prompt exit from a slow one.
+Real forgectl also caps a host answer at 32 MiB: a 40 MiB answer here (the `pad` action) tests
+the client's own cap, it is not something real forgectl emits.
+
+The program starts with `#!/usr/bin/env python3`: it needs a `python3` on PATH, which the test
+sandbox bin provides (tests/conftest.py); a client under test must keep that PATH when it runs
+`forgectl` or the fake cannot start.
 
 Not modeled, on purpose (see docs/plan.md and the report of issue 6): sanitizing of text (the
 scenario data must already be sanitized), the retry loop and its timing (a scripted failure is
-the final answer after retries), `log.jsonl`, the real config file (only its existence is
-checked) and `FORGECTL_*` environment variables.
+the final answer after retries), `log.jsonl`, the contents of the real config file (only that
+it can be read and is a YAML mapping is checked; drop-ins are not read) and `FORGECTL_*`
+environment variables.
 """
 
 from __future__ import annotations
@@ -31,10 +53,10 @@ import json
 import os
 import re
 import signal
+import stat
 import sys
 import time
 from argparse import Namespace
-from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -48,13 +70,14 @@ MAX_HANG_SECONDS = 120.0
 MAX_DESCENDANT_SECONDS = 30.0
 LOG_STDOUT_LIMIT = 1 << 20
 
-# Commands real forgectl has that this fake does not model.
-UNMODELED_COMMANDS = frozenset(
-    {
-        "snapshots", "poll", "diff", "files", "comments", "reviews", "ci", "access", "merge",
-        "review", "comment", "reply", "resolve", "unresolve", "approve", "browse", "export",
-    }
+MODELED_COMMANDS = ("prs", "show", "snapshot", "compare", "whoami")
+# Commands real forgectl has that this fake parses (so a bad command line gets real's exit 2)
+# but does not model: a command line that parses exits 98.
+UNMODELED_COMMANDS = (
+    "snapshots", "poll", "diff", "files", "comments", "reviews", "ci", "access", "merge",
+    "review", "comment", "reply", "resolve", "unresolve", "approve", "browse", "export",
 )  # fmt: skip
+MAX_FILE_BYTES = 256 * 1024
 
 # --- errors (forgectl errors.py) ----------------------------------------------------------
 
@@ -75,13 +98,64 @@ REFUSAL_REASONS = frozenset(
         "too_large", "drafts_present", "pending_review_exists",
     }
 )  # fmt: skip
-REQUIRED_DETAILS_BY_CODE = {
-    "config_invalid": ("key",),
+# `details` keys real forgectl requires (errors.py of the pinned tag, copied whole).
+REQUIRED_DETAILS_BY_CODE: dict[str, tuple[str, ...]] = {
+    "method_required": ("allowed",),
+    "invalid_position": ("invalid",),
+    "outcome_partial": ("landed", "failed"),
     "host_rejected": ("status",),
+    "quick_action_ran": ("ids",),
+    "approved_stale_head": ("ids",),
+    "audit_failed": ("outcome",),
+    "body_too_large": ("index", "limit"),
+    "config_invalid": ("key",),
     "tool_missing": ("install",),
     "wrong_host_response": ("observed",),
+    "merge_unverified": ("observed", "head_sha"),
 }
-REQUIRED_DETAILS_BY_REASON = {"not_open": ("state",), "stale_base": ("base_ref",)}
+REQUIRED_DETAILS_BY_REASON: dict[str, tuple[str, ...]] = {
+    "not_ready": ("blocked_by",),
+    "drafts_present": ("count",),
+    "stale_base": ("base_ref",),
+    "not_open": ("state",),
+    "self_approval": ("basis",),
+    "method_not_allowed": ("allowed",),
+    "auto_merge_unavailable": ("observed",),
+}
+
+# What a scripted error may be, per command: the codes and refusal reasons the interface says
+# those five commands can end with (`partial_results` is made by the fake, never scripted).
+_HOST_CODES = frozenset(
+    {
+        "internal", "usage", "config_invalid", "not_found", "auth_required", "permission_denied",
+        "rate_limited", "upstream_error", "network_error", "tool_missing", "host_rejected",
+        "wrong_host_response", "unsupported_host_version", "refused",
+    }
+)  # fmt: skip
+ALLOWED_CODES: dict[str, frozenset[str]] = {
+    "prs": _HOST_CODES,
+    "whoami": _HOST_CODES,
+    "show": _HOST_CODES | {"invalid_pr"},
+    "snapshot": _HOST_CODES | {"invalid_pr"},
+    "compare": _HOST_CODES | {"invalid_pr"},
+    "--version": frozenset({"internal"}),
+}
+ALLOWED_REASONS: dict[str, frozenset[str]] = {
+    "prs": frozenset({"unknown_host"}),
+    "whoami": frozenset({"unknown_host"}),
+    "show": frozenset({"unknown_host"}),
+    "snapshot": frozenset({"unknown_host"}),
+    "compare": frozenset({"unknown_host", "too_large"}),
+    "--version": frozenset(),
+}
+
+
+def check_error_allowed(command: str, code: str, reason: str | None) -> None:
+    """Refuse (FakeBug) an error code or refusal reason `command` cannot end with."""
+    if code not in ALLOWED_CODES[command]:
+        raise FakeBug(f"{command} cannot fail with {code!r}")
+    if reason is not None and reason not in ALLOWED_REASONS[command]:
+        raise FakeBug(f"{command} cannot be refused with reason {reason!r}")
 
 
 class ForgectlError(Exception):
@@ -435,9 +509,21 @@ class VersionRequested(Exception):
     pass
 
 
+class HelpRequested(Exception):
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.text = text
+
+
 class _Version(argparse.Action):
     def __init__(self, option_strings: list[str], dest: str, **kw: Any) -> None:
-        super().__init__(option_strings, dest, nargs=0, default=argparse.SUPPRESS)
+        super().__init__(
+            option_strings,
+            dest,
+            nargs=0,
+            default=argparse.SUPPRESS,
+            help="show program's version number and exit",
+        )
 
     def __call__(self, parser: Any, namespace: Namespace, values: Any, option_string: Any = None):
         raise VersionRequested
@@ -447,6 +533,9 @@ class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         raise usage(message)
 
+    def print_help(self, file: Any = None) -> None:
+        raise HelpRequested(self.format_help())
+
     def _get_option_tuples(self, option_string: str) -> list[Any]:
         return []  # no prefix matching
 
@@ -454,14 +543,28 @@ class _Parser(argparse.ArgumentParser):
 def _globals(parser: argparse.ArgumentParser, *, sub: bool) -> None:
     flag_default: Any = argparse.SUPPRESS if sub else False
     value_default: Any = argparse.SUPPRESS if sub else None
-    parser.add_argument("--json", action=_OnceFlag, default=flag_default)
-    parser.add_argument("--verbose", action=_OnceFlag, default=flag_default)
-    parser.add_argument("--quiet", action=_OnceFlag, default=flag_default)
     parser.add_argument(
-        "--config", metavar="PATH", type=nonempty, action=_Once, default=value_default
+        "--json", action=_OnceFlag, default=flag_default, help="machine-readable output"
     )
     parser.add_argument(
-        "--timeout", metavar="D", type=duration, action=_Once, default=value_default
+        "--verbose", action=_OnceFlag, default=flag_default, help="more human output and log detail"
+    )
+    parser.add_argument("--quiet", action=_OnceFlag, default=flag_default, help="less human output")
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        type=nonempty,
+        action=_Once,
+        default=value_default,
+        help="config file instead of the default",
+    )
+    parser.add_argument(
+        "--timeout",
+        metavar="D",
+        type=duration,
+        action=_Once,
+        default=value_default,
+        help="budget for host calls: seconds, or a number with ms, s, m, h or d",
     )
 
 
@@ -470,47 +573,234 @@ def _once(parser: argparse.ArgumentParser, flag: str, **kw: Any) -> None:
     parser.add_argument(flag, action=_Once, **kw)
 
 
+def duration_or_off(value: str) -> float:
+    if value == "0":
+        return 0.0
+    seconds = duration(value)
+    if seconds < 1:
+        _bad(f"an interval is at least 1s (or 0 for off): {value!r}")
+    return seconds
+
+
+_DEDUPE_KEY_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}", re.ASCII)
+
+
+def dedupe_key(value: str) -> str:
+    if not _DEDUPE_KEY_RE.fullmatch(value):
+        _bad(f"not a valid dedupe key: {value!r}")
+    return value
+
+
+def pr_or_stdin(value: str) -> PrInput | str:
+    return value if value == "-" else parse_pr(value)
+
+
+def _writes(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--yes", action=_OnceFlag, help="skip the confirmation prompt")
+    parser.add_argument("--dry-run", action=_OnceFlag, help="every check, no write")
+    _once(parser, "--actor", metavar="A", help="human:<user> or auto:<name>")
+    parser.add_argument(
+        "--decision-id",
+        dest="decision_id",
+        action="append",
+        metavar="D",
+        help="decision id for the audit record; repeatable",
+    )
+    parser.add_argument(
+        "--override-escalation",
+        action=_OnceFlag,
+        help="human-only: count a hook's exit 13 as allow",
+    )
+
+
+def _expected(parser: argparse.ArgumentParser) -> None:
+    _once(parser, "--expected-head", type=parse_sha, metavar="SHA", help="full 40-hex head sha")
+    _once(parser, "--expected-base", type=str, metavar="REF", help="base branch name")
+
+
+def _pr(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("pr", type=parse_pr, help="URL, or host/<project path>#N")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = _Parser(prog="forgectl", allow_abbrev=False, add_help=False)
+    """The command line of real forgectl at the pinned tag. The grammar of the commands this fake
+    does not model is kept only as far as real's own errors need it (the positionals, the
+    required flags and the value types that need no other module); help texts are real's."""
+    parser = _Parser(
+        prog="forgectl",
+        description="Normalized access to pull/merge requests across GitHub and GitLab.",
+        allow_abbrev=False,
+    )
     parser.add_argument("--version", action=_Version)
     _globals(parser, sub=False)
     for flag in ("--yes", "--dry-run", "--actor", "--decision-id", "--override-escalation"):
         parser.add_argument(flag, action=_MustFollowCommand)
     subs = parser.add_subparsers(dest="command", metavar="<command>", required=True)
 
-    def add(name: str) -> argparse.ArgumentParser:
-        sub = subs.add_parser(name, allow_abbrev=False, add_help=False)
+    def add(name: str, summary: str) -> argparse.ArgumentParser:
+        sub = subs.add_parser(name, help=summary, description=summary, allow_abbrev=False)
         _globals(sub, sub=True)
         return sub
 
-    p = add("prs")
+    p = add("prs", "list pull requests")
     _once(p, "--repo", type=parse_repo, metavar="ID")
     _once(p, "--host", type=parse_host, metavar="HOST")
     _once(p, "--author", type=parse_login, metavar="me|USER")
-    _once(p, "--review-requested-from", dest="review_requested_from", type=parse_login)
+    _once(
+        p,
+        "--review-requested-from",
+        dest="review_requested_from",
+        type=parse_login,
+        metavar="me|USER",
+    )
     _once(p, "--state", choices=["open", "closed", "merged", "all"], default=Implicit("open"))
     draft = p.add_mutually_exclusive_group()
     draft.add_argument("--draft", dest="draft", action=_OnceConst, const=True, default=None)
     draft.add_argument("--no-draft", dest="draft", action=_OnceConst, const=False)
-    _once(p, "--updated-since", dest="updated_since", type=time_or_duration)
-    _once(p, "--limit", type=limit, default=100)
-    _once(p, "--query", type=str)  # grammar of the query is not modeled: exit 98 after parsing
-    p.add_argument("--default-query", dest="default_query", action=_OnceFlag)
+    _once(p, "--updated-since", dest="updated_since", type=time_or_duration, metavar="TIME")
+    _once(p, "--limit", type=limit, default=100, metavar="N")
+    _once(
+        p,
+        "--query",
+        type=str,  # the grammar of the query is not modeled: exit 98 after parsing
+        metavar="TEXT",
+        help="filter and order the list with a browse query (a filter and ORDER BY)",
+    )
+    p.add_argument(
+        "--default-query",
+        dest="default_query",
+        action=_OnceFlag,
+        help="use the browse.query of the config as the query (not with --query)",
+    )
 
-    def pr_arg(sub: argparse.ArgumentParser) -> None:
-        sub.add_argument("pr", type=parse_pr)
+    for name, summary in (
+        ("show", "the normalized PR object"),
+        ("diff", "the unified diff"),
+        ("files", "the changed files"),
+        ("comments", "review threads and comments"),
+        ("reviews", "reviews and who approved"),
+        ("ci", "checks on the head"),
+    ):
+        _pr(add(name, summary))
 
-    pr_arg(add("show"))
-    p = add("snapshot")
-    pr_arg(p)
-    p.add_argument("--no-bodies", dest="no_bodies", action=_OnceFlag)
-    p = add("compare")
-    pr_arg(p)
-    p.add_argument("--from", dest="from_sha", type=parse_sha, required=True, action=_Once)
-    p.add_argument("--to", dest="to_sha", type=parse_sha, required=True, action=_Once)
-    p.add_argument("--no-diff", dest="no_diff", action=_OnceFlag)
-    p = add("whoami")
+    p = add("snapshot", "the PR with reviews, threads and CI in one call")
+    _pr(p)
+    p.add_argument(
+        "--no-bodies",
+        dest="no_bodies",
+        action=_OnceFlag,
+        help="leave out the bodies of the reviews and the comments",
+    )
+
+    p = add("snapshots", "snapshots of many PRs from a few bulk requests")
+    p.add_argument(
+        "refs",
+        nargs="+",
+        type=pr_or_stdin,
+        metavar="PR|-",
+        help="URL or host/<project path>#N, repeatable; a single - reads them from stdin",
+    )
+    p.add_argument(
+        "--bulk-only",
+        dest="bulk_only",
+        action=_OnceFlag,
+        help="read only through the bulk path; list a PR it cannot read whole in failed",
+    )
+    p.add_argument(
+        "--lookup",
+        dest="lookup",
+        action=_OnceFlag,
+        help="read each PR by its own lookup, for a few PRs (GitLab: not through the lists;"
+        " GitHub: also reads check required-ness, one extra request per PR)",
+    )
+
+    add("poll", "the change-detection tuple of every PR of mine, in a few requests")
+
+    p = add("compare", "compare two commits of a PR")
+    _pr(p)
+    p.add_argument(
+        "--from", dest="from_sha", type=parse_sha, required=True, action=_Once, metavar="SHA"
+    )
+    p.add_argument(
+        "--to", dest="to_sha", type=parse_sha, required=True, action=_Once, metavar="SHA"
+    )
+    p.add_argument(
+        "--no-diff",
+        dest="no_diff",
+        action=_OnceFlag,
+        help="answer with the status only: no `diff` key is printed"
+        " (GitHub also skips the diff request)",
+    )
+
+    p = add("access", "whether a user has write access to a repo")
+    p.add_argument("repo", type=parse_repo)
+    p.add_argument("user", type=parse_login)
+
+    p = add("whoami", "who forgectl acts as on each host")
     _once(p, "--host", type=parse_host, metavar="HOST")
+
+    p = add("merge", "merge a PR")
+    _pr(p)
+    p.add_argument("--auto", action=_OnceFlag, help="human-only: merge when checks pass")
+    _expected(p)
+    _once(p, "--method", choices=["squash", "merge", "rebase"])
+    p.add_argument("--override-blocks", action=_OnceFlag, help="human-only: skip not_ready")
+    _writes(p)
+
+    p = add("review", "post a review from a JSON file")
+    _pr(p)
+    _once(p, "--file", type=nonempty, required=True, metavar="PATH|-", default=argparse.SUPPRESS)
+    _expected(p)
+    p.add_argument(
+        "--allow-self", action=_OnceFlag, help="human-only: skip the self-approval check"
+    )
+    _once(p, "--dedupe-key", dest="dedupe_key", type=dedupe_key, metavar="K")
+    _writes(p)
+
+    def body_file(sub: argparse.ArgumentParser, *, required: bool) -> None:
+        kw: dict[str, Any] = {"default": argparse.SUPPRESS} if required else {}
+        _once(
+            sub, "--body-file", dest="body_file", type=nonempty, required=required,
+            metavar="PATH|-", **kw,
+        )  # fmt: skip
+
+    p = add("comment", "post a general comment")
+    _pr(p)
+    body_file(p, required=True)
+    _once(p, "--dedupe-key", dest="dedupe_key", type=dedupe_key, metavar="K")
+    _writes(p)
+
+    p = add("reply", "reply to a comment, thread or review")
+    _pr(p)
+    _once(p, "--to", type=str, required=True, metavar="ID", default=argparse.SUPPRESS)
+    body_file(p, required=True)
+    _once(p, "--dedupe-key", dest="dedupe_key", type=dedupe_key, metavar="K")
+    _writes(p)
+
+    for name, summary in (("resolve", "resolve a review thread"), ("unresolve", "reopen a thread")):
+        p = add(name, summary)
+        _pr(p)
+        _once(p, "--thread", type=str, required=True, metavar="ID", default=argparse.SUPPRESS)
+        _writes(p)
+
+    p = add("approve", "approve a PR")
+    _pr(p)
+    _expected(p)
+    p.add_argument(
+        "--allow-self", action=_OnceFlag, help="human-only: skip the self-approval check"
+    )
+    body_file(p, required=False)
+    _once(p, "--dedupe-key", dest="dedupe_key", type=dedupe_key, metavar="K")
+    _writes(p)
+
+    p = add("browse", "terminal browser (needs the tui extra)")
+    _once(p, "--focus", type=nonempty, metavar="PR")
+    _once(p, "--interval", type=duration_or_off, metavar="D")
+    _once(p, "--result-file", dest="result_file", type=nonempty, metavar="PATH")
+
+    p = add("export", "audit records as JSONL")
+    _once(p, "--since", type=time_or_duration, metavar="TIME")
+
     return parser
 
 
@@ -534,19 +824,6 @@ def parse(argv: list[str]) -> Namespace:
     return args
 
 
-def first_command(argv: list[str]) -> str | None:
-    """The first positional token, skipping the global flags that take a value."""
-    skip = False
-    for token in argv:
-        if skip:
-            skip = False
-        elif token in ("--config", "--timeout"):
-            skip = True
-        elif not token.startswith("-"):
-            return token
-    return None
-
-
 def wants_json(argv: list[str]) -> bool:
     head = argv[: argv.index("--")] if "--" in argv else argv
     return any(arg == "--json" or arg.startswith("--json=") for arg in head)
@@ -565,6 +842,89 @@ def scenario_dir(env: dict[str, str] | os._Environ[str]) -> Path:
     return Path(home) / ".fake-forgectl"
 
 
+PRE_KINDS = frozenset({"error", "hang", "signal", "raw", "slow", "orphan"})
+POST_KINDS = frozenset({"pad", "drop", "truncate"})
+_COMMON_KINDS = PRE_KINDS | POST_KINDS
+ACTION_KINDS: dict[str, frozenset[str]] = {
+    "prs": _COMMON_KINDS,
+    "show": _COMMON_KINDS,
+    "snapshot": _COMMON_KINDS,
+    "compare": _COMMON_KINDS,
+    "whoami": _COMMON_KINDS - {"pad"},  # no field of `whoami` is free text to pad
+    "--version": frozenset({"raw", "error"}),
+}
+ACTION_FIELDS: dict[str, frozenset[str]] = {
+    "error": frozenset({"code", "message", "reason", "details", "retry_after"}),
+    "hang": frozenset({"seconds", "ignore_term", "descendant", "respect_timeout"}),
+    "signal": frozenset({"signum"}),
+    "raw": frozenset({"stdout", "stderr", "exit"}),
+    "slow": frozenset({"seconds"}),
+    "orphan": frozenset({"seconds"}),
+    "truncate": frozenset(),
+    "drop": frozenset({"fields"}),
+    "pad": frozenset({"bytes"}),
+}
+ACTION_REQUIRED: dict[str, tuple[str, ...]] = {
+    "error": ("code",), "signal": ("signum",), "drop": ("fields",), "pad": ("bytes",),
+}  # fmt: skip
+_BASE_MATCH = frozenset({"command", "argv_has"})
+MATCH_KEYS: dict[str, frozenset[str]] = {
+    "prs": _BASE_MATCH | {"host", "repo"},
+    "whoami": _BASE_MATCH | {"host"},
+    "show": _BASE_MATCH | {"pr", "host"},
+    "snapshot": _BASE_MATCH | {"pr", "host"},
+    "compare": _BASE_MATCH | {"pr", "host"},
+    "--version": _BASE_MATCH,
+}
+
+
+def validate_rules(rules: Any) -> list[dict[str, Any]]:
+    """Check every rule once; a bad one is a FakeBug (exit 98) before any call is answered."""
+    if not isinstance(rules, list):
+        raise FakeBug("scenario `rules` must be a list")
+    for index, rule in enumerate(rules):
+        where = f"rule {index}"
+        if not isinstance(rule, dict) or set(rule) - {"match", "action", "times", "after"}:
+            raise FakeBug(f"{where}: a rule has only match, action, times and after")
+        match, action = rule.get("match"), rule.get("action")
+        if not isinstance(match, dict) or not isinstance(action, dict):
+            raise FakeBug(f"{where}: match and action must be objects")
+        command = match.get("command")
+        if command not in MATCH_KEYS:
+            raise FakeBug(f"{where}: unknown command {command!r}")
+        unknown = set(match) - MATCH_KEYS[command]
+        if unknown:
+            raise FakeBug(f"{where}: {command} cannot match on {sorted(unknown)}")
+        if "argv_has" in match and not (
+            isinstance(match["argv_has"], list)
+            and all(isinstance(t, str) for t in match["argv_has"])
+        ):
+            raise FakeBug(f"{where}: argv_has must be a list of strings")
+        for name in ("times", "after"):
+            value = rule.get(name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+                raise FakeBug(f"{where}: {name} must be a whole number")
+        validate_action(command, action, where)
+    return rules
+
+
+def validate_action(command: str, action: dict[str, Any], where: str) -> None:
+    kind = action.get("kind")
+    if kind not in _COMMON_KINDS:
+        raise FakeBug(f"{where}: unknown action kind {kind!r}")
+    if kind not in ACTION_KINDS[command]:
+        raise FakeBug(f"{where}: {command} cannot honor a {kind!r} action")
+    unknown = set(action) - ACTION_FIELDS[kind] - {"kind", "delay"}
+    if unknown:
+        raise FakeBug(f"{where}: a {kind!r} action has no field {sorted(unknown)}")
+    missing = [name for name in ACTION_REQUIRED.get(kind, ()) if name not in action]
+    if missing:
+        raise FakeBug(f"{where}: a {kind!r} action needs {missing}")
+    if kind == "error":
+        error = error_from_action(action)
+        check_error_allowed(command, error.code, error.reason)
+
+
 class Session:
     """One fake invocation: the scenario, the rule counters and the call log."""
 
@@ -573,9 +933,18 @@ class Session:
         path = directory / "scenario.json"
         if not path.is_file():
             raise FakeBug(f"no scenario at {path}: the test did not set up the fake")
-        self.scenario: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        scenario = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(scenario, dict):
+            raise FakeBug(f"{path}: the scenario must be an object")
+        self.scenario: dict[str, Any] = scenario
+        self.rules = validate_rules(scenario.get("rules", []))
+        delay = scenario.get("term_delay", 0)
+        if isinstance(delay, bool) or not isinstance(delay, int | float) or delay < 0:
+            raise FakeBug("term_delay must be a number of seconds, 0 or more")
+        self.term_delay = min(float(delay), MAX_HANG_SECONDS)
         self.call_id = f"{os.getpid()}-{time.time_ns()}"
         self.hosts = Hosts(self.scenario)
+        self.post_actions: list[dict[str, Any]] = []
 
     # -- log
     def _append(self, record: dict[str, Any]) -> None:
@@ -610,24 +979,38 @@ class Session:
 
     # -- rules
     def take_rule(self, ctx: dict[str, Any]) -> dict[str, Any] | None:
-        """The action of the first rule that matches `ctx` and still fires, or None."""
-        rules: list[dict[str, Any]] = self.scenario.get("rules", [])
-        if not rules:
+        """The action of the first rule that matches `ctx` and still fires, or None.
+
+        Signals are blocked while the counters are read and replaced (the file is swapped in
+        whole), so a signal never leaves a half-written state; one that arrives meanwhile is
+        delivered when the mask is restored."""
+        if not self.rules:
             return None
-        lock_path = self.dir / "state.lock"
-        with lock_path.open("a+", encoding="utf-8") as lock:
+        old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _TERMINATION_SIGNALS)
+        try:
+            return self._take_rule_locked(ctx)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+
+    def _take_rule_locked(self, ctx: dict[str, Any]) -> dict[str, Any] | None:
+        with (self.dir / "state.lock").open("a+", encoding="utf-8") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             state_path = self.dir / "state.json"
-            state: dict[str, Any] = (
-                json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
-            )
+            state: dict[str, Any] = {}
+            if state_path.exists():
+                try:
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                except ValueError:
+                    raise FakeBug(f"{state_path} is not valid JSON") from None
+                if not isinstance(state, dict):
+                    raise FakeBug(f"{state_path} is not an object")
             chosen: dict[str, Any] | None = None
-            for index, rule in enumerate(rules):
+            for index, rule in enumerate(self.rules):
                 if not _matches(rule.get("match", {}), ctx):
                     continue
                 counter = state.setdefault(str(index), {"seen": 0, "fired": 0})
                 counter["seen"] += 1
-                if counter["seen"] <= int(rule.get("after", 0)):
+                if counter["seen"] <= int(rule.get("after") or 0):
                     continue
                 times = rule.get("times")
                 if times is not None and counter["fired"] >= int(times):
@@ -635,8 +1018,13 @@ class Session:
                 counter["fired"] += 1
                 chosen = rule["action"]
                 break
-            state_path.write_text(json.dumps(state), encoding="utf-8")
+            temp = self.dir / f"state.json.{os.getpid()}.tmp"
+            temp.write_text(json.dumps(state), encoding="utf-8")
+            os.replace(temp, state_path)
         return chosen
+
+
+_TERMINATION_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
 def _matches(match: dict[str, Any], ctx: dict[str, Any]) -> bool:
@@ -699,6 +1087,14 @@ def error_text(err: ForgectlError) -> str:
     return f"forgectl: error: {label}: {err.message}"
 
 
+class RawExit(Exception):
+    """A scripted `raw` action: the run ends with exactly this stdout, stderr and exit status."""
+
+    def __init__(self, action: dict[str, Any]) -> None:
+        super().__init__("raw")
+        self.action = action
+
+
 class Output:
     """What a run prints: collected, so the call log can record stdout."""
 
@@ -706,9 +1102,23 @@ class Output:
         self.stdout = ""
         self.stderr = ""
         self.kind = "ok"
+        self.posts: list[dict[str, Any]] = []  # the session's post actions, shared
 
     def result(self, data: dict[str, Any], *, json_mode: bool) -> None:
-        self.stdout += (dumps(data) if json_mode else format_human(data)) + "\n"
+        """Print `data`, shaped by the scripted pad, drop and truncate actions."""
+        for action in self.posts:
+            if action["kind"] == "pad":
+                data = pad_result(data, action)
+                self.kind = "oversize"
+            elif action["kind"] == "drop":
+                data = {k: v for k, v in data.items() if k not in action["fields"]}
+                self.kind = "contract_violation"
+        text = (dumps(data) if json_mode else format_human(data)) + "\n"
+        for action in self.posts:
+            if action["kind"] == "truncate":
+                text = text[: max(1, len(text) // 2)]
+                self.kind = "garbage"
+        self.stdout += text
 
     def error(self, err: ForgectlError, *, command: str | None, json_mode: bool) -> None:
         self.kind = "error"
@@ -718,6 +1128,20 @@ class Output:
         elif json_mode:
             self.stdout += dumps(err.envelope()) + "\n"
         self.stderr += error_text(err) + "\n"
+
+
+def pad_result(data: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    """The result with its free text `bytes` longer: the body, the diff, or the first title."""
+    extra = "x" * int(action["bytes"])
+    if "body" in data:
+        data["body"] = (data["body"] or "") + extra
+    elif isinstance(data.get("diff"), str):
+        data["diff"] += extra
+    elif data.get("items"):
+        data["items"][0]["title"] += extra
+    else:
+        raise Unmodeled("pad needs a result with a body, a diff or at least one listed PR")
+    return data
 
 
 # --- scripted actions --------------------------------------------------------------------
@@ -733,20 +1157,29 @@ def error_from_action(action: dict[str, Any]) -> ForgectlError:
     )
 
 
-def pre_action(session: Session, action: dict[str, Any], args: Namespace | None) -> None:
-    """Actions that replace the whole run (raise or never return) or only slow it down."""
+def run_action(session: Session, action: dict[str, Any], args: Namespace | None) -> None:
+    """Act on a fired rule: the actions that replace the run raise or never return, a slow one
+    waits, an orphan leaves a descendant; pad, drop and truncate are kept for the output."""
     kind = action["kind"]
     delay = float(action.get("delay", 0) or 0)
     if delay:
         time.sleep(min(delay, MAX_HANG_SECONDS))
     if kind == "error":
         raise error_from_action(action)
+    if kind == "raw":
+        raise RawExit(action)
     if kind == "hang":
         hang(session, action, args)
     if kind == "signal":
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         os.kill(os.getpid(), int(action["signum"]))
         time.sleep(MAX_HANG_SECONDS)
+    if kind == "slow":
+        time.sleep(min(float(action.get("seconds", 0)), MAX_HANG_SECONDS))
+    if kind == "orphan":
+        spawn_pipe_holder(session, float(action.get("seconds", MAX_DESCENDANT_SECONDS)))
+    if kind in POST_KINDS:
+        session.post_actions.append(action)
 
 
 def spawn_pipe_holder(session: Session, seconds: float) -> None:
@@ -773,39 +1206,6 @@ def hang(session: Session, action: dict[str, Any], args: Namespace | None) -> No
         raise ForgectlError("network_error", "the host did not answer within the --timeout budget")
     time.sleep(seconds)
     raise ForgectlError("network_error", "scripted hang ended")
-
-
-def post_action(
-    session: Session, action: dict[str, Any] | None, text: str, out: Output
-) -> tuple[str, str]:
-    """Actions that change a result that was computed normally; returns (stdout, kind)."""
-    if action is None:
-        return text, out.kind
-    kind = action["kind"]
-    if kind == "pad":
-        data = json.loads(text)
-        field = "body" if "body" in data else "diff" if isinstance(data.get("diff"), str) else None
-        if field is None:
-            raise Unmodeled("pad needs a result with a body or a diff (snapshot, show, compare)")
-        data[field] = str(data[field]) + "x" * int(action["bytes"])
-        return dumps(data) + "\n", "oversize"
-    if kind == "drop":
-        data = json.loads(text)
-        for name in action["fields"]:
-            data.pop(name, None)
-        return dumps(data) + "\n", "contract_violation"
-    if kind == "truncate":
-        return text[: max(1, len(text) // 2)], "garbage"
-    if kind == "orphan":
-        spawn_pipe_holder(session, float(action.get("seconds", MAX_DESCENDANT_SECONDS)))
-        return text, out.kind
-    if kind == "slow":
-        return text, out.kind
-    raise FakeBug(f"unknown action kind {kind!r}")
-
-
-POST_KINDS = frozenset({"pad", "drop", "truncate", "orphan", "slow"})
-PRE_KINDS = frozenset({"error", "hang", "signal"})
 
 
 # --- data and handlers --------------------------------------------------------------------
@@ -883,9 +1283,16 @@ def _now(session: Session) -> datetime:
 
 
 def _since(session: Session, text: str) -> datetime:
-    if _RFC3339_RE.fullmatch(text):
-        return datetime.fromisoformat(text.upper().replace("Z", "+00:00"))
-    return _now(session) - timedelta(seconds=duration(text))
+    """`--updated-since` as an absolute UTC time to the second; outside the years 1 to 9999 in
+    UTC is a usage error, as in real forgectl."""
+    try:
+        if _RFC3339_RE.fullmatch(text):
+            moment = datetime.fromisoformat(text.upper())
+        else:
+            moment = _now(session) - timedelta(seconds=duration(text))
+        return moment.astimezone(UTC).replace(microsecond=0)
+    except (OverflowError, ValueError):
+        raise usage(f"--updated-since is outside the years 1 to 9999 in UTC: {text!r}") from None
 
 
 def _stamp(text: str) -> datetime:
@@ -899,6 +1306,57 @@ def _list_item(snapshot: dict[str, Any], listing: dict[str, Any]) -> dict[str, A
     item["base"] = {"ref": snapshot["base"]["ref"]}
     item.update(listing)
     return item
+
+
+def _ascii_lower(text: str) -> str:
+    return "".join(chr(ord(c) + 32) if "A" <= c <= "Z" else c for c in text)
+
+
+def glob_match(pattern: str, text: str) -> bool:
+    """Real forgectl's glob: `*` is any run (empty and `/` included), `?` any one character,
+    everything else literal, both sides compared ASCII case-insensitively."""
+    pat, name = _ascii_lower(pattern), _ascii_lower(text)
+    p = n = 0
+    star, resume = -1, 0
+    while n < len(name):
+        if p < len(pat) and pat[p] != "*" and (pat[p] == "?" or pat[p] == name[n]):
+            p += 1
+            n += 1
+        elif p < len(pat) and pat[p] == "*":
+            star = p
+            p += 1
+            resume = n
+        elif star >= 0:
+            p = star + 1
+            resume += 1
+            n = resume
+        else:
+            return False
+    while p < len(pat) and pat[p] == "*":
+        p += 1
+    return p == len(pat)
+
+
+def _hidden(session: Session, repo: str) -> bool:
+    patterns = session.scenario.get("hidden_repos", [])
+    return any(glob_match(str(pattern), repo) for pattern in patterns)
+
+
+def check_me_spelling(value: str | None, what: str) -> None:
+    if value is not None and value != "me" and value.lower() == "me":
+        raise usage(f"{what}: `me` is reserved; write it as `me`")
+
+
+def bind_login(text: str, backend: str) -> None:
+    pattern = _GITHUB_LOGIN_RE if backend == "github" else _GITLAB_LOGIN_RE
+    if len(text) > MAX_INPUT_CHARS or not pattern.fullmatch(text):
+        raise usage(f"not a valid {backend} login: {_shown(text)}")
+
+
+def _me_of(session: Session, host: str) -> str | None:
+    """The configured `me` of `host`, else the login its scripted `whoami` authenticates."""
+    declared = session.hosts.declared.get(host) or {}
+    return declared.get("me") or (declared.get("whoami") or {}).get("login")
 
 
 def _matches_filters(
@@ -929,20 +1387,17 @@ def _matches_filters(
 def _host_failure(
     session: Session, host: str, args: Namespace, argv: list[str]
 ) -> ForgectlError | None:
-    """A per-host scripted failure of `prs`; any action that is not an error acts at once."""
+    """The scripted outcome of one host of `prs`: its failure (an error, or a hang that ended),
+    or None. Any other action acts at once, as for every command."""
     action = session.take_rule(
         {"command": "prs", "host": host, "argv": argv, "repo": str(args.repo or "") or None}
     )
     if action is None:
         return None
-    if action["kind"] == "error":
-        delay = float(action.get("delay", 0) or 0)
-        if delay:
-            time.sleep(min(delay, MAX_HANG_SECONDS))
-        return error_from_action(action)
-    pre_action(session, action, args)
-    if action["kind"] in POST_KINDS:
-        session.pending_post = action  # type: ignore[attr-defined]
+    try:
+        run_action(session, action, args)
+    except ForgectlError as failure:
+        return failure
     return None
 
 
@@ -958,49 +1413,57 @@ def handle_prs(session: Session, args: Namespace, argv: list[str]) -> dict[str, 
         queried = [args.host]
     else:
         queried = hosts.in_scope()
-    scenario_hosts = hosts.declared
-    hidden = [str(h).lower() for h in session.scenario.get("hidden_repos", [])]
-    if repo is not None and repo.lower() in hidden:
-        return _prs_result([], True, [], queried, session, args)
+    check_me_spelling(args.author, "--author")
+    check_me_spelling(args.review_requested_from, "--review-requested-from")
+    for host in queried:
+        for login in (args.author, args.review_requested_from):
+            if login is not None and login != "me":
+                bind_login(login, hosts.backend(host))
+    since = _since(session, args.updated_since) if args.updated_since else None
+    if repo is not None and _hidden(session, repo):
+        return _prs_result([], True, [], queried, [], session)
 
     errors: list[dict[str, str]] = []
-    failures: list[ForgectlError] = []
+    failures: list[tuple[str, ForgectlError]] = []
+    answered: list[str] = []
     matched: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for host in queried:
         failure = _host_failure(session, host, args, argv)
         if failure is not None:
-            if len(queried) == 1:
-                raise failure
-            failures.append(failure)
+            failures.append((host, failure))
             errors.append({"host": host, "code": failure.code, "message": failure.message})
             continue
-        me = (scenario_hosts.get(host) or {}).get("me")
+        answered.append(host)
+        me = _me_of(session, host)
+        if me is None and "me" in (args.author, args.review_requested_from):
+            raise FakeBug(f"{host}: `me` needs a configured me or a scripted whoami login")
         for entry in session.scenario.get("prs", {}).values():
             snapshot = entry["snapshot"]
             if not str(snapshot["pr"]).lower().startswith(host + "/"):
                 continue
             if repo is not None and str(snapshot["repo"]).lower() != repo.lower():
                 continue
-            if str(snapshot["repo"]).lower() in hidden:
+            if _hidden(session, str(snapshot["repo"])):
                 continue
             item = _list_item(snapshot, entry.get("listing", {}))
             if not _matches_filters(item, snapshot, args, me):
                 continue
-            if args.updated_since and _stamp(item["updated_at"]) < _since(
-                session, args.updated_since
-            ):
+            if since is not None and _stamp(item["updated_at"]) < since:
                 continue
             matched.append((item, snapshot))
+    if len(failures) == 1 and len(queried) == 1:
+        raise failures[0][1]  # one target: the host's own error and envelope
     matched.sort(key=lambda pair: pair[0]["pr"])
     matched.sort(key=lambda pair: _stamp(pair[0]["updated_at"]), reverse=True)
     items = [pair[0] for pair in matched]
     complete = len(items) <= int(args.limit) and not errors
     items = items[: int(args.limit)]
-    result = _prs_result(items, complete, errors, queried, session, args)
+    result = _prs_result(items, complete, errors, queried, answered, session)
     if failures:
+        shown = ", ".join(f"{host} ({failure.code})" for host, failure in failures)
         raise ForgectlError(
             "partial_results",
-            f"{len(failures)} of {len(queried)} hosts failed",
+            f"{len(failures)} of {len(queried)} hosts failed: {shown}",
             output=result,
         )
     return result
@@ -1011,26 +1474,26 @@ def _prs_result(
     complete: bool,
     errors: list[dict[str, str]],
     queried: list[str],
+    answered: list[str],
     session: Session,
-    args: Namespace,
 ) -> dict[str, Any]:
+    """`rate_limit` is the lowest reading among the hosts that answered; with none, the one
+    host asked (nulls), or all null when several were."""
     readings = []
-    for host in queried:
-        limit_info = (session.hosts.declared.get(host) or {}).get("rate_limit") or {}
-        readings.append(
-            {
-                "host": host,
-                "remaining": limit_info.get("remaining"),
-                "reset_at": limit_info.get("reset_at"),
-            }
-        )
-    known = [r for r in readings if r["remaining"] is not None]
-    if known:
-        rate = min(known, key=lambda r: r["remaining"])
-    elif readings:
-        rate = {"host": readings[0]["host"], "remaining": None, "reset_at": None}
+    for host in answered:
+        info = (session.hosts.declared.get(host) or {}).get("rate_limit") or {}
+        if info.get("remaining") is not None:
+            readings.append(
+                {"host": host, "remaining": info["remaining"], "reset_at": info.get("reset_at")}
+            )
+    if readings:
+        rate = min(readings, key=lambda r: r["remaining"])
     else:
-        rate = {"host": None, "remaining": None, "reset_at": None}
+        rate = {
+            "host": queried[0] if len(queried) == 1 else None,
+            "remaining": None,
+            "reset_at": None,
+        }
     return {
         "items": items,
         "complete": complete,
@@ -1052,15 +1515,24 @@ def handle_whoami(
     entries: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     for host in names:
-        action = session.take_rule({"command": "whoami", "host": host, "argv": argv})
-        if action is not None:
-            if action["kind"] == "error":
-                failure = error_from_action(action)
-                errors.append({"host": host, "code": failure.code, "message": failure.message})
-                continue
-            pre_action(session, action, args)
         declared = hosts.declared.get(host) or {}
         who = declared.get("whoami") or {}
+        token_source = who.get("token_source", "none")
+        action = session.take_rule({"command": "whoami", "host": host, "argv": argv})
+        if action is not None:
+            try:
+                run_action(session, action, args)
+            except ForgectlError as failure:
+                # a failed host still has its entry, with nothing known but how it signs in
+                entries.append(
+                    {
+                        "host": host, "backend": hosts.backend(host), "login": None, "id": None,
+                        "me": None, "me_matches_login": None, "token_source": token_source,
+                        "scopes": None,
+                    }
+                )  # fmt: skip
+                errors.append({"host": host, "code": failure.code, "message": failure.message})
+                continue
         entry = {
             "host": host,
             "backend": hosts.backend(host),
@@ -1068,19 +1540,69 @@ def handle_whoami(
             "id": who.get("id"),
             "me": who.get("me", declared.get("me")),
             "me_matches_login": who.get("me_matches_login"),
-            "token_source": who.get("token_source", "none"),
+            "token_source": token_source,
             "scopes": who.get("scopes"),
         }
         entries.append(entry)
         if entry["me_matches_login"] is False:
             out.stderr += (
                 f"forgectl: warning: {host}: me is {entry['me']} but the authenticated login is "
-                f"{entry['login']}; fix hosts.{host}.me\n"
+                f"{entry['login']}; prs uses me, posts and rules act as the authenticated account\n"
             )
     result = {"hosts": entries, "errors": errors}
     if errors:
-        raise ForgectlError("partial_results", f"{len(errors)} hosts failed", output=result)
+        shown = ", ".join(f"{e['host']} ({e['code']})" for e in errors)
+        raise ForgectlError(
+            "partial_results", f"{len(errors)} of {len(names)} hosts failed: {shown}", output=result
+        )
     return result
+
+
+# --- the config file ----------------------------------------------------------------------
+
+
+def _config_invalid(key: str, message: str) -> ForgectlError:
+    return ForgectlError("config_invalid", f"{key}: {message}", details={"key": key})
+
+
+def check_config(path_text: str) -> None:
+    """`--config` as real forgectl reads it: a readable regular UTF-8 file of at most 256 KiB
+    holding one YAML document that is a mapping. Its keys are not interpreted."""
+    import yaml  # here: only a run with --config needs it
+    from yaml.composer import ComposerError
+
+    path = os.path.abspath(path_text)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise _config_invalid(path, "no such file, or a symbolic link to nothing") from None
+    except OSError as err:
+        raise _config_invalid(path, f"cannot be read: {err.strerror or 'error'}") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise _config_invalid(path, "not a regular file")
+        data = os.read(fd, MAX_FILE_BYTES + 1)
+    except OSError as err:
+        raise _config_invalid(path, f"cannot be read: {err.strerror or 'error'}") from None
+    finally:
+        os.close(fd)
+    if len(data) > MAX_FILE_BYTES:
+        raise _config_invalid(path, f"file too large (limit {MAX_FILE_BYTES // 1024} KiB)")
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise _config_invalid(path, "not valid UTF-8") from None
+    try:
+        document = yaml.safe_load(text)
+    except yaml.MarkedYAMLError as err:
+        mark = err.problem_mark or err.context_mark
+        at = f" at line {mark.line + 1}" if mark is not None else ""
+        phrase = "more than one document" if isinstance(err, ComposerError) else "syntax error"
+        raise _config_invalid(path, f"invalid YAML{at}: {phrase}") from None
+    except yaml.YAMLError:
+        raise _config_invalid(path, "invalid YAML") from None
+    if document is not None and not isinstance(document, dict):
+        raise _config_invalid(path, "the top level must be a mapping")
 
 
 # --- main --------------------------------------------------------------------------------
@@ -1099,55 +1621,94 @@ def run(argv: list[str], env: Any = None) -> int:
     exit_code = 0
     try:
         session = Session(scenario_dir(environ))
+        out.posts = session.post_actions
         session.log_start(argv)
-        session.pending_post = None  # type: ignore[attr-defined]
-        candidate = first_command(argv)
-        if candidate in UNMODELED_COMMANDS:
-            raise Unmodeled(f"forgectl {candidate} is not modeled by this fake")
         try:
             args = parse(argv)
         except VersionRequested:
-            return _finish(session, out, version_run(session, argv, out), json_mode)
+            return _finish(session, out, version_run(session, argv, out))
+        except HelpRequested as helped:
+            out.stdout = helped.text
+            out.kind = "help"
+            return _finish(session, out, 0)
         json_mode = args.json
         command = args.command
         exit_code = execute(session, args, argv, out)
     except ForgectlError as err:
         out.error(err, command=command, json_mode=json_mode)
         exit_code = err.exit_code
+    except RawExit as raw:
+        exit_code = raw_answer(raw.action, out)
     except FakeBug as bug:
-        out.stdout = ""
-        out.kind = "fake_refusal"
-        out.stderr = f"fake-forgectl: {bug}\n"
+        _refuse(out, str(bug))
         exit_code = FAKE_EXIT
     except SignalExit as signalled:
         out.kind = "signalled"
         exit_code = 128 + signalled.signum
+        _shut_down(session)
+    except Exception as exc:  # a broken scenario or a bug here: loud, never a traceback
+        _refuse(out, f"{type(exc).__name__}: {exc}")
+        exit_code = FAKE_EXIT
     if session is None:
         write_text(sys.stderr, out.stderr)
         return exit_code
-    return _finish(session, out, exit_code, json_mode)
+    return _finish(session, out, exit_code)
 
 
-def _finish(session: Session, out: Output, exit_code: int, json_mode: bool) -> int:
+def _refuse(out: Output, message: str) -> None:
+    out.stdout = ""
+    out.kind = "fake_refusal"
+    out.stderr = f"fake-forgectl: {message}\n"
+
+
+def _shut_down(session: Session | None) -> None:
+    """Take the scripted `term_delay` between a signal and the exit; a further signal while
+    waiting is ignored."""
+    if session is None or not session.term_delay:
+        return
+    for sig in _TERMINATION_SIGNALS:
+        signal.signal(sig, signal.SIG_IGN)
+    time.sleep(session.term_delay)
+
+
+def _finish(session: Session, out: Output, exit_code: int) -> int:
+    """Print the answer, then log it: a signal that interrupts a blocked write ends the run as
+    128+N and the log says so."""
+    try:
+        write_text(sys.stdout, out.stdout)
+        write_text(sys.stderr, out.stderr)
+    except SignalExit as signalled:
+        exit_code, out.kind = 128 + signalled.signum, "signalled"
+        for fd in (1, 2):  # what is still buffered must not block the interpreter's own exit
+            discard_stream(fd)
+        _shut_down(session)
     session.log_end(exit_code, out.kind, out.stdout)
-    write_text(sys.stdout, out.stdout)
-    write_text(sys.stderr, out.stderr)
     return exit_code
+
+
+def discard_stream(fd: int) -> None:
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, fd)
+        finally:
+            os.close(devnull)
+    except OSError:
+        pass
 
 
 def version_run(session: Session, argv: list[str], out: Output) -> int:
     action = session.take_rule({"command": "--version", "argv": argv})
     if action is not None:
-        return raw_action(action, out)
+        return raw_answer(action, out)
     out.stdout = f"forgectl {VERSION}\n"
     return 0
 
 
-def raw_action(action: dict[str, Any], out: Output) -> int:
+def raw_answer(action: dict[str, Any], out: Output) -> int:
+    """A scripted `raw` (or, for `--version`, `error`) answer; the status it exits with."""
     if action["kind"] == "error":
         raise error_from_action(action)
-    if action["kind"] != "raw":
-        raise FakeBug(f"a --version rule must be a raw or error action, not {action['kind']!r}")
     out.stdout = action.get("stdout", "")
     out.stderr = action.get("stderr", "")
     out.kind = "raw"
@@ -1156,12 +1717,10 @@ def raw_action(action: dict[str, Any], out: Output) -> int:
 
 def execute(session: Session, args: Namespace, argv: list[str], out: Output) -> int:
     command = args.command
-    if args.config is not None and not Path(args.config).exists():
-        raise ForgectlError(
-            "config_invalid",
-            f"config file not found: {_shown(args.config)}",
-            details={"key": "config"},
-        )
+    if command in UNMODELED_COMMANDS:
+        raise Unmodeled(f"forgectl {command} is not modeled by this fake")
+    if args.config is not None:
+        check_config(args.config)
     pr: str | None = None
     if command in ("show", "snapshot", "compare"):
         pr = bind_pr(args.pr, session.hosts)
@@ -1169,42 +1728,24 @@ def execute(session: Session, args: Namespace, argv: list[str], out: Output) -> 
         bind_repo(args.repo, session.hosts)
     elif command in ("prs", "whoami") and args.host:
         session.hosts.backend(args.host)
-    host = None
-    if pr is not None:
-        host = pr.split("/", 1)[0]
-    ctx = {
-        "command": command, "argv": argv, "pr": pr, "host": host or getattr(args, "host", None),
-        "repo": (str(args.repo) if getattr(args, "repo", None) else None),
-    }  # fmt: skip
-    handler: Callable[[], dict[str, Any]]
+    result: dict[str, Any]
     if command == "prs":
-        handler = lambda: handle_prs(session, args, argv)  # noqa: E731
+        result = handle_prs(session, args, argv)
     elif command == "whoami":
-        handler = lambda: handle_whoami(session, args, argv, out)  # noqa: E731
+        result = handle_whoami(session, args, argv, out)
     else:
         assert pr is not None
-        actions = {"show": handle_show, "snapshot": handle_snapshot, "compare": handle_compare}
-        handler = lambda: actions[command](session, args, pr)  # noqa: E731
-    if command in ("show", "snapshot", "compare"):
+        ctx = {"command": command, "argv": argv, "pr": pr, "host": pr.split("/", 1)[0]}
         action = session.take_rule(ctx)
         if action is not None:
-            if action["kind"] in PRE_KINDS or action["kind"] == "raw":
-                if action["kind"] == "raw":
-                    return raw_action(action, out)
-                pre_action(session, action, args)
-            session.pending_post = action if action["kind"] in POST_KINDS else None  # type: ignore[attr-defined]
-            if action["kind"] == "slow":
-                time.sleep(min(float(action.get("seconds", 0)), MAX_HANG_SECONDS))
-    elif command == "prs" or command == "whoami":
-        pass
-    result = handler()
+            run_action(session, action, args)
+        handlers = {"show": handle_show, "snapshot": handle_snapshot, "compare": handle_compare}
+        result = handlers[command](session, args, pr)
     out.result(result, json_mode=args.json)
-    text, out.kind = post_action(session, session.pending_post, out.stdout, out)  # type: ignore[attr-defined]
-    out.stdout = text
     return 0
 
 
 def main() -> int:
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    for sig in _TERMINATION_SIGNALS:
         signal.signal(sig, _raise_signal)
     return run(sys.argv[1:])

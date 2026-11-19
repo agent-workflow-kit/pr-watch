@@ -8,13 +8,15 @@ shapes without a failing test) and kills any leftover process the fake started, 
 start time only.
 
 Use the `fake_forgectl` fixture; the client under test must find `forgectl` through PATH
-(tests/fakebin is first on it) and keep `HOME` (or `FAKE_FORGECTL_DIR`) in the child's
-environment, since that is how the fake finds its scenario.
+(tests/fakebin is first on it) and keep that PATH, which also holds the sandbox's `python3` the
+fake's shebang needs, and `HOME` (or `FAKE_FORGECTL_DIR`) in the child's environment, since that
+is how the fake finds its scenario.
 """
 
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
 import os
 import signal
@@ -23,12 +25,14 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
+FAKE_PATH = Path(__file__).resolve().parent / "fakebin" / "_forgectl_fake.py"
 PIN_DIR = Path(__file__).resolve().parent / "forgectl_pinned"
 SCHEMAS_DIR = PIN_DIR / "schemas"
 GOLDEN_DIR = PIN_DIR / "golden"
@@ -39,6 +43,16 @@ VALIDATED_KINDS = ("ok", "partial", "error")
 
 def pin() -> dict[str, Any]:
     return json.loads((PIN_DIR / "PIN.json").read_text(encoding="utf-8"))
+
+
+@lru_cache(maxsize=1)
+def fake_module() -> ModuleType:
+    """The fake's own module, loaded by path (never imported by name), for its constants."""
+    spec = importlib.util.spec_from_file_location("_forgectl_fake_under_test", FAKE_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def golden(name: str) -> dict[str, Any]:
@@ -225,7 +239,13 @@ class FakeForgectl:
         self._write()
 
     def hide_repo(self, repo: str) -> None:
+        """Hide the repos matching `repo`: a repo id or a glob (`*`, `?`) as `hidden_repos` is."""
         self.scenario.setdefault("hidden_repos", []).append(repo)
+        self._write()
+
+    def term_delay(self, seconds: float) -> None:
+        """Make the fake take `seconds` between a SIGINT, SIGTERM or SIGHUP and its exit."""
+        self.scenario["term_delay"] = seconds
         self._write()
 
     def set_now(self, iso: str) -> None:
@@ -275,7 +295,15 @@ class FakeForgectl:
         after: int = 0,
         **match: Any,
     ) -> None:
-        """Make matching calls fail with forgectl's error `code` (exit and envelope as real)."""
+        """Make matching calls fail with forgectl's error `code` (exit and envelope as real).
+
+        A code or refusal reason that `command` cannot end with in real forgectl (say
+        `refused(stale_head)` on `show`) is a ValueError here."""
+        module = fake_module()
+        try:
+            module.check_error_allowed(command, code, reason)
+        except module.FakeBug as bug:
+            raise ValueError(str(bug)) from None
         action: dict[str, Any] = {"kind": "error", "code": code, "message": message}
         if reason is not None:
             action["reason"] = reason

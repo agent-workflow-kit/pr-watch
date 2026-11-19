@@ -143,16 +143,32 @@ def test_tmpdir_points_into_tmp(tmp_path: Path) -> None:
 
 @pytest.mark.expect_guard_hit
 @pytest.mark.parametrize("tool", ["forgectl", "crontab"])
-def test_stubs_are_unreachable_by_name_and_exit_99(tool: str, sandbox_bin: Path) -> None:
-    for argv in ([tool, "-l"], [str(sandbox_bin / tool), "-l"]):
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=15, check=False)
-        if argv[0] == "forgectl":
-            # by name, tests/fakebin/forgectl shadows the stub; with no scenario it refuses (98)
-            assert proc.returncode == 98
-            assert "fake-forgectl: no scenario" in proc.stderr
-            continue
-        assert proc.returncode == GUARD_EXIT
-        assert "tests must not run the real" in proc.stderr
+def test_guard_stubs_exit_99_by_absolute_path(tool: str, sandbox_bin: Path) -> None:
+    proc = subprocess.run(
+        [str(sandbox_bin / tool), "-l"], capture_output=True, text=True, timeout=15, check=False
+    )
+    assert proc.returncode == GUARD_EXIT
+    assert "tests must not run the real" in proc.stderr
+
+
+@pytest.mark.expect_guard_hit
+def test_crontab_by_name_is_the_exit_99_stub() -> None:
+    proc = subprocess.run(
+        ["crontab", "-l"], capture_output=True, text=True, timeout=15, check=False
+    )
+    assert proc.returncode == GUARD_EXIT
+    assert "tests must not run the real" in proc.stderr
+
+
+def test_forgectl_by_name_is_the_fake_and_leaves_no_stub_hit(sandbox_bin: Path) -> None:
+    # tests/fakebin/forgectl shadows the stub: with no scenario it refuses (98), and the stub's
+    # hit log stays empty, so the test needs no `expect_guard_hit`
+    proc = subprocess.run(
+        ["forgectl", "-l"], capture_output=True, text=True, timeout=15, check=False
+    )
+    assert proc.returncode == 98
+    assert "fake-forgectl: no scenario" in proc.stderr
+    assert (sandbox_bin / "hits.log").read_text() == ""
 
 
 def _fake_real_crontab(tmp_path: Path) -> Path:
