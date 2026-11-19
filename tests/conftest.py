@@ -10,7 +10,10 @@ binaries (tests/fakebin) plus a sandbox bin directory. The sandbox bin holds:
   holds) and `pr-watch` if it sits beside that interpreter,
 - stubs for `forgectl` and `crontab` that exit 99 and record the hit in `hits.log`.
 
-A test that needs forgectl or crontab must put a fake in tests/fakebin. A stub hit fails the test
+A test that needs forgectl or crontab must put a fake in tests/fakebin. tests/fakebin is first
+on PATH and holds the fake forgectl, so `forgectl` by name resolves to the fake (it exits 98
+without a scenario, and leaves no hit in `hits.log`); the exit-99 `forgectl` stub is reachable
+by its absolute path only. The `crontab` stub is reachable by name. A stub hit fails the test
 at teardown even if the code under test swallowed the failure, unless the test carries the
 `expect_guard_hit` marker. Because PATH can be bypassed (absolute paths, an explicit `env=`),
 `subprocess.Popen` is also wrapped: launching a `crontab` or `forgectl` binary from outside the
@@ -31,6 +34,7 @@ from typing import Any
 
 import pytest
 
+from tests.forgectl_support import fake_forgectl  # noqa: E402,F401  (fixture)
 from tests.gateway_support import fake_gateway, fake_tool, reaper  # noqa: E402,F401  (fixtures)
 
 pytest_plugins = ["pytester"]  # tests/test_layout.py runs an inner pytest session
