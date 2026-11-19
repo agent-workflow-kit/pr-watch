@@ -41,7 +41,10 @@ pythonVersion = "3.12"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["live: needs real models/hosts/credentials; never run in CI"]
+markers = [
+    "live: needs real models/hosts/credentials; never run in CI",
+    "expect_guard_hit: the test deliberately runs a guard stub (forgectl/crontab)",
+]
 addopts = "-m 'not live'"
 
 [tool.semantic_release]
