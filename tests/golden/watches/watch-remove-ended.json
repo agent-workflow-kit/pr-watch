@@ -1,0 +1,9 @@
+{
+  "changed": true,
+  "owner": "human:a",
+  "prs_dropped": 1,
+  "reason": null,
+  "reference": "github.com/o/r#1",
+  "watch": null,
+  "watch_ended": true
+}
