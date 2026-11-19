@@ -809,7 +809,7 @@ def test_ignore_term_hang_needs_sigkill_and_the_call_log_shows_no_exit(fake: Fak
     fake.hang("snapshot", seconds=60, ignore_term=True)
     proc = start(fake, "snapshot", PR, "--json")
     try:
-        wait_for_start(fake)
+        fake.wait_ready()  # SIGTERM is ignored from here on; before it the fake would die of it
         proc.terminate()
         with pytest.raises(subprocess.TimeoutExpired):
             proc.wait(timeout=0.5)

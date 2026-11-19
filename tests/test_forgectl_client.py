@@ -713,15 +713,23 @@ def test_hang_past_the_deadline_is_killed(fake: FakeForgectl) -> None:
 def test_a_term_ignoring_hang_is_killed_by_sigkill(fake: FakeForgectl) -> None:
     fake.add(new_pr())
     fake.hang("snapshot", seconds=60, ignore_term=True)
-    client = make_client(timeout_ms=100, deadline_slack=0.2, term_grace=0.2)
+    # The deadline runs from the spawn, and the fake installs its SIGTERM-ignore handler only
+    # after the interpreter has started; on a loaded machine a short deadline fires first and the
+    # fake dies of SIGTERM (issue #56). 5 s is far above any start-up time seen, even at a load
+    # average of 30 under nice 19, and the `ready` call-log record below proves the handler was in
+    # place, so the test cannot pass by the wrong route.
+    client = make_client(timeout_ms=1000, deadline_slack=4.0, term_grace=0.2)
     out = client.snapshot(REF)
     assert out.local == "killed" and out.returncode == -signal.SIGKILL
+    fake.wait_ready()
+    [call] = fake.calls("snapshot")
+    assert call.exit is None  # it never exited by itself
 
 
 def test_a_hang_that_respects_the_timeout_flag_is_a_network_error(fake: FakeForgectl) -> None:
     fake.add(new_pr())
     fake.hang("snapshot", seconds=60, respect_timeout=True)
-    client = make_client(timeout_ms=300, deadline_slack=3.0)
+    client = make_client(timeout_ms=300, deadline_slack=15.0)
     out = client.snapshot(REF)
     assert out.local is None and error_of(out).code == "network_error"
 

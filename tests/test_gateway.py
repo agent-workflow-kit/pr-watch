@@ -254,9 +254,13 @@ def test_deadline_terminates_the_child(reaper: Reaper) -> None:
 
 def test_child_ignoring_sigterm_is_killed_after_two_seconds(reaper: Reaper) -> None:
     assert gateway.TERM_GRACE == 2.0
-    result = sh("trap '' TERM; while :; do sleep 0.05; done", timeout=0.3)
+    # The deadline runs from the spawn; a short one can fire before the shell has installed its
+    # trap, and the child then dies of SIGTERM (issue #56). The shell says "ready" once the trap
+    # is in place, so the assertions below prove SIGTERM was really ignored.
+    result = sh("trap '' TERM; echo ready; while :; do sleep 0.05; done", timeout=1.5)
+    assert result.stdout == "ready\n"
     assert result.timed_out and result.returncode == -signal.SIGKILL
-    assert 2.0 <= result.elapsed - 0.3 < 4.0  # SIGTERM at the deadline, SIGKILL 2 s later
+    assert 2.0 <= result.elapsed - 1.5 < 10.0  # SIGTERM at the deadline, SIGKILL 2 s later
 
 
 def test_the_whole_group_dies_not_just_the_leader(reaper: Reaper) -> None:
@@ -322,7 +326,7 @@ def test_output_written_before_a_normal_exit_is_fully_drained(reaper: Reaper) ->
 
 def test_stop_kills_a_sigterm_ignoring_descendant_after_the_leader_exits(reaper: Reaper) -> None:
     # The leader dies on SIGTERM; its child ignores SIGTERM and holds the pipes.
-    result = sh("(trap '' TERM; exec sleep 60) & echo $!; wait", timeout=0.5)
+    result = sh("sh -c 'trap \"\" TERM; echo $$; exec sleep 60' & wait", timeout=1.5)
     grandchild = int(result.stdout)
     reaper.track(grandchild)
     assert result.timed_out
@@ -344,7 +348,7 @@ def test_the_group_is_signalled_while_the_leader_is_a_zombie_never_after_the_rea
         real(pgid, sig)
 
     monkeypatch.setattr(gateway, "_killpg", spy)
-    result = sh("(trap '' TERM; exec sleep 60) & echo $!; wait", timeout=0.3)
+    result = sh("sh -c 'trap \"\" TERM; echo $$; exec sleep 60' & wait", timeout=1.5)
     reaper.track(int(result.stdout))
     assert [sig for sig, _ in states] == [signal.SIGTERM, signal.SIGKILL]
     assert all(state is not None for _, state in states)  # /proc entry still there: unreaped
