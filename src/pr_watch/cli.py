@@ -396,14 +396,24 @@ def _check_watch_target(args: argparse.Namespace) -> None:
 
 def _merge_leftovers(args: argparse.Namespace, extras: list[str]) -> None:
     """Handle what parse_known_args left over. `label` items split by an option (`add PR --owner
-    O k=v`) come back here and join the items; anything else is an unrecognized argument, and the
-    message counts them without echoing them."""
-    if extras and args.command in ("label add", "label remove"):
-        values = [e for e in extras if not e.startswith("-")]
-        if len(values) == len(extras):
-            args.items = [*args.items, *values]
-            return
-        extras = [e for e in extras if e.startswith("-")]  # the values were fine
+    O k=v`) come back here and join the items; a lone `--` is dropped and every token after it is
+    an item, dash-leading or not. Anything else is an unrecognized argument. Counting rule: the
+    first unknown option and every token after it are counted (a value after an unknown option
+    cannot be told from its argument); items before it were fine. The message never echoes the
+    tokens."""
+    if "--" in extras:
+        at = extras.index("--")
+        extras = [*extras[:at], *extras[at + 1 :]]
+        tail = len(extras) - at  # tokens that followed the `--`
+    else:
+        tail = 0
+    head = extras[: len(extras) - tail]
+    first = next((i for i, e in enumerate(head) if e.startswith("-")), len(extras))
+    if first == len(extras) and extras and args.command in ("label add", "label remove"):
+        args.items = [*args.items, *extras]
+        return
+    if first < len(extras):
+        raise UsageError(f"unrecognized arguments ({len(extras) - first})")
     if extras:
         raise UsageError(f"unrecognized arguments ({len(extras)})")
 
@@ -449,6 +459,9 @@ def _stderr_line(text: str) -> None:
 def _output_failed() -> int:
     """stdout cannot be written: say so once on stderr, make the shutdown flush quiet, exit 1."""
     _stderr_line(f"{PROG}: error: cannot write to stdout\n")
+    # One-shot CLI: the process exits right after this, so repointing fd 1 at /dev/null is safe
+    # and keeps the interpreter's final stdout flush from failing again (a second message and
+    # exit code 120). Only done when sys.stdout is the real stream, never for a swapped-in one.
     try:
         sink = open(os.devnull, "w")  # noqa: SIM115 - kept open for the shutdown flush
         if sys.stdout is sys.__stdout__:

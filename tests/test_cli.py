@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import errno
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -326,6 +328,52 @@ def test_label_leftover_unknown_option_is_still_a_usage_error(
     assert envelope_of(out)["message"] == "unrecognized arguments (1)"
     assert err.startswith(f"usage: {cli_module.PROG} label {verb}")
     assert stubs == []
+
+
+@pytest.mark.parametrize("verb", ["add", "remove"])
+def test_label_double_dash_after_option_makes_the_rest_items(
+    verb: str, stubs: list[tuple[Context, Any]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = run(capsys, "label", verb, "o/r#1", "--owner", "me", "a=b", "--", "c=d", "-x=y")[0]
+    assert code == 0
+    a = stubs[-1][1]
+    assert (a.pr, a.labels, a.owner) == ("o/r#1", ["a=b", "c=d", "-x=y"], "me")
+
+
+def test_label_unknown_option_counts_its_trailing_values_without_echoing(
+    stubs: list[tuple[Context, Any]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = run(capsys, "--json", "label", "add", "o/r#1", "a=b", "--bogus", "SECRET")
+    assert code == 2
+    assert envelope_of(out)["message"] == "unrecognized arguments (2)"
+    assert "SECRET" not in out + err
+    assert stubs == []
+
+
+@pytest.mark.skipif(not os.path.exists("/dev/full"), reason="/dev/full not available")
+def test_stdout_write_failure_in_a_real_process_exits_1_quietly(tmp_path: Path) -> None:
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path),
+        "XDG_CONFIG_HOME": str(tmp_path / "xdg"),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
+        "PYTHONPATH": os.pathsep.join(sys.path),
+    }
+    with open("/dev/full", "w") as full:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pr_watch", "--json", "poll", "--bogus"],
+            stdout=full,
+            stderr=subprocess.PIPE,
+            env=env,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    assert proc.returncode == 1
+    assert "Traceback" not in proc.stderr
+    assert "Exception ignored" not in proc.stderr
+    assert "cannot write to stdout" in proc.stderr
 
 
 def test_label_splits_reference_from_labels(
