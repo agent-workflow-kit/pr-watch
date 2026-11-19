@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "not_found",
+    "message": "PR is not stored",
+    "reason": null
+  }
+}

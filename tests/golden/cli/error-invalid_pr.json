@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "invalid_pr",
+    "message": "not a PR reference",
+    "reason": null
+  }
+}
