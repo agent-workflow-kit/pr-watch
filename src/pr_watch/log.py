@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import itertools
 import json
 import os
 import re
@@ -86,6 +87,7 @@ LOCK_WAIT: Final = 1.0
 _write = os.write  # seams: tests patch these names, not the shared `os` module
 _open = os.open
 _rename = os.rename
+_aside_counter = itertools.count(1)  # unique suffixes for entries moved out of a slot
 
 # event -> (required fields, optional fields); tests/test_log.py pins this to schemas/log.json.
 _MSG = {"message"}
@@ -181,7 +183,7 @@ class Log:
         self._keep = keep
         self._clock = clock
         self._on_error = on_error
-        self._reported = False
+        self._reported: set[str] = set()  # failure categories already reported
         self._lock_wait = lock_wait
 
     # -- public ---------------------------------------------------------------------------
@@ -192,7 +194,7 @@ class Log:
         try:
             line = _build(event, level, fields, self._clock())
         except ValueError as exc:
-            self._report_text(f"invalid record: {exc}")
+            self._report_text("invalid", f"invalid record: {exc}")
             return False
         if self._state is None:
             return False
@@ -211,12 +213,12 @@ class Log:
 
     def _report(self, exc: OSError | StateDirError) -> None:
         reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
-        self._report_text(reason)
+        self._report_text("write", reason)
 
-    def _report_text(self, reason: str) -> None:
-        if self._reported or self._on_error is None:
+    def _report_text(self, category: str, reason: str) -> None:
+        if category in self._reported or self._on_error is None:
             return
-        self._reported = True
+        self._reported.add(category)
         self._on_error(f"{LOG_NAME} not written: {one_line(reason, 120)}")
 
     def _open(self, state: StateDir) -> int:
@@ -296,7 +298,7 @@ class Log:
                     return  # another process rotated while we waited for the lock
                 self._shift(state)
             except OSError as exc:
-                self._report_text(f"rotation failed: {exc.strerror or exc}")
+                self._report_text("rotation", f"rotation failed: {exc.strerror or exc}")
             finally:
                 try:
                     fcntl.flock(state.fd, fcntl.LOCK_UN)
@@ -307,16 +309,26 @@ class Log:
         def name(n: int) -> str:
             return f"{LOG_NAME}.{n}"
 
+        def aside(n: int) -> None:
+            # Never delete what we did not write: move it out of the rotation slots.
+            stale = f"{name(n)}.stale-{os.getpid()}-{next(_aside_counter)}"
+            _rename(name(n), stale, src_dir_fd=state.fd, dst_dir_fd=state.fd)
+
         for n in range(1, self._keep + 1):  # a directory planted in a slot blocks the renames
             try:
                 if stat.S_ISDIR(os.stat(name(n), dir_fd=state.fd, follow_symlinks=False).st_mode):
-                    os.rmdir(name(n), dir_fd=state.fd)  # fails when not empty: rotation gives up
+                    try:
+                        os.rmdir(name(n), dir_fd=state.fd)
+                    except OSError:  # not empty (or not removable): rename it aside
+                        aside(n)
             except FileNotFoundError:
                 pass
         try:
             os.unlink(name(self._keep), dir_fd=state.fd)
         except FileNotFoundError:
             pass
+        except OSError:
+            aside(self._keep)
         for n in range(self._keep - 1, 0, -1):
             try:
                 _rename(name(n), name(n + 1), src_dir_fd=state.fd, dst_dir_fd=state.fd)

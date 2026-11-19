@@ -31,6 +31,8 @@ from typing import Final
 
 from .text import one_line
 
+_mkdir = os.mkdir  # seam: tests patch this name, not the shared `os` module
+
 TOOL_DIR: Final = "pr-watch"
 DIR_MODE: Final = 0o700
 HOOKS_CWD: Final = "hooks-cwd"
@@ -193,14 +195,17 @@ def open_state_dir(path: Path | None = None) -> StateDir:
 
 def _ensure_hooks_cwd(state_fd: int) -> None:
     """Create `hooks-cwd` (0700) under the state directory and verify it: a directory, not a
-    symlink, owned by the user, not group- or world-writable."""
+    symlink, owned by the user, not group- or world-writable. A missing one that cannot be created
+    because the filesystem is read-only or access is denied (EROFS, EACCES) is left missing."""
     created = False
     try:
-        os.mkdir(HOOKS_CWD, DIR_MODE, dir_fd=state_fd)
+        _mkdir(HOOKS_CWD, DIR_MODE, dir_fd=state_fd)
         created = True
     except FileExistsError:
         pass
     except OSError as exc:
+        if exc.errno in (errno.EROFS, errno.EACCES):
+            return  # a read-only state dir is otherwise safe; the hook runner creates it or fails
         raise StateDirError(f"{HOOKS_CWD} cannot be created ({exc.strerror})") from None
     try:
         fd = os.open(HOOKS_CWD, _OPEN_FLAGS, dir_fd=state_fd)

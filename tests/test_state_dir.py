@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import pwd
 import stat
@@ -203,6 +204,38 @@ def test_hooks_cwd_is_created_private_whatever_the_umask(tmp_path: Path) -> None
     hooks = tmp_path / "pr-watch" / "hooks-cwd"
     assert hooks.is_dir() and stat.S_IMODE(hooks.stat().st_mode) == 0o700
     assert list(hooks.iterdir()) == []
+
+
+@pytest.mark.parametrize("code", [errno.EROFS, errno.EACCES])
+def test_a_missing_hooks_cwd_that_cannot_be_created_read_only_does_not_refuse_the_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    real = os.mkdir
+
+    def mkdir(path: Any, mode: int = 0o777, *, dir_fd: int | None = None) -> None:
+        if path == "hooks-cwd":
+            raise OSError(code, os.strerror(code))
+        real(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(sd, "_mkdir", mkdir)
+    with open_state_dir(tmp_path / "pr-watch"):
+        pass
+    assert not (tmp_path / "pr-watch" / "hooks-cwd").exists()
+
+
+def test_any_other_hooks_cwd_creation_failure_is_still_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = os.mkdir
+
+    def mkdir(path: Any, mode: int = 0o777, *, dir_fd: int | None = None) -> None:
+        if path == "hooks-cwd":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(sd, "_mkdir", mkdir)
+    with pytest.raises(StateDirError, match="hooks-cwd cannot be created"):
+        open_state_dir(tmp_path / "pr-watch")
 
 
 def test_an_existing_private_hooks_cwd_is_accepted(tmp_path: Path) -> None:

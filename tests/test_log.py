@@ -556,7 +556,7 @@ def test_a_planted_empty_directory_in_a_slot_does_not_stop_rotation(state: State
     assert (state.path / "log.jsonl.1").is_file() and (state.path / "log.jsonl.3").is_file()
 
 
-def test_a_non_empty_directory_in_a_slot_is_reported_once_and_the_record_kept(
+def test_a_non_empty_directory_in_a_slot_is_renamed_aside_and_rotation_continues(
     state: StateDir,
 ) -> None:
     stuck = state.path / "log.jsonl.2"
@@ -564,10 +564,49 @@ def test_a_non_empty_directory_in_a_slot_is_reported_once_and_the_record_kept(
     (stuck / "x").write_text("keep")
     problems: list[str] = []
     lg = Log(state, max_bytes=500, on_error=problems.append)
+    _fill(lg, 8, "k")
+    assert problems == []
+    aside = [p for p in state.path.iterdir() if ".stale-" in p.name]
+    assert len(aside) == 1 and (aside[0] / "x").read_text() == "keep"
+    assert (state.path / "log.jsonl.2").is_file()  # the slot rotates normally again
+    assert records(log_path(state))[-1]["key"] == "k7"
+
+
+def test_an_unrenameable_non_empty_directory_is_reported_once_and_the_record_kept(
+    state: StateDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stuck = state.path / "log.jsonl.2"
+    stuck.mkdir()
+    (stuck / "x").write_text("keep")
+
+    def failing(*a: Any, **k: Any) -> None:
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    _seam(monkeypatch, "_rename", failing)
+    problems: list[str] = []
+    lg = Log(state, max_bytes=500, on_error=problems.append)
     _fill(lg, 8, "k")  # every write still succeeds
     assert len(problems) == 1 and "rotation failed" in problems[0]
     assert (stuck / "x").read_text() == "keep"
     assert records(log_path(state))[-1]["key"] == "k7"
+
+
+def test_each_failure_category_is_reported_once_on_its_own(
+    state: StateDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    problems: list[str] = []
+    lg = Log(state, on_error=problems.append)
+    assert lg.write("nope") is False
+    assert lg.write("nope") is False
+    assert len(problems) == 1 and "invalid record" in problems[0]
+
+    def full(*a: Any, **k: Any) -> int:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    _seam(monkeypatch, "_write", full)
+    assert lg.write("config_warning", "warn", key="k") is False
+    assert lg.write("config_warning", "warn", key="k") is False
+    assert len(problems) == 2 and "No space left" in problems[1]
 
 
 def test_a_restrictive_umask_does_not_leave_an_unwritable_log(state: StateDir) -> None:
