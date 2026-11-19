@@ -71,7 +71,7 @@ REPO_RE: Final = re.compile(
     r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?"
     r"(?:/(?!\.\.?(?:/|\Z))[A-Za-z0-9._-]+)+\Z"
 )
-SHA_RE: Final = re.compile(r"^[0-9a-f]{40}\Z")
+SHA_RE: Final = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 WATCH_ID_RE: Final = re.compile(r"^w-[a-z2-7]{10}\Z")
 MAX_SAFE_INT: Final = 2**53
 JOURNAL_SIZE_LIMIT: Final = 64 * 1024 * 1024

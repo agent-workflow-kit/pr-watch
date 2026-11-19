@@ -46,7 +46,7 @@ MAX_FIELD_CHARS: Final = 256
 PARTS: Final = ("reviews", "threads", "ci")
 
 _BAD: Final = object()
-_SHA = re.compile(r"[0-9a-f]{40,64}")
+_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _TS = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})"
 )
@@ -165,6 +165,11 @@ def _scalar(new: object, check: Any, previous: Mapping[str, Any], key: str) -> A
 
 
 # --- identifiers -----------------------------------------------------------------------------
+
+
+def instant(value: object) -> datetime | None:
+    """A valid timestamp as an aware UTC datetime, else null (never raises)."""
+    return _instant(value)
 
 
 def _valid_ids(items: object, per_item: Any) -> list[str]:

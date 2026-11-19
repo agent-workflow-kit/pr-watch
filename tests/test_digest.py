@@ -926,3 +926,9 @@ def test_previous_ci_with_an_unknown_check_state_is_valid() -> None:
     previous["ci"]["checks"][key]["state"] = "unknown"
     d = build_digest(gh(incomplete=["ci"], complete=False), previous)
     assert d["ci"] == previous["ci"]
+
+
+@pytest.mark.parametrize(("length", "kept"), [(40, True), (41, False), (63, False), (64, True)])
+def test_sha_is_40_or_64_hex(length: int, kept: bool) -> None:
+    d = build_digest(gh(head={"sha": "c" * length}))
+    assert d["head_sha"] == ("c" * length if kept else None)
