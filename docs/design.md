@@ -34,6 +34,13 @@ Third parties: none directly (git-host access is forgectl's). Dependencies of th
 | D-14 | Membership: enumeration adds and marks (`left_count`, two consecutive complete listings), only a snapshot commit removes a source | a merged member must keep its source so its event is stored; no enumeration-time removal | [Watches, owners and members](interface.md#watches-owners-and-members) |
 | D-15 | Deviations from the design guide are recorded in Hooks and Labels of the interface | one place for the differences | [Hooks](interface.md#hooks), [Labels](interface.md#labels) |
 
+Value validation (`refs`, implementation readings where the interface is silent; always the narrower one):
+
+- A path segment starting with `-` is refused in every PR, URL and repo form (backend unknown offline), and a last segment ending in `.git` is refused.
+- URLs follow forgectl v0.55.3: ASCII only; `@`, `\\`, `%`, whitespace refused; query and fragment limited to `[A-Za-z0-9._~=&-]`; only forgectl's suffixes are accepted after the number (so a stray trailing path is refused rather than ignored). `:443` and a `www.` before `github.com` or `gitlab.com` are dropped; other ports must be 1 to 65535 without a leading zero.
+- An owner given with `--owner` is never lowercased or cleaned: it matches the owner grammar or is `usage` (`bad_owner`). The default `human:<name>` cuts the cleaned name to 58 characters so the whole owner stays within 64.
+- Every refusal is `RefError` with fixed text and a `details.kind`; no message contains the value.
+
 ## Resolved open topics
 
 - **Polling cadence:** a 5 minute hint, per-host full-pass interval, unsettled PRs every cycle (D-1, D-2; [Pacing and backoff](interface.md#pacing-and-backoff)).

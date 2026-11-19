@@ -25,20 +25,26 @@ from pr_watch.cli import (
     one_line,
 )
 from pr_watch.config import ConfigError
+from pr_watch.refs import Label, PrId, PrRef
 from tests.harness import assert_valid
 
+PR1 = PrRef("o", "r", 1)
+AB = Label("a", "b")
+CD = Label("c", "d")
+WID = "w-abcdefg234"
+OWNER = ["--owner", "t"]
 GOLDEN = Path(__file__).parent / "golden" / "cli"
 
 # Every command path with the smallest argv that parses.
 VALID: dict[str, list[str]] = {
-    "watch add": ["watch", "add", "o/r#1"],
-    "watch remove": ["watch", "remove", "o/r#1"],
+    "watch add": ["watch", "add", "o/r#1", "--owner", "t"],
+    "watch remove": ["watch", "remove", "o/r#1", "--owner", "t"],
     "poll": ["poll"],
     "list": ["list"],
     "show": ["show", "o/r#1"],
     "events": ["events"],
-    "label add": ["label", "add", "o/r#1", "k=v"],
-    "label remove": ["label", "remove", "o/r#1", "k=v"],
+    "label add": ["label", "add", "o/r#1", "k=v", "--owner", "t"],
+    "label remove": ["label", "remove", "o/r#1", "k=v", "--owner", "t"],
     "prune": ["prune"],
     "cron install": ["cron", "install"],
     "cron uninstall": ["cron", "uninstall"],
@@ -264,10 +270,16 @@ def test_watch_add_per_pr_and_query_forms_parse(
     run(capsys, "watch", "add", "o/r#1", "--label", "a=b", "--label", "c=d", "--owner", "me",
         "--no-baseline")  # fmt: skip
     a = stubs[-1][1]
-    assert (a.pr, a.label, a.owner, a.no_baseline) == ("o/r#1", ["a=b", "c=d"], "me", True)
-    run(capsys, "watch", "add", "--mine", "--open", "--host", "h1", "--host", "h2", "--repo", "x/y")
+    assert (a.pr, a.label, a.owner, a.no_baseline) == (
+        PrRef("o", "r", 1),
+        [Label("a", "b"), Label("c", "d")],
+        "me",
+        True,
+    )
+    run(capsys, "watch", "add", "--mine", "--open", "--host", "h1", "--host", "h2",
+        "--repo", "h1/y", *OWNER)  # fmt: skip
     a = stubs[-1][1]
-    assert (a.pr, a.mine, a.open, a.host, a.repo) == (None, True, True, ["h1", "h2"], ["x/y"])
+    assert (a.pr, a.mine, a.open, a.host, a.repo) == (None, True, True, ["h1", "h2"], ["h1/y"])
 
 
 @pytest.mark.parametrize(
@@ -310,13 +322,13 @@ def test_label_owner_may_come_before_the_labels(
 ) -> None:
     assert run(capsys, "label", verb, "o/r#1", "--owner", "me", "a=b", "c=d")[0] == 0
     a = stubs[-1][1]
-    assert (a.pr, a.watch, a.labels, a.owner) == ("o/r#1", None, ["a=b", "c=d"], "me")
+    assert (a.pr, a.watch, a.labels, a.owner) == (PR1, None, [AB, CD], "me")
     assert run(capsys, "label", verb, "--owner", "me", "o/r#1", "a=b")[0] == 0
     a = stubs[-1][1]
-    assert (a.pr, a.labels, a.owner) == ("o/r#1", ["a=b"], "me")
-    assert run(capsys, "label", verb, "--watch", "W1", "--owner", "me", "a=b")[0] == 0
+    assert (a.pr, a.labels, a.owner) == (PR1, [AB], "me")
+    assert run(capsys, "label", verb, "--watch", WID, "--owner", "me", "a=b")[0] == 0
     a = stubs[-1][1]
-    assert (a.pr, a.watch, a.labels, a.owner) == (None, "W1", ["a=b"], "me")
+    assert (a.pr, a.watch, a.labels, a.owner) == (None, WID, [AB], "me")
 
 
 @pytest.mark.parametrize("verb", ["add", "remove"])
@@ -334,10 +346,10 @@ def test_label_leftover_unknown_option_is_still_a_usage_error(
 def test_label_double_dash_after_option_makes_the_rest_items(
     verb: str, stubs: list[tuple[Context, Any]], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    code = run(capsys, "label", verb, "o/r#1", "--owner", "me", "a=b", "--", "c=d", "-x=y")[0]
+    code = run(capsys, "label", verb, "o/r#1", "--owner", "me", "a=b", "--", "c=d", "e=f")[0]
     assert code == 0
     a = stubs[-1][1]
-    assert (a.pr, a.labels, a.owner) == ("o/r#1", ["a=b", "c=d", "-x=y"], "me")
+    assert (a.pr, a.labels, a.owner) == (PR1, [AB, CD, Label("e", "f")], "me")
 
 
 def test_label_unknown_option_counts_its_trailing_values_without_echoing(
@@ -381,17 +393,17 @@ def test_label_splits_reference_from_labels(
 ) -> None:
     run(capsys, "label", "add", "o/r#1", "a=b", "c=d", "--owner", "me")
     a = stubs[-1][1]
-    assert (a.pr, a.watch, a.labels, a.owner) == ("o/r#1", None, ["a=b", "c=d"], "me")
-    run(capsys, "label", "remove", "--watch", "W1", "a=b")
+    assert (a.pr, a.watch, a.labels, a.owner) == (PR1, None, [AB, CD], "me")
+    run(capsys, "label", "remove", "--watch", WID, "a=b", "--owner", "me")
     a = stubs[-1][1]
-    assert (a.pr, a.watch, a.labels) == (None, "W1", ["a=b"])
+    assert (a.pr, a.watch, a.labels) == (None, WID, [AB])
 
 
 @pytest.mark.parametrize(
     "argv",
     [
-        ["label", "add", "--watch", "W1"],  # no labels
-        ["label", "add", "o/r#1"],  # no labels
+        ["label", "add", "--watch", WID, "--owner", "me"],  # no labels
+        ["label", "add", "o/r#1", "--owner", "me"],  # no labels
         ["label", "remove", "--watch"],
         ["label", "remove"],
     ],
@@ -411,23 +423,22 @@ def test_poll_options_parse(
     run(capsys, "poll", "--pr", "o/r#1", "--repo", "h/o/r", "--full", "--no-hooks",
         "--hook", "on-merged=echo hi", "--hook", "post-poll=true")  # fmt: skip
     a = stubs[-1][1]
-    assert a.pr == "o/r#1" and a.repo == "h/o/r" and a.full and a.no_hooks
-    assert a.hook == ["on-merged=echo hi", "post-poll=true"]
+    assert a.pr == PR1 and a.repo == "h/o/r" and a.full and a.no_hooks
+    assert a.hook == [("on-merged", "echo hi"), ("post-poll", "true")]
 
 
-def test_events_options_parse_as_raw_strings(
+def test_events_options_parse_as_validated_values(
     stubs: list[tuple[Context, Any]], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    run(capsys, "events", "--label", "a=b", "--pr", "x", "--pr", "y", "--type", "t1",
-        "--since", "garbage", "--limit", "99999")  # fmt: skip
+    run(capsys, "events", "--label", "a=b", "--pr", "x/y#1", "--pr", "gh:y", "--type", "ci",
+        "--since", "v1.abcdefg2.5", "--limit", "99")  # fmt: skip
     a = stubs[-1][1]
-    # Values are validated by their owners (#7, #27), not by the frame.
     assert (a.label, a.pr, a.type, a.since, a.limit) == (
-        ["a=b"],
-        ["x", "y"],
-        ["t1"],
-        "garbage",
-        "99999",
+        [AB],
+        [PrRef("x", "y", 1), PrId("gh:y")],
+        ["ci"],
+        "v1.abcdefg2.5",
+        99,
     )
 
 
@@ -441,7 +452,7 @@ def test_list_status_choices(
 def test_export_cron_and_prune_options_parse(
     stubs: list[tuple[Context, Any]], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    run(capsys, "export", "--since", "1d", "--type", "a", "--pr", "p", "--label", "k=v")
+    run(capsys, "export", "--since", "1d", "--type", "ci", "--pr", "p/q#2", "--label", "k=v")
     assert stubs[-1][1].since == "1d"
     run(capsys, "cron", "install", "--every", "5m")
     assert stubs[-1][1].every == "5m"
@@ -452,9 +463,12 @@ def test_export_cron_and_prune_options_parse(
 def test_double_dash_ends_options(
     stubs: list[tuple[Context, Any]], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    run(capsys, "show", "--", "--json")
+    # After `--` a token is a positional, never an option: `--json` is then a (refused) value.
+    code, out, _ = run(capsys, "show", "--", "--json")
+    assert code == 2 and stubs == []
+    run(capsys, "show", "--", "o/r#1")
     ctx, args = stubs[-1]
-    assert args.pr == "--json" and not ctx.json
+    assert args.pr == PR1 and not ctx.json
 
 
 SENTINEL = "SENTINEL-tok-9f3a"

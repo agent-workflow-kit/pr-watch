@@ -39,6 +39,17 @@ from pydantic import (
     field_validator,
 )
 
+from .refs import (
+    CMD,
+    DURATION,
+    HOST,
+    INTERVAL,
+    REPO,
+    duration_ms,
+    ecma,
+    interval_divides,
+)
+
 MAX_FILE_BYTES: Final = 256 * 1024
 MAX_TOTAL_BYTES: Final = 1024 * 1024
 MAX_DROP_INS: Final = 256
@@ -46,48 +57,22 @@ _MAX_ERRORS_SHOWN: Final = 5
 _MAX_KEY_CHARS: Final = 80
 
 
-def _ecma(pattern: str) -> str:
-    return pattern.replace("$", r"\Z")
+_ecma = ecma
 
 
-_DURATION: Final = _ecma(r"^(?:0|[0-9]{1,9}(?:ms|s|m|h|d))$")
-_INTERVAL: Final = _ecma(r"^(?:[1-9][0-9]{0,8}m|[1-9][0-9]{0,8}h)$")
+_DURATION: Final = DURATION
+_INTERVAL: Final = INTERVAL
 _RETENTION: Final = _ecma(r"^(?:[3-9][0-9]|[1-9][0-9]{2,8})d$")
-# C0 and C1 control characters are refused; a hook command may keep \n and \t but needs a
-# non-blank character (leading space, tab and newline are skipped, so matching stays linear).
 _NO_CONTROLS: Final = _ecma(r"^[^\u0000-\u001f\u007f-\u009f]+$")
-_CMD: Final = _ecma(
-    r"^[ \t\n]*[^\u0000-\u0020\u007f-\u009f][^\u0000-\u0008\u000b-\u001f\u007f-\u009f]*$"
-)
-_HOST: Final = _ecma(
-    r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$"
-)
-_REPO: Final = _ecma(
-    r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?"
-    r"(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]+)+$"
-)
+_CMD: Final = CMD
+# Host and repo grammars belong to refs (one owner), shared with the CLI value checks.
+_HOST: Final = HOST
+_REPO: Final = REPO
 _ENV_NAME: Final = re.compile(_ecma(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"))
 _RESERVED_PREFIXES: Final = ("PR_WATCH_", "LD_", "DYLD_")
-MAX_DURATION_MS: Final = 3650 * 86_400_000  # ten years
 MAX_HOST_LOW_WATER: Final = 1_000_000
 MAX_WARNING_CHARS: Final = 256
 _SECRET_WORDS: Final = ("TOKEN", "SECRET", "KEY", "PASSWORD")
-_DURATION_UNITS: Final = {"ms": 1, "s": 1000, "m": 60_000, "h": 3_600_000, "d": 86_400_000}
-
-
-def duration_ms(text: str) -> int:
-    """A config duration (`0`, `500ms`, `60s`, `5m`, `2h`, `30d`) in milliseconds.
-
-    Raises ValueError for anything else, and for more than 3650d."""
-    if not re.fullmatch(_DURATION, text):
-        raise ValueError("not a duration")
-    if text == "0":
-        return 0
-    unit = "ms" if text.endswith("ms") else text[-1]
-    value = int(text[: -len(unit)]) * _DURATION_UNITS[unit]
-    if value > MAX_DURATION_MS:
-        raise ValueError("duration is too large")
-    return value
 
 
 def _duration_parses(text: str) -> str:
@@ -100,8 +85,7 @@ def _duration_parses(text: str) -> str:
 
 def _interval_divides(text: str) -> str:
     _duration_parses(text)
-    count, unit = int(text[:-1]), text[-1]
-    if 60 % count if unit == "m" else 24 % count:
+    if not interval_divides(text):
         raise ValueError("must divide 60 minutes or 24 hours (for example 5m, 15m, 1h, 6h)")
     return text
 
