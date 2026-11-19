@@ -12,16 +12,20 @@ What this module does (docs/interface.md: Failures, Version rule, Resolution):
   `forgectl.timeout` plus `deadline_slack` (10 s), stdout is read under `max_output` bytes, and
   the gateway signals the child's group (SIGTERM, then SIGKILL).
 - Parses stdout strictly: UTF-8 decoded explicitly, one JSON object, no duplicate keys, no NaN or
-  Infinity, every integer and float bounded, depth bounded by the parser; the object must have the
-  required fields of the command's pinned schema (`REQUIRED`, kept equal to the schema by a test).
+  Infinity, every integer and float bounded, nesting at most MAX_DEPTH levels (checked after the
+  parse by an iterative walk; a deeper document that the parser itself cannot read is also a
+  `contract` failure), no lone surrogate in any key or string; the object must have the required
+  fields of the command's pinned schema (`REQUIRED`, kept equal to the schema by a test) and the
+  fields the digest reads must have the right JSON types (`_SHAPE`; enums are not checked, a newer
+  minor may add values).
 - Returns a structured raw `Outcome` and nothing more: the exit code, the parsed result (a
   complete one, or a partial `prs`/`whoami` object at exit 12), the parsed error envelope, the
   local failure (`too_large`, `killed`, `contract`) and the gateway's facts. Mapping an outcome to
   a counter, a pause or a failure record is the failure table's job (TODO(#9)); exit codes above
   128 and 137 are left to it as raw codes.
 - Resolves the executable once against absolute `PATH` entries only and checks `--version`
-  (`MIN_FORGECTL`): `ToolMissing` and `ToolTooOld` map to the exit 12 errors `tool_missing` and
-  `tool_too_old`.
+  (`MIN_FORGECTL`) before every other call (cached once it succeeded): `ToolMissing` and
+  `ToolTooOld` map to the exit 12 errors `tool_missing` and `tool_too_old`.
 
 Text from forgectl (error messages, details) is untrusted: it is made one line, stripped of
 control characters and cut to MAX_MESSAGE characters before it leaves this module, and only a
@@ -52,6 +56,8 @@ MAX_MESSAGE: Final = 200
 MAX_INT: Final = 10**15  # every integer read from forgectl is below this in magnitude
 _MAX_INT_CHARS: Final = 17
 MAX_LIMIT: Final = 1000
+MAX_DEPTH: Final = 32  # nesting levels of one forgectl document, the top object being level 1
+_SURROGATE: Final = re.compile("[\ud800-\udfff]")
 STATES: Final = frozenset({"open", "closed", "merged", "all"})
 _SHA: Final = re.compile(r"[0-9a-f]{40}")
 _VERSION: Final = re.compile(r"forgectl ([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})", re.ASCII)
@@ -59,7 +65,6 @@ _CODE: Final = re.compile(r"[a-z_]{1,64}", re.ASCII)
 _DETAIL_TEXT: Final = ("install", "variable", "key")
 _DETAIL_INT: Final = ("status",)
 
-COMMANDS: Final = ("prs", "snapshot", "show", "compare", "whoami")
 # Top-level required fields of forgectl's pinned schemas (tests/forgectl_pinned/schemas/cli).
 REQUIRED: Final[dict[str, tuple[str, ...]]] = {
     "prs": ("items", "complete", "errors", "hosts_queried", "rate_limit"),
@@ -84,17 +89,46 @@ REQUIRED: Final[dict[str, tuple[str, ...]]] = {
         "incomplete", "fetched_at",
     ),
 }  # fmt: skip
-# Types of the fields the client itself relies on; the rest is the digest's business.
-_TYPES: Final[dict[str, dict[str, type]]] = {
+# What the digest reads, by JSON type, after forgectl's pinned schemas. A spec is a token below, a
+# dict (an object that has these fields, others are ignored) or a one-item list (a list whose
+# items all match). Enums are not checked: a newer minor may add values.
+_STR: Final = "str"  # any string
+_NSTR: Final = "nstr"  # a non-empty string
+_ID: Final = "id"  # a non-empty string without control characters
+_NUM: Final = "num"  # an integer of at least 1
+_BOOL: Final = "bool"
+_OBJ: Final = "obj"
+_LIST: Final = "list"
+_HEAD: Final = {"sha": _NSTR}
+_PR_FIELDS: Final[dict[str, Any]] = {
+    "pr": _NSTR, "repo": _NSTR, "pr_id": _ID, "number": _NUM, "title": _STR, "state": _STR,
+    "draft": _BOOL, "labels": [_STR], "head": _HEAD,
+}  # fmt: skip
+_SHAPE: Final[dict[str, dict[str, Any]]] = {
     "prs": {
-        "items": list, "complete": bool, "errors": list, "hosts_queried": list, "rate_limit": dict,
+        "items": [
+            {"pr": _NSTR, "pr_id": _ID, "number": _NUM, "state": _STR, "head": _HEAD}
+        ],
+        "complete": _BOOL,
+        "errors": [{"code": _NSTR}],
+        "hosts_queried": [_NSTR],
+        "rate_limit": _OBJ,
     },
-    "whoami": {"hosts": list, "errors": list},
-    "compare": {"pr": str, "from_sha": str, "to_sha": str, "status": str},
-    "show": {"pr": str, "repo": str, "pr_id": str, "number": int, "state": str, "head": dict},
+    "whoami": {"hosts": [{"host": _NSTR}], "errors": [{"code": _NSTR}]},
+    "compare": {"pr": _NSTR, "from_sha": _NSTR, "to_sha": _NSTR, "status": _NSTR},
+    "show": _PR_FIELDS,
     "snapshot": {
-        "pr": str, "repo": str, "pr_id": str, "number": int, "state": str, "head": dict,
-        "complete": bool,
+        **_PR_FIELDS,
+        "complete": _BOOL,
+        "incomplete": [_STR],
+        "ci": {"state": _NSTR},
+        "threads": [_OBJ],
+        "reviews": [_OBJ],
+        "review_requests": [_OBJ],
+        "latest_by_reviewer": [_OBJ],
+        "activity": _OBJ,
+        "rate_limit": _OBJ,
+        "fetched_at": _STR,
     },
 }  # fmt: skip
 
@@ -263,8 +297,14 @@ def _timestamp(value: object) -> str:
         raise TypeError("updated_since must be a datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("updated_since must be timezone-aware")
-    utc = value.astimezone(UTC)
-    text = utc.strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        utc = value.astimezone(UTC)
+    except OverflowError as exc:
+        raise ValueError("updated_since is outside the UTC range") from exc
+    text = (
+        f"{utc.year:04d}-{utc.month:02d}-{utc.day:02d}T"
+        f"{utc.hour:02d}:{utc.minute:02d}:{utc.second:02d}"
+    )
     if utc.microsecond:
         text += f".{utc.microsecond:06d}"
     return text + "Z"
@@ -283,6 +323,8 @@ def prs_argv(
     """`prs` for exactly one of a host or a repo (forgectl refuses both together)."""
     if (host is None) == (repo is None):
         raise ValueError("exactly one of host and repo is required")
+    if host is not None and author is None:
+        raise ValueError("a host listing needs author='me' (forgectl refuses it without --repo)")
     argv = ["prs", f"--host={_host(host)}" if host is not None else f"--repo={_repo(repo)}"]
     if author is not None:
         if author != "me":
@@ -381,7 +423,7 @@ def _parse_error(raw: Any) -> ForgectlError | str:
     if retry is not None:
         if not _is_number(retry) or retry < 0:
             return "error.retry_after is not a non-negative number"
-        retry = min(float(retry), MAX_RETRY_AFTER)
+        retry = max(0.0, min(float(retry), MAX_RETRY_AFTER))  # -0.0 comes out as 0.0
     details = raw.get("details")
     if details is not None and not isinstance(details, dict):
         return "error.details is not an object"
@@ -402,14 +444,68 @@ def _parse_error(raw: Any) -> ForgectlError | str:
     )
 
 
+def _has_control(text: str) -> bool:
+    return any(c < " " or "\x7f" <= c <= "\x9f" for c in text)
+
+
+def _kind_problem(value: object, spec: Any, path: str) -> str | None:
+    """Why `value` does not match `spec`, naming the field path (our words only), or None."""
+    wrong = f"field {path} has the wrong type"
+    if isinstance(spec, dict):
+        if not isinstance(value, dict):
+            return wrong
+        for name, sub in spec.items():
+            if name not in value:
+                return f"missing required field(s): {path}.{name}"
+            problem = _kind_problem(value[name], sub, f"{path}.{name}")
+            if problem:
+                return problem
+        return None
+    if isinstance(spec, list):
+        if not isinstance(value, list):
+            return wrong
+        for index, item in enumerate(value):
+            problem = _kind_problem(item, spec[0], f"{path}[{index}]")
+            if problem:
+                return problem
+        return None
+    ok = {
+        _STR: lambda v: isinstance(v, str),
+        _NSTR: lambda v: isinstance(v, str) and v != "",
+        _ID: lambda v: isinstance(v, str) and v != "" and not _has_control(v),
+        _NUM: lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 1,
+        _BOOL: lambda v: isinstance(v, bool),
+        _OBJ: lambda v: isinstance(v, dict),
+        _LIST: lambda v: isinstance(v, list),
+    }[spec]
+    return None if ok(value) else wrong
+
+
 def _shape_problem(command: str, doc: dict[str, Any]) -> str | None:
     missing = [name for name in REQUIRED[command] if name not in doc]
     if missing:
         return "missing required field(s): " + ", ".join(missing)
-    for name, kind in _TYPES[command].items():
-        value = doc[name]
-        if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
-            return f"field {name} has the wrong type"
+    return _kind_problem(doc, _SHAPE[command], "$")
+
+
+def _walk_problem(doc: object) -> str | None:
+    """Depth and text checks over the whole document, iteratively (no recursion to exhaust)."""
+    stack: list[tuple[object, int]] = [(doc, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, str):
+            if _SURROGATE.search(node):
+                return "a string holds a lone surrogate"
+        elif isinstance(node, (dict, list)):
+            if depth > MAX_DEPTH:
+                return "nesting is too deep"
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if _SURROGATE.search(key):
+                        return "a key holds a lone surrogate"
+                    stack.append((value, depth + 1))
+            else:
+                stack.extend((item, depth + 1) for item in node)
     return None
 
 
@@ -467,6 +563,9 @@ def classify(command: str, res: gateway.Result, *, expect: Expect | None = None)
         return bad("stdout is not one bounded JSON document")
     if not isinstance(doc, dict):
         return bad("stdout is not a JSON object")
+    walked = _walk_problem(doc)
+    if walked:
+        return bad(walked)
 
     def with_result() -> Outcome:
         problem = _shape_problem(command, doc) or (
@@ -488,7 +587,7 @@ def classify(command: str, res: gateway.Result, *, expect: Expect | None = None)
         return with_result()
     if code == 12 and command in ("prs", "whoami") and "error" not in doc:
         return with_result()  # partial results: the command's object with `errors`
-    if set(doc) != {"error"}:
+    if not isinstance(doc.get("error"), dict):
         return bad("stdout is not an error envelope")
     error = _parse_error(doc["error"])
     if isinstance(error, str):
@@ -560,6 +659,7 @@ class ForgectlClient:
             raise ToolMissing(f"forgectl could not be started: {_one_line(str(exc))}") from exc
 
     def _call(self, command: str, argv: list[str], expect: Expect | None = None) -> Outcome:
+        self.version()  # fail closed: no call to an unchecked forgectl
         return classify(command, self._run(argv, max_output=self.max_output), expect=expect)
 
     def version(self) -> ToolVersion:
@@ -569,7 +669,7 @@ class ForgectlClient:
         res = self._run(["--version"], max_output=VERSION_MAX_OUTPUT)
         if res.too_large or res.timed_out or res.abandoned or res.returncode is None:
             raise ToolMissing("forgectl --version did not finish in time or answered too much")
-        if res.returncode < 0:
+        if res.returncode < 0 or res.returncode > 128:
             raise ToolMissing("forgectl --version was killed by a signal")
         required = f"{MIN_FORGECTL[0]}.{MIN_FORGECTL[1]}"
         parsed = parse_version(res.stdout) if res.returncode == 0 else None

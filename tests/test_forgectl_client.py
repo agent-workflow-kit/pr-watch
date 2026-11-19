@@ -6,7 +6,9 @@ what real forgectl would not print fails here.
 
 from __future__ import annotations
 
+import copy
 import json
+import math
 import os
 import signal
 import stat
@@ -15,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from pr_watch import forgectl_client as fc
 from pr_watch import gateway
@@ -276,9 +279,16 @@ def test_from_config_resolves_and_converts_units(fake: FakeForgectl) -> None:
     assert Path(client.exe).name == "forgectl" and os.path.isabs(client.exe)
 
 
-def test_from_config_rejects_a_zero_timeout() -> None:
+def test_config_refuses_a_zero_timeout() -> None:
+    with pytest.raises(ValidationError):
+        Forgectl(timeout="0")
+    with pytest.raises(ValidationError):
+        Forgectl(timeout="0ms")
+
+
+def test_from_config_rejects_a_zero_timeout_that_bypassed_validation() -> None:
     with pytest.raises(ValueError):
-        ForgectlClient.from_config(Forgectl(timeout="0"), env=dict(os.environ))
+        ForgectlClient.from_config(Forgectl.model_construct(timeout="0"), env=dict(os.environ))
 
 
 def test_constructor_requires_an_absolute_executable() -> None:
@@ -826,7 +836,7 @@ def test_classify_cut_multibyte_sequence_is_a_contract_failure() -> None:
 
 def test_classify_lone_surrogate_text_in_a_valid_document_does_not_crash() -> None:
     text = '{"hosts": [], "errors": [], "x": "\\ud800"}'
-    assert cl(text).local is None
+    assert cl(text).local == "contract"
 
 
 def test_classify_too_large_wins_over_everything() -> None:
@@ -897,8 +907,14 @@ def test_classify_malformed_envelope_is_a_contract_failure(error: Any) -> None:
     assert out.local == "contract" and out.error is None
 
 
-def test_classify_envelope_extra_top_level_keys_are_a_contract_failure() -> None:
+def test_classify_envelope_extra_top_level_keys_are_ignored() -> None:
     env = {"error": {"code": "internal", "message": "m"}, "other": 1}
+    out = cl(json.dumps(env), command="snapshot", returncode=1)
+    assert out.local is None and out.error is not None and out.error.code == "internal"
+
+
+def test_classify_non_object_error_with_extra_keys_is_a_contract_failure() -> None:
+    env = {"error": "boom", "other": 1}
     assert cl(json.dumps(env), command="snapshot", returncode=1).local == "contract"
 
 
@@ -953,3 +969,243 @@ def test_the_client_makes_no_call_outside_the_gateway() -> None:
     source = Path(fc.__file__).read_text(encoding="utf-8")
     assert "subprocess" not in source and "os.system" not in source
     assert stat.S_ISREG(os.stat(fc.__file__).st_mode)
+
+
+# --- round 1 review: hardening ----------------------------------------------------------------
+
+
+def test_unused_commands_constant_is_gone() -> None:
+    assert not hasattr(fc, "COMMANDS")
+
+
+GOLDENS = [
+    ("snapshot-github-open", "snapshot"),
+    ("snapshot-github-no-push-time", "snapshot"),
+    ("snapshot-gitlab-open", "snapshot"),
+    ("show-github-merged", "show"),
+    ("show-github-open-clean", "show"),
+    ("show-gitlab-open-ready", "show"),
+    ("prs-github-open", "prs"),
+    ("prs-gitlab-repo", "prs"),
+    ("whoami-github", "whoami"),
+    ("whoami-gitlab", "whoami"),
+    ("compare-github-ahead", "compare"),
+    ("compare-gitlab-ahead", "compare"),
+]
+
+
+@pytest.mark.parametrize(("name", "command"), GOLDENS)
+def test_every_unmutated_golden_passes_the_nested_checks(name: str, command: str) -> None:
+    out = fc.classify(command, _result(stdout=json.dumps(golden(name))), expect=None)
+    assert out.local is None, out.detail
+
+
+def _mutated(name: str, path: tuple[Any, ...], value: Any) -> dict[str, Any]:
+    doc = copy.deepcopy(golden(name))
+    node: Any = doc
+    for part in path[:-1]:
+        node = node[part]
+    node[path[-1]] = value
+    return doc
+
+
+SNAP = "snapshot-github-open"
+BAD_FIELDS: list[tuple[str, str, tuple[Any, ...], Any]] = [
+    (SNAP, "snapshot", ("pr",), 5),
+    (SNAP, "snapshot", ("pr",), ""),
+    (SNAP, "snapshot", ("repo",), None),
+    (SNAP, "snapshot", ("pr_id",), ""),
+    (SNAP, "snapshot", ("pr_id",), "a\x00b"),
+    (SNAP, "snapshot", ("pr_id",), "a\nb"),
+    (SNAP, "snapshot", ("pr_id",), 5),
+    (SNAP, "snapshot", ("number",), 0),
+    (SNAP, "snapshot", ("number",), -3),
+    (SNAP, "snapshot", ("number",), True),
+    (SNAP, "snapshot", ("number",), "7"),
+    (SNAP, "snapshot", ("number",), 1.5),
+    (SNAP, "snapshot", ("state",), 1),
+    (SNAP, "snapshot", ("draft",), 1),
+    (SNAP, "snapshot", ("labels",), "x"),
+    (SNAP, "snapshot", ("labels",), [1]),
+    (SNAP, "snapshot", ("head",), "x"),
+    (SNAP, "snapshot", ("head", "sha"), 5),
+    (SNAP, "snapshot", ("head", "sha"), ""),
+    (SNAP, "snapshot", ("ci",), []),
+    (SNAP, "snapshot", ("ci", "state"), 3),
+    (SNAP, "snapshot", ("threads",), {}),
+    (SNAP, "snapshot", ("threads",), [1]),
+    (SNAP, "snapshot", ("reviews",), "x"),
+    (SNAP, "snapshot", ("reviews",), ["x"]),
+    (SNAP, "snapshot", ("review_requests",), {}),
+    (SNAP, "snapshot", ("latest_by_reviewer",), [1]),
+    (SNAP, "snapshot", ("incomplete",), "x"),
+    (SNAP, "snapshot", ("incomplete",), [1]),
+    (SNAP, "snapshot", ("complete",), "yes"),
+    (SNAP, "snapshot", ("activity",), []),
+    (SNAP, "snapshot", ("rate_limit",), []),
+    (SNAP, "snapshot", ("fetched_at",), 5),
+    ("show-github-merged", "show", ("state",), 1),
+    ("show-github-merged", "show", ("head", "sha"), 5),
+    ("show-github-merged", "show", ("number",), 0),
+    ("show-github-merged", "show", ("pr_id",), ""),
+    ("prs-github-open", "prs", ("items",), {}),
+    ("prs-github-open", "prs", ("items",), [1]),
+    ("prs-github-open", "prs", ("items", 0, "pr_id"), ""),
+    ("prs-github-open", "prs", ("items", 0, "pr_id"), "a\x1bb"),
+    ("prs-github-open", "prs", ("items", 0, "number"), 0),
+    ("prs-github-open", "prs", ("items", 0, "pr"), 5),
+    ("prs-github-open", "prs", ("items", 0, "state"), 5),
+    ("prs-github-open", "prs", ("items", 0, "head"), "x"),
+    ("prs-github-open", "prs", ("items", 0, "head", "sha"), 5),
+    ("prs-github-open", "prs", ("hosts_queried",), [1]),
+    ("prs-github-open", "prs", ("hosts_queried",), "x"),
+    ("prs-github-open", "prs", ("errors",), [1]),
+    ("prs-github-open", "prs", ("complete",), 1),
+    ("prs-github-open", "prs", ("rate_limit",), []),
+    ("whoami-github", "whoami", ("hosts",), {}),
+    ("whoami-github", "whoami", ("hosts",), [1]),
+    ("whoami-github", "whoami", ("hosts", 0, "host"), ""),
+    ("whoami-github", "whoami", ("hosts", 0, "host"), 5),
+    ("whoami-github", "whoami", ("errors",), "x"),
+    ("whoami-github", "whoami", ("errors",), [1]),
+    ("compare-github-ahead", "compare", ("status",), 1),
+    ("compare-github-ahead", "compare", ("pr",), ""),
+    ("compare-github-ahead", "compare", ("from_sha",), 5),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "command", "path", "value"),
+    BAD_FIELDS,
+    ids=[f"{c}-{'.'.join(map(str, p))}-{i}" for i, (_, c, p, _v) in enumerate(BAD_FIELDS)],
+)
+def test_a_mutated_golden_field_is_a_contract_failure(
+    name: str, command: str, path: tuple[Any, ...], value: Any
+) -> None:
+    doc = _mutated(name, path, value)
+    out = fc.classify(command, _result(stdout=json.dumps(doc)), expect=None)
+    assert out.local == "contract" and out.result is None
+
+
+def test_new_enum_values_are_not_rejected() -> None:
+    doc = _mutated(SNAP, ("state",), "brand_new_state")
+    doc["ci"]["state"] = "brand_new_ci_state"
+    doc["future_field"] = {"x": 1}
+    assert fc.classify("snapshot", _result(stdout=json.dumps(doc)), expect=None).local is None
+
+
+def _nested(levels: int) -> str:
+    return '{"hosts": [], "errors": [], "x": ' + "[" * levels + "]" * levels + "}"
+
+
+def test_depth_at_the_bound_is_accepted_and_beyond_is_a_contract_failure() -> None:
+    assert cl(_nested(31)).local is None  # the object is level 1: 32 in all
+    assert cl(_nested(32)).local == "contract"
+
+
+@pytest.mark.parametrize("levels", [100, 5000])
+def test_deep_nesting_is_a_contract_failure(levels: int) -> None:
+    out = cl(_nested(levels))
+    assert out.local == "contract" and out.result is None
+
+
+def test_deep_nesting_in_an_error_envelope_is_a_contract_failure() -> None:
+    text = '{"error": {"code": "x", "message": "m"}, "y": ' + "[" * 100 + "]" * 100 + "}"
+    assert cl(text, command="snapshot", returncode=12).local == "contract"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"hosts": [], "errors": [], "x": "\\ud800"}',
+        '{"hosts": [], "errors": [], "x": "a\\udfffb"}',
+        '{"hosts": [], "errors": [], "\\ud800": 1}',
+        '{"hosts": [], "errors": [], "x": ["ok", {"y": "\\udc00"}]}',
+        '{"hosts": [], "errors": [], "x": "\\ud83d"}',
+    ],
+)
+def test_a_lone_surrogate_in_a_key_or_value_is_a_contract_failure(text: str) -> None:
+    assert cl(text).local == "contract"
+
+
+def test_a_surrogate_pair_is_one_valid_character() -> None:
+    assert cl('{"hosts": [], "errors": [], "x": "\\ud83d\\ude00"}').local is None
+
+
+def test_the_version_is_checked_before_every_call(fake: FakeForgectl, client) -> None:
+    fake.add(new_pr())
+    ok(client.snapshot(REF), "snapshot")
+    ok(client.show(REF), "show")
+    assert [a[0] for a in fake.argvs()] == ["--version", "snapshot", "show"]
+
+
+@pytest.mark.parametrize("call", ["snapshot", "show", "whoami", "prs", "compare"])
+def test_a_too_old_forgectl_makes_no_call(fake: FakeForgectl, client, call: str) -> None:
+    fake.version("forgectl 0.54.0\n")
+    calls = {
+        "snapshot": lambda: client.snapshot(REF),
+        "show": lambda: client.show(REF),
+        "whoami": lambda: client.whoami(),
+        "prs": lambda: client.prs(host="github.com", author="me"),
+        "compare": lambda: client.compare(REF, sha(1), sha(2)),
+    }
+    with pytest.raises(ToolTooOld):
+        calls[call]()
+    assert [a[0] for a in fake.argvs()] == ["--version"]
+
+
+def test_a_version_that_cannot_run_makes_no_call(tmp_path: Path) -> None:
+    exe = tmp_path / "bin" / "fgctl"
+    exe.parent.mkdir()
+    exe.write_text("#!/bin/sh\nkill -KILL $$\n")
+    exe.chmod(0o755)
+    client = ForgectlClient(str(exe), timeout_ms=1000, max_output=1000, env={"PATH": "/bin"})
+    with pytest.raises(ToolMissing):
+        client.whoami()
+
+
+@pytest.mark.parametrize("code", [129, 137, 255])
+def test_a_version_exit_above_128_is_tool_missing(fake: FakeForgectl, client, code: int) -> None:
+    fake.version("forgectl 0.55.3\n", exit=code)
+    with pytest.raises(ToolMissing):
+        client.version()
+
+
+@pytest.mark.parametrize(
+    ("when", "text"),
+    [
+        (datetime(1, 1, 1, tzinfo=UTC), "0001-01-01T00:00:00Z"),
+        (datetime(999, 12, 31, 23, 59, 59, tzinfo=UTC), "0999-12-31T23:59:59Z"),
+        (datetime(1, 1, 2, 5, tzinfo=timezone(timedelta(hours=5))), "0001-01-02T00:00:00Z"),
+        (datetime(9999, 12, 31, tzinfo=UTC), "9999-12-31T00:00:00Z"),
+    ],
+)
+def test_the_watermark_year_has_four_digits(when: datetime, text: str) -> None:
+    assert fc._timestamp(when) == text
+
+
+@pytest.mark.parametrize(
+    "when",
+    [
+        datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=5))),
+        datetime(9999, 12, 31, 23, tzinfo=timezone(-timedelta(hours=5))),
+    ],
+)
+def test_a_watermark_outside_the_utc_range_is_a_value_error(when: datetime) -> None:
+    with pytest.raises(ValueError):
+        fc._timestamp(when)
+
+
+def test_negative_zero_retry_after_is_normalised() -> None:
+    env = '{"error": {"code": "rate_limited", "message": "m", "retry_after": -0.0}}'
+    out = cl(env, command="snapshot", returncode=12)
+    assert out.error is not None and out.error.retry_after is not None
+    assert out.error.retry_after == 0.0
+    assert math.copysign(1.0, out.error.retry_after) == 1.0
+
+
+def test_prs_with_a_host_needs_an_author() -> None:
+    with pytest.raises(ValueError):
+        fc.prs_argv(host="github.com", timeout_ms=1000)
+    assert "--author=me" in fc.prs_argv(host="github.com", author="me", timeout_ms=1000)
+    assert "--repo=github.com/o/r" in fc.prs_argv(repo="github.com/o/r", timeout_ms=1000)

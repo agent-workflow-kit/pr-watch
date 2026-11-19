@@ -113,6 +113,10 @@ def _non_dividing(value: Any) -> bool:
     return bool(60 % count if unit == "m" else 24 % count)
 
 
+def _zero_duration(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"0+(?:ms|s|m|h|d)?", value) is not None
+
+
 def _duration_too_large(value: Any) -> bool:
     match = re.fullmatch(r"([0-9]+)(ms|s|m|h|d)", value) if isinstance(value, str) else None
     if match is None:
@@ -130,6 +134,8 @@ def _exception(path: tuple[Any, ...], value: Any, want: bool, got: bool) -> bool
     if isinstance(value, float) and value.is_integer():
         return True  # JSON Schema integers include 5.0
     if path == ("poll", "interval_hint") and _non_dividing(value):
+        return True
+    if path == ("forgectl", "timeout") and _zero_duration(value):
         return True
     return path in DURATION_PATHS and _duration_too_large(value)
 
@@ -161,6 +167,12 @@ def test_exception_duration_above_3650_days_is_accepted_by_the_schema_only() -> 
 def test_exception_non_dividing_interval_is_accepted_by_the_schema_only() -> None:
     doc = nest(("poll", "interval_hint"), "7m")
     assert CHECK.is_valid(doc) and not model_accepts(doc)
+
+
+def test_exception_zero_forgectl_timeout_is_accepted_by_the_schema_only() -> None:
+    doc = nest(("forgectl", "timeout"), "0")
+    assert CHECK.is_valid(doc) and not model_accepts(doc)
+    assert model_accepts(nest(("forgectl", "timeout"), "1ms"))
 
 
 def test_the_schema_has_the_expected_leaves() -> None:
