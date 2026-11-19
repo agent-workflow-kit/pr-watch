@@ -1,0 +1,9 @@
+{
+  "forgectl_version": "0.55.3",
+  "forgectl_tag": "v0.55.3",
+  "forgectl_commit": "701b8724e5834ed580e79c4fa845260a2cff9838",
+  "copied_on": "2026-11-19",
+  "schemas": ["defs", "cli/snapshot", "cli/prs", "cli/show", "cli/compare", "cli/whoami", "cli/error"],
+  "goldens_source": "tests/golden/ of the same tag (synthetic data: example hosts, user-N logins)",
+  "note": "Copied verbatim from forgectl at the tag above. To re-pin: copy the same files from the new tag, update this file and the fake's VERSION, rerun the suite."
+}

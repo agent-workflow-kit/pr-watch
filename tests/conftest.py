@@ -31,6 +31,7 @@ from typing import Any
 
 import pytest
 
+from tests.forgectl_support import fake_forgectl  # noqa: E402,F401  (fixture)
 from tests.gateway_support import fake_gateway, fake_tool, reaper  # noqa: E402,F401  (fixtures)
 
 pytest_plugins = ["pytester"]  # tests/test_layout.py runs an inner pytest session

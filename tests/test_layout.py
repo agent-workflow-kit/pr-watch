@@ -146,6 +146,11 @@ def test_tmpdir_points_into_tmp(tmp_path: Path) -> None:
 def test_stubs_are_unreachable_by_name_and_exit_99(tool: str, sandbox_bin: Path) -> None:
     for argv in ([tool, "-l"], [str(sandbox_bin / tool), "-l"]):
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=15, check=False)
+        if argv[0] == "forgectl":
+            # by name, tests/fakebin/forgectl shadows the stub; with no scenario it refuses (98)
+            assert proc.returncode == 98
+            assert "fake-forgectl: no scenario" in proc.stderr
+            continue
         assert proc.returncode == GUARD_EXIT
         assert "tests must not run the real" in proc.stderr
 
