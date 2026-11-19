@@ -155,7 +155,7 @@ def test_gitlab_approval_unknown_commit_and_approvals() -> None:
     assert event.payload["approvals_at_head"] is None
     assert event.payload["commit_sha"] is None and event.payload["can_push"] is None
     assert event.payload["occurred_at"] is None
-    assert event.payload["reviewer"] == {"id": "12", "login": None, "is_bot": None}
+    assert event.payload["reviewer"] == {"id": "12", "login": "user-2", "is_bot": None}
 
 
 def test_at_changed_from_null_to_a_time_fires() -> None:
@@ -180,12 +180,19 @@ def test_dismissal_is_no_event_and_a_later_approval_fires() -> None:
     assert chain.types(reviewers(gh(), entry(state="approved", at=T2))) == ["approved"]
 
 
-def test_unknown_reviewer_state_is_no_event_as_from_or_to() -> None:
+def test_unknown_reviewer_state_is_no_event_as_to_and_counts_as_no_entry_as_from() -> None:
     chain = Chain(reviewers(gh(), entry(state="weird", at=T0)))
     assert chain.stored["reviewers"]["1002"]["state"] == "unknown"
-    assert chain.types(reviewers(gh(), entry(state="approved", at=T1))) == []
+    # unknown -> unknown and anything -> unknown (as `to`) fire nothing
+    assert chain.types(reviewers(gh(), entry(state="weird", at=T1))) == []
+    # as `from` it counts as no entry: a later known verdict fires
+    assert chain.types(reviewers(gh(), entry(state="approved", at=T1))) == ["approved"]
+    other = Chain(reviewers(gh(), entry(state="weird", at=T0)))
+    assert other.types(reviewers(gh(), entry(state="changes_requested", at=T1))) == [
+        "changes_requested"
+    ]
+    # an unreadable state keeps the stored (approved) entry: no event, then a new `at` fires
     assert chain.types(reviewers(gh(), entry(state="weird", at=T2))) == []
-    # an unreadable state keeps the stored (approved) entry: a later approval with a new `at` fires
     assert chain.types(reviewers(gh(), entry(state="approved", at=T3))) == ["approved"]
 
 
@@ -199,20 +206,52 @@ def test_approval_by_a_bot_reports_is_bot_from_the_reviews() -> None:
     assert event.payload["reviewer"] == {"id": "77", "login": "helper[bot]", "is_bot": True}
 
 
-def test_reviewer_without_a_matching_review_has_null_login_and_is_bot() -> None:
+def _only_reviewer(*items: dict[str, Any], reviews: list[dict[str, Any]] | None = None) -> Any:
     chain = Chain(approvable())
-    snap = with_(reviewers(approvable(), entry("55", login="somebody")), reviews=[])
-    chain = Chain(with_(approvable(), reviews=[]))
-    (event,) = chain.step(snap)
-    assert event.payload["reviewer"] == {"id": "55", "login": None, "is_bot": None}
+    snap = reviewers(approvable(), *items)
+    if reviews is not None:
+        snap = with_(snap, reviews=reviews)
+    (event,) = (e for e in chain.step(snap) if e.type == "approved")
+    return event.payload["reviewer"]
 
 
-def test_login_keyed_reviewer_has_a_null_id() -> None:
-    chain = Chain(approvable())
+def test_id_keyed_reviewer_without_a_review_takes_the_login_from_the_entry() -> None:
+    who = _only_reviewer(entry("55", login="SomeBody"), reviews=[])
+    assert who == {"id": "55", "login": "SomeBody", "is_bot": None}
+
+
+def test_login_keyed_reviewer_has_a_null_id_and_the_original_case_login() -> None:
     nameless = entry(login="Some-User")
     del nameless["id"]
-    (event,) = chain.step(reviewers(approvable(), nameless))
-    assert event.payload["reviewer"] == {"id": None, "login": None, "is_bot": None}
+    assert _only_reviewer(nameless) == {"id": None, "login": "Some-User", "is_bot": None}
+
+
+def test_hashed_overlong_login_key_has_null_id_and_login() -> None:
+    nameless = entry(login="A" * 300)
+    del nameless["id"]
+    assert _only_reviewer(nameless) == {"id": None, "login": None, "is_bot": None}
+
+
+def test_valid_id_that_looks_like_a_login_key_keeps_its_id() -> None:
+    who = _only_reviewer(entry("login:x", login="Foo"), reviews=[])
+    assert who == {"id": "login:x", "login": "Foo", "is_bot": None}
+
+
+def test_review_lookup_by_id_wins_over_the_entry_login() -> None:
+    mine = review("gh:r:PRR_m", "approved", T1) | {
+        "author": {"id": "1002", "login": "FromReview", "is_bot": False}
+    }
+    who = _only_reviewer(entry("1002", login="from-entry"), reviews=[mine])
+    assert who == {"id": "1002", "login": "FromReview", "is_bot": False}
+
+
+@pytest.mark.parametrize("flip", [False, True])
+def test_duplicate_entries_of_one_key_pick_the_winner_whatever_the_order(flip: bool) -> None:
+    old, new = entry(at=T1, login="Some-User"), entry(at=T2, login="SOME-user")
+    for item in (old, new):
+        del item["id"]
+    items = [new, old] if flip else [old, new]
+    assert _only_reviewer(*items)["login"] == "SOME-user"
 
 
 def test_hostile_reviewer_login_is_bounded_and_one_line() -> None:
@@ -672,3 +711,65 @@ def test_no_valid_head_drops_events_except_pushed() -> None:
     snap["head"] = {**snap["head"], "sha": "zz"}
     assert chain.step(snap) == []
     assert chain.last.dropped == (Drop("ready", "invalid_head_sha"),)
+
+
+# --- review round 1 ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("flip", [False, True])
+def test_review_with_unparseable_submitted_at_ranks_lowest_for_the_login(flip: bool) -> None:
+    good = review("gh:r:PRR_g", "approved", T1) | {
+        "author": {"id": "1002", "login": "good-time", "is_bot": False}
+    }
+    bad = review("gh:r:PRR_b", "approved", "garbage") | {
+        "author": {"id": "1002", "login": "bad-time", "is_bot": False}
+    }
+    who = _only_reviewer(entry("1002"), reviews=[bad, good] if flip else [good, bad])
+    assert who["login"] == "good-time"
+
+
+@pytest.mark.parametrize(
+    "again", ["2026-10-03T12:00:00+02:00", "2026-10-03T10:00:00.000Z", "2026-10-03T10:00:00Z"]
+)
+def test_same_approval_instant_in_another_form_does_not_fire_again(again: str) -> None:
+    chain = Chain(reviewers(gh(), entry(at="2026-10-03T10:00:00Z")))
+    assert chain.types(reviewers(gh(), entry(at=again))) == []
+
+
+def test_different_approval_instant_fires_again() -> None:
+    chain = Chain(reviewers(gh(), entry(at="2026-10-03T10:00:00Z")))
+    assert chain.types(reviewers(gh(), entry(at="2026-10-03T12:00:00Z"))) == ["approved"]
+
+
+def test_ready_filters_stored_blocked_by_to_the_schema_shape() -> None:
+    chain = Chain(with_(gh(), draft=True))
+    chain.stored["blocked_by"] = [
+        {"code": "draft"},
+        {"code": "draft", "detail": "extra"},
+        {"code": "other", "detail": "fine", "junk": 1},
+        {"code": "other", "detail": "two\nlines"},
+        {"code": "other", "detail": "x" * 257},
+        {"code": "other", "detail": 5},
+        {"code": "Bad Code"},
+        {"detail": "no code"},
+        "text",
+        None,
+    ]
+    (event,) = chain.step(with_(gh(), draft=False))
+    shown = event.payload["from_blocked_by"]
+    assert shown == [{"code": "draft"}, {"code": "draft"}, {"code": "other", "detail": "fine"}]
+    assert schema_errors("defs", shown, "blocked_by") == []
+
+
+@pytest.mark.parametrize("hold", [-5, "3", None, True, 1.5])
+def test_stored_hold_counter_is_clamped_when_carried(hold: Any) -> None:
+    chain = Chain(settled("passing", check("a")), settle=0)
+    chain.stored["ci"]["hold"] = hold
+    chain.stored["ci"]["hold_to"] = "none"
+    assert chain.types(ci_snap(gh(), "none")) == ["ci"]
+
+
+def test_diff_results_do_not_share_a_digest() -> None:
+    first, second = DiffResult(), DiffResult()
+    first.digest["x"] = 1
+    assert second.digest == {}

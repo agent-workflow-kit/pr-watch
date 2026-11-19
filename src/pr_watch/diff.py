@@ -27,10 +27,13 @@ Conservative readings (the interface is silent):
 - A part that is not baselined (or any part under `rebaseline`) is silent; `ready` has no part
   and is silent under `rebaseline` only. A silent `ci` is adopted as the stored state with the
   hold cleared.
-- A reviewer whose stored or new state is `unknown` is no `approved` or `changes_requested`
-  (interface: no event as `from` or as `to`); a reviewer new to the digest is `not approved`.
-- A `reviewer` is `{id, login, is_bot}` with `id` the reviewer key (null for a `login:` key) and
-  `login`/`is_bot` read by id from the snapshot's reviews, else null (GitLab has none).
+- A reviewer whose new state is `unknown` is no `approved` or `changes_requested`; a stored
+  `unknown` counts as no entry (a later known verdict fires); a reviewer new to the digest is
+  `not approved`. `approved` compares `at` by instant (raw text only when neither parses).
+- A `reviewer` is `{id, login, is_bot}` with `id` the reviewer key (null for a `login:` key). All
+  three come from the latest review by the key's author id; else `login` is the original-case
+  login of the `latest_by_reviewer` item for the key (null for a hashed overlong key), `is_bot`
+  null (GitLab has no reviews).
 - A `ci` event whose `for_head` (forgectl's `ci.head_sha`) is null is dropped with
   `invalid_head_sha`: the schema needs a sha and one is never invented. The held state is still
   committed.
@@ -50,7 +53,13 @@ from datetime import UTC, datetime
 from typing import Any, Final
 from urllib.parse import urlsplit
 
-from .digest import counted_checks, incomplete_parts, instant
+from .digest import (
+    counted_checks,
+    incomplete_parts,
+    instant,
+    reviewer_key,
+    winning_reviewer_item,
+)
 from .store import MAX_SAFE_INT, PR_ID_RE, PR_RE, REPO_RE, SHA_RE, NewEvent, format_ts
 from .text import bounded_one_line
 
@@ -62,8 +71,10 @@ _ACCOUNT_ID: Final = re.compile(r"[A-Za-z0-9:/_=-]{1,128}")
 _SIDE: Final = re.compile(r"[A-Za-z_]{1,16}")
 _REVIEW_STATES: Final = ("approved", "changes_requested", "commented", "dismissed")
 _LAST: Final = datetime.max.replace(tzinfo=UTC)
+_FIRST: Final = datetime.min.replace(tzinfo=UTC)
 _STATES: Final = ("open", "closed", "merged")
 _CI_STATES: Final = ("passing", "failing", "pending", "none")
+_BLOCK_CODE: Final = re.compile(r"[a-z_]{1,64}")
 _CHECK_STATE: Final = re.compile(r"[a-z_]{1,32}")
 MAX_CHECK_CHANGES: Final = 20
 
@@ -111,7 +122,10 @@ class DiffResult(list[DiffEvent]):
     """The ordered events, a plain list for callers that only want events, plus the drops."""
 
     dropped: tuple[Drop, ...] = ()
-    digest: dict[str, Any] = {}  # noqa: RUF012 (set per result by `diff`)
+
+    def __init__(self, events: Sequence[DiffEvent] = ()) -> None:
+        super().__init__(events)
+        self.digest: dict[str, Any] = {}
 
 
 @dataclass(frozen=True)
@@ -361,21 +375,37 @@ def _reviewer_entries(digest: Mapping[str, Any]) -> Mapping[str, Mapping[str, An
 
 
 def _reviewer_account(ctx: Ctx, key: str) -> dict[str, Any]:
-    """`{id, login, is_bot}`: the id is the key unless it is the `login:` fallback; the rest is
-    read by id from the snapshot's reviews (the latest by `submitted_at`), else null."""
-    ident = None if key.startswith("login:") else key
+    """`{id, login, is_bot}` of reviewer `key`. A review in the snapshot whose author id is the
+    key gives all three (the latest by `submitted_at`; an unparseable one ranks lowest). Else the
+    `latest_by_reviewer` item the digest builder kept for the key gives the login (original case,
+    sanitized; `is_bot` stays null); the id is the key unless the item is login-keyed, and a
+    hashed overlong `login:#` key has no login."""
     found: list[tuple[datetime, str, Mapping[str, Any]]] = []
     reviews = ctx.snap.get("reviews")
     for item in reviews if isinstance(reviews, list) else ():
         who = _map(_map(item).get("author"))
-        if ident is not None and who.get("id") == ident:
+        if who.get("id") == key:
             found.append(
-                (instant(_map(item).get("submitted_at")) or _LAST, str(_map(item).get("id")), who)
+                (instant(_map(item).get("submitted_at")) or _FIRST, str(_map(item).get("id")), who)
             )
-    if not found:
-        return {"id": ident, "login": None, "is_bot": None}
-    account = _account(max(found, key=lambda f: (f[0], f[1]))[2])
-    return {"id": ident, "login": account["login"], "is_bot": account["is_bot"]}
+    if found:
+        account = _account(max(found, key=lambda f: (f[0], f[1]))[2])
+        return {"id": key, "login": account["login"], "is_bot": account["is_bot"]}
+    item = winning_reviewer_item(ctx.snap, key)
+    if item is None:
+        return {"id": None if key.startswith("login:") else key, "login": None, "is_bot": None}
+    if reviewer_key({"id": item.get("id")}) == key:  # keyed by a valid id
+        return {"id": key, "login": _text(item.get("login")), "is_bot": None}
+    login = None if key.startswith("login:#") else _text(item.get("login"))
+    return {"id": None, "login": login, "is_bot": None}
+
+
+def _same_at(was: object, now: object) -> bool:
+    """Equal instants (any offset or fraction form); raw equality when neither parses."""
+    before, after = instant(was), instant(now)
+    if before is not None and after is not None:
+        return before == after
+    return before is None and after is None and was == now
 
 
 def _verdicts(ctx: Ctx, state: str) -> list[dict[str, Any]]:
@@ -390,12 +420,8 @@ def _verdicts(ctx: Ctx, state: str) -> list[dict[str, Any]]:
         if now.get("state") != state:
             continue
         if was is not None:
-            if was.get("state") == "unknown":
-                continue
-            if was.get("state") == state:
-                if was.get("at") == now.get("at") and (
-                    now.get("at") is not None or was.get("commit_sha") == now.get("commit_sha")
-                ):
+            if was.get("state") == state and _same_at(was.get("at"), now.get("at")):
+                if now.get("at") is not None or was.get("commit_sha") == now.get("commit_sha"):
                     continue
         at = _ts(now.get("at"))
         out.append(
@@ -493,7 +519,22 @@ def _ready(ctx: Ctx) -> list[dict[str, Any]]:
 
 def _blocked(digest: Mapping[str, Any]) -> list[Any]:
     value = digest.get("blocked_by")
-    return [dict(i) for i in value if isinstance(i, Mapping)] if isinstance(value, list) else []
+    if not isinstance(value, list):
+        return []
+    out = []
+    for item in value:
+        code = _map(item).get("code")
+        if not isinstance(code, str) or not _BLOCK_CODE.fullmatch(code):
+            continue
+        if code != "other":
+            out.append({"code": code})
+            continue
+        detail = _map(item).get("detail")
+        if isinstance(detail, str) and bounded_one_line(detail, MAX_TEXT) == detail:
+            out.append({"code": code, "detail": detail})
+        elif "detail" not in item:
+            out.append({"code": code})
+    return out
 
 
 def plan_ci(
@@ -523,7 +564,8 @@ def plan_ci(
     if before != "none" and after != "none":
         return CiPlan(new_ci, True)
     carried = stored.get("hold") if stored.get("hold_to") == after else 0
-    count = (carried if isinstance(carried, int) and not isinstance(carried, bool) else 0) + 1
+    held = carried if isinstance(carried, int) and not isinstance(carried, bool) else 0
+    count = max(0, held) + 1
     if count > settle_polls:
         return CiPlan(new_ci, True)
     return CiPlan({**copy.deepcopy(dict(stored)), "hold": count, "hold_to": after}, False)

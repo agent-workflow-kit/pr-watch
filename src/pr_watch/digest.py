@@ -398,6 +398,34 @@ def _rank(entry: Mapping[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _reviewer_entry(item: object) -> dict[str, Any]:
+    data = _dict(item)
+    commit_sha = _nullable(_sha)(data.get("commit_sha"))
+    at = _nullable(_ts)(data.get("at"))
+    can_push = data.get("can_push")
+    state = data.get("state")
+    return {
+        "state": state if isinstance(state, str) and state in _REVIEWER_STATES else None,
+        "commit_sha": None if commit_sha is _BAD else commit_sha,
+        "at": None if at is _BAD else at,
+        "can_push": can_push if isinstance(can_push, bool) else None,
+    }
+
+
+def winning_reviewer_item(snapshot: Mapping[str, Any], key: str) -> Mapping[str, Any] | None:
+    """The `latest_by_reviewer` item the digest builder keeps for reviewer `key` (the highest
+    `_rank` among the items with that key), or null when no item has it."""
+    items = snapshot.get("latest_by_reviewer")
+    best: tuple[tuple[Any, ...], Mapping[str, Any]] | None = None
+    for item in items if isinstance(items, list) else ():
+        if reviewer_key(item) != key:
+            continue
+        rank = _rank(_reviewer_entry(item))
+        if best is None or rank > best[0]:
+            best = (rank, _dict(item))
+    return best[1] if best else None
+
+
 def _reviewers(snapshot: Mapping[str, Any], previous: Mapping[str, Any]) -> dict[str, Any]:
     old = _previous_reviewers(previous)
     best: dict[str, dict[str, Any]] = {}
@@ -405,17 +433,7 @@ def _reviewers(snapshot: Mapping[str, Any], previous: Mapping[str, Any]) -> dict
         key = reviewer_key(item)
         if key is None:
             continue
-        data = _dict(item)
-        commit_sha = _nullable(_sha)(data.get("commit_sha"))
-        at = _nullable(_ts)(data.get("at"))
-        can_push = data.get("can_push")
-        state = data.get("state")
-        entry = {
-            "state": state if isinstance(state, str) and state in _REVIEWER_STATES else None,
-            "commit_sha": None if commit_sha is _BAD else commit_sha,
-            "at": None if at is _BAD else at,
-            "can_push": can_push if isinstance(can_push, bool) else None,
-        }
+        entry = _reviewer_entry(item)
         if key not in best or _rank(entry) > _rank(best[key]):
             best[key] = entry
     out: dict[str, Any] = {}
