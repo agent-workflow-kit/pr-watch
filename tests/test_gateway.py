@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,14 @@ from pr_watch.gateway import STDERR_CAP, LaunchError, Request
 from tests.gateway_support import Reaper
 
 PY_ONLY = pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs /proc")
+
+
+@pytest.fixture(autouse=True)
+def _clean_registry() -> Any:
+    """Tests that call `_launch` directly register a child; never leak it into the next test."""
+    yield
+    with gateway._LIVE_LOCK:
+        gateway._LIVE.clear()
 
 
 def sh(script: str, **kw: Any) -> gateway.Result:
@@ -75,9 +84,63 @@ def test_env_is_exactly_what_was_given(reaper: Reaper, monkeypatch: pytest.Monke
     assert result.stdout == "A=1\n"  # no PATH, HOME or SECRET_VALUE inherited
 
 
-def test_argv0_resolves_against_the_callers_path_not_the_childs(reaper: Reaper) -> None:
-    result = gateway.run(["echo", "hi"], env={}, timeout=5, max_output=100)
-    assert result.stdout == "hi\n"
+def test_argv0_resolves_against_the_callers_path_not_the_childs(
+    reaper: Reaper, fake_tool: Callable[[str, str], Path]
+) -> None:
+    fake_tool("callers-only-tool", "echo from-callers-path")
+    # The child gets an empty env, so only the gateway's own lookup can find the tool.
+    result = gateway.run(["callers-only-tool"], env={}, timeout=5, max_output=100)
+    assert result.stdout == "from-callers-path\n"
+
+
+def test_a_relative_path_entry_runs_the_callers_binary_not_one_in_the_childs_cwd(
+    reaper: Reaper, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    caller = tmp_path / "caller"
+    other = tmp_path / "other"
+    (caller / "bin").mkdir(parents=True)
+    other.mkdir()
+    for path, text in ((caller / "bin" / "rtool", "caller"), (other / "rtool", "other")):
+        path.write_text(f"#!/bin/sh\necho {text}\n")
+        path.chmod(0o755)
+    monkeypatch.chdir(caller)
+    monkeypatch.setenv("PATH", "bin" + os.pathsep + os.environ["PATH"])
+    result = gateway.run(["rtool"], env={}, timeout=5, max_output=100, cwd=other)
+    assert result.stdout == "caller\n"
+
+
+def test_an_empty_path_element_means_the_callers_cwd_not_the_childs(
+    reaper: Reaper, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    caller = tmp_path / "caller"
+    other = tmp_path / "other"
+    caller.mkdir()
+    other.mkdir()
+    for path, text in ((caller / "etool", "caller"), (other / "etool", "other")):
+        path.write_text(f"#!/bin/sh\necho {text}\n")
+        path.chmod(0o755)
+    monkeypatch.chdir(caller)
+    monkeypatch.setenv("PATH", os.pathsep + "/nonexistent-dir")
+    try:
+        result = gateway.run(["etool"], env={}, timeout=5, max_output=100, cwd=other)
+    except LaunchError:  # an interpreter whose lookup skips empty elements: also safe
+        return
+    assert result.stdout == "caller\n"
+
+
+def test_a_relative_argv0_with_a_separator_resolves_against_the_callers_cwd(
+    reaper: Reaper, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    caller = tmp_path / "caller"
+    other = tmp_path / "other"
+    caller.mkdir()
+    other.mkdir()
+    for path, text in ((caller / "stool", "caller"), (other / "stool", "other")):
+        path.write_text(f"#!/bin/sh\necho {text}\n")
+        path.chmod(0o755)
+    monkeypatch.chdir(caller)
+    result = gateway.run(["./stool"], env={}, timeout=5, max_output=100, cwd=other)
+    assert result.stdout == "caller\n"
 
 
 def test_argv_is_never_interpreted_by_a_shell(reaper: Reaper, tmp_path: Path) -> None:
@@ -211,19 +274,68 @@ def test_a_sibling_process_is_untouched_by_a_kill(reaper: Reaper) -> None:
     assert sibling.poll() is None
 
 
-def test_a_reaped_leader_is_never_signalled(
-    reaper: Reaper, monkeypatch: pytest.MonkeyPatch
+def test_a_leader_that_exited_normally_is_not_waited_out_and_nothing_is_signalled(
+    reaper: Reaper, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     sent: list[tuple[int, int]] = []
     real = os.killpg
     monkeypatch.setattr(
         gateway, "_killpg", lambda pgid, sig: (sent.append((pgid, sig)), real(pgid, sig))
     )
-    # The leader exits at once but a background child keeps the pipes open until the deadline.
-    result = sh("sleep 60 & echo $!; exit 0", timeout=0.4)
-    reaper.track(int(result.stdout))
-    assert result.timed_out and result.returncode == 0
+    pidfile = tmp_path / "pid"
+    # The leader exits at once; a background child keeps the pipes open for 4 s.
+    result = sh(f"sleep 4 & echo $! > {pidfile}; echo done", timeout=2)
+    reaper.track(int(pidfile.read_text()))
+    assert (result.stdout, result.returncode, result.timed_out) == ("done\n", 0, False)
+    assert result.elapsed < 1.5
     assert sent == []
+
+
+def test_exit_racing_the_deadline_is_not_labelled_timed_out(reaper: Reaper) -> None:
+    result = sh("echo quick", timeout=0.05)
+    assert (result.stdout, result.returncode) == ("quick\n", 0)
+    assert not result.timed_out
+
+
+def test_timed_out_is_set_only_when_the_leader_was_running_at_the_deadline(
+    reaper: Reaper,
+) -> None:
+    assert sh("sleep 30", timeout=0.2).timed_out
+
+
+def test_output_written_before_a_normal_exit_is_fully_drained(reaper: Reaper) -> None:
+    result = sh("printf 0123456789; printf abc >&2", timeout=5)
+    assert (result.stdout, result.stderr) == ("0123456789", "abc")
+
+
+def test_stop_kills_a_sigterm_ignoring_descendant_after_the_leader_exits(reaper: Reaper) -> None:
+    # The leader dies on SIGTERM; its child ignores SIGTERM and holds the pipes.
+    result = sh("(trap '' TERM; exec sleep 60) & echo $!; wait", timeout=0.5)
+    grandchild = int(result.stdout)
+    reaper.track(grandchild)
+    assert result.timed_out
+    assert is_dead(grandchild)
+
+
+def test_the_group_is_signalled_while_the_leader_is_a_zombie_never_after_the_reap(
+    reaper: Reaper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    states: list[tuple[int, str | None]] = []
+    real = os.killpg
+
+    def spy(pgid: int, sig: int) -> None:
+        try:
+            state = Path(f"/proc/{pgid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except OSError:
+            state = None
+        states.append((sig, state))
+        real(pgid, sig)
+
+    monkeypatch.setattr(gateway, "_killpg", spy)
+    result = sh("(trap '' TERM; exec sleep 60) & echo $!; wait", timeout=0.3)
+    reaper.track(int(result.stdout))
+    assert [sig for sig, _ in states] == [signal.SIGTERM, signal.SIGKILL]
+    assert all(state is not None for _, state in states)  # /proc entry still there: unreaped
 
 
 def test_signal_group_refuses_once_the_leader_is_reaped(
@@ -274,6 +386,111 @@ def test_signal_live_terminates_running_children_and_the_calls_return(reaper: Re
     assert gateway.signal_live(signal.SIGTERM) == 0  # nothing live, nothing signalled
 
 
+def _unregistered_child(reaper: Reaper, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, list[int]]:
+    sent: list[int] = []
+    real = os.killpg
+    monkeypatch.setattr(gateway, "_killpg", lambda pgid, sig: (sent.append(sig), real(pgid, sig)))
+    request = Request(argv=("sleep", "60"), env=gateway.minimal_env(), timeout=1, max_output=1)
+    child = gateway._launch(request)
+    reaper.track(child.proc.pid)  # _launch already registered it as live
+    return child, sent
+
+
+def test_signal_live_while_the_same_thread_holds_a_childs_lock_queues_instead_of_hanging(
+    reaper: Reaper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    child, sent = _unregistered_child(reaper, monkeypatch)
+    try:
+        done: list[int] = []
+        # Same thread holds the child's lock (as poll() would when a handler interrupts it).
+        child._lock.acquire()
+        try:
+            worker = threading.Thread(
+                target=lambda: done.append(gateway.signal_live(signal.SIGTERM))
+            )
+            worker.start()
+            worker.join(5)
+            assert not worker.is_alive(), "signal_live blocked on a held child lock"
+        finally:
+            child._lock.release()
+        assert done == [1] and sent == []  # queued, not lost, not sent under the lock
+        assert child.wait(5)  # the owner's next tick delivered the queued SIGTERM
+        assert sent == [signal.SIGTERM]
+    finally:
+        with gateway._LIVE_LOCK:
+            gateway._LIVE.pop(child.proc.pid, None)
+
+
+def test_signal_live_is_reentrant_on_the_live_registry_lock(
+    reaper: Reaper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    child, sent = _unregistered_child(reaper, monkeypatch)
+    out: list[int] = []
+
+    def holder() -> None:
+        with gateway._LIVE_LOCK:  # a handler interrupting register/unregister on this thread
+            out.append(gateway.signal_live(signal.SIGTERM))
+
+    try:
+        thread = threading.Thread(target=holder)
+        thread.start()
+        thread.join(5)
+        assert not thread.is_alive(), "signal_live blocked on the registry lock"
+        assert out == [1] and sent == [signal.SIGTERM]
+    finally:
+        with gateway._LIVE_LOCK:
+            gateway._LIVE.pop(child.proc.pid, None)
+        assert child.wait(5)
+
+
+def test_a_queued_signal_never_reaches_a_group_whose_leader_was_reaped_meanwhile(
+    reaper: Reaper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    child, sent = _unregistered_child(reaper, monkeypatch)
+    try:
+        child._lock.acquire()
+        try:
+            assert gateway.signal_live(signal.SIGTERM) == 1  # queued
+        finally:
+            child._lock.release()
+        os.kill(child.proc.pid, signal.SIGKILL)  # the handle's own child, in this test only
+        assert is_dead(child.proc.pid)
+        assert child.poll() is not None  # reaps, then must find the queued signal stale
+        assert sent == []
+    finally:
+        with gateway._LIVE_LOCK:
+            gateway._LIVE.pop(child.proc.pid, None)
+
+
+def test_a_real_signal_handler_calling_signal_live_while_run_is_in_flight(
+    reaper: Reaper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fired: list[int] = []
+
+    def handler(signum: int, frame: Any) -> None:
+        fired.append(gateway.signal_live(signal.SIGTERM))
+
+    old = signal.signal(signal.SIGUSR1, handler)
+    me = os.getpid()
+
+    def trigger() -> None:
+        end = time.monotonic() + 5
+        while not gateway.live_pids() and time.monotonic() < end:
+            time.sleep(0.01)
+        time.sleep(0.1)
+        os.kill(me, signal.SIGUSR1)  # this test's own pid, captured above
+
+    thread = threading.Thread(target=trigger)
+    thread.start()
+    try:
+        result = sh("sleep 60", timeout=30)
+    finally:
+        thread.join(10)
+        signal.signal(signal.SIGUSR1, old)
+    assert fired == [1]
+    assert result.returncode == -signal.SIGTERM and not result.timed_out
+
+
 def test_gateway_has_no_pattern_based_signalling() -> None:
     source = Path(gateway.__file__).read_text(encoding="utf-8")
     for forbidden in ("pkill", "killall", "pgrep", "os.kill(", "kill -"):
@@ -312,6 +529,15 @@ def test_a_non_executable_path_is_a_launch_error(reaper: Reaper, tmp_path: Path)
         {"timeout": -1},
         {"timeout": True},
         {"timeout": float("nan")},
+        {"timeout": float("inf")},
+        {"term_grace": float("inf")},
+        {"term_grace": float("nan")},
+        {"term_grace": -1},
+        {"abandon_after": float("inf")},
+        {"abandon_after": -0.5},
+        {"stdin": 5},
+        {"stdin": ["x"]},
+        {"stdin": object()},
         {"max_output": 0},
         {"max_output": True},
         {"max_output": 1.5},
@@ -330,6 +556,58 @@ def test_bad_arguments_are_rejected_before_anything_starts(
     with pytest.raises((TypeError, ValueError)):
         gateway.run(argv, **args)
     assert fake_gateway.calls == []
+
+
+def test_zero_is_allowed_for_grace_and_the_message_says_non_negative(fake_gateway: Any) -> None:
+    fake_gateway.on("echo")
+    gateway.run(["echo"], env={}, timeout=1, max_output=10, term_grace=0, abandon_after=0)
+    with pytest.raises(ValueError, match="non-negative"):
+        gateway.run(["echo"], env={}, timeout=1, max_output=10, term_grace=-1)
+    with pytest.raises(ValueError, match="positive"):
+        gateway.run(["echo"], env={}, timeout=0, max_output=10)
+
+
+def test_bytearray_stdin_is_accepted_and_normalised_to_bytes(fake_gateway: Any) -> None:
+    fake_gateway.on("cat")
+    gateway.run(["cat"], env={}, timeout=1, max_output=10, stdin=bytearray(b"ab"))
+    assert fake_gateway.calls[0].stdin == b"ab"
+    assert type(fake_gateway.calls[0].stdin) is bytes
+
+
+def test_bad_stdin_launches_nothing(reaper: Reaper) -> None:
+    with pytest.raises(TypeError):
+        gateway.run(["cat"], env=gateway.minimal_env(), timeout=1, max_output=10, stdin=5)  # type: ignore[arg-type]
+    assert gateway.live_pids() == [] and reaper._targets == []
+
+
+def test_a_cut_utf8_sequence_leaves_surrogate_escapes_callers_must_handle(reaper: Reaper) -> None:
+    result = sh("printf '\\303\\251\\303\\251'", max_output=3)  # two e-acute, cut mid-second
+    assert result.too_large and result.stdout == "é\udcc3"
+    with pytest.raises(UnicodeEncodeError):
+        result.stdout.encode()
+    assert result.stdout.encode("utf-8", "surrogateescape") == b"\xc3\xa9\xc3"
+    assert result.stdout.encode("utf-8", "replace")
+
+
+def test_a_fast_child_does_not_pay_a_full_poll_tick(reaper: Reaper) -> None:
+    # Generous bound (the old loop slept ~20 ms per call after EOF): median of several calls.
+    times = sorted(sh("true", timeout=10).elapsed for _ in range(9))
+    assert times[4] < 0.5
+
+
+def test_an_exception_after_the_child_exists_stops_it_and_unregisters_it(
+    reaper: Reaper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gateway, "_register", _boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        sh("sleep 60", timeout=30, term_grace=0.2)
+    pid = reaper._targets[0][0]
+    assert is_dead(pid)
+    assert gateway.live_pids() == []
+
+
+def _boom(child: Any) -> None:
+    raise RuntimeError("boom")
 
 
 def test_python_is_the_interpreter_running_the_tests(reaper: Reaper) -> None:

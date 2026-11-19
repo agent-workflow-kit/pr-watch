@@ -98,3 +98,16 @@ def test_the_real_backend_is_restored_after_the_fixture() -> None:
     with gateway.use_backend(lambda r: gateway.Result(returncode=5)):
         assert call("anything").returncode == 5
     assert call("echo", "real", env=gateway.minimal_env()).stdout == "real\n"
+
+
+def test_discard_output_drops_stdout_and_stderr_like_the_real_backend(
+    fake_gateway: FakeGateway,
+) -> None:
+    fake_gateway.on("quiet", stdout="out", stderr="err")
+    result = call("quiet", discard_output=True)
+    assert (result.stdout, result.stderr, result.stderr_truncated) == ("", "", False)
+
+
+def test_discard_output_drops_an_oversized_stderr_flag_too(fake_gateway: FakeGateway) -> None:
+    fake_gateway.on("noisy", stderr="e" * (STDERR_CAP + 10))
+    assert not call("noisy", discard_output=True).stderr_truncated

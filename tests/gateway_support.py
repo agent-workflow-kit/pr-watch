@@ -87,10 +87,10 @@ class FakeGateway:
     def _answer(script: _Script, request: Request) -> Result:
         if script.launch_error is not None:
             raise LaunchError(script.launch_error)
-        stderr = script.stderr[:STDERR_CAP]
+        stderr = b"" if request.discard_output else script.stderr[:STDERR_CAP]
         common = {
             "stderr": _text(stderr),
-            "stderr_truncated": len(script.stderr) > STDERR_CAP,
+            "stderr_truncated": not request.discard_output and len(script.stderr) > STDERR_CAP,
             "pid": None,
         }
         if script.delay > request.timeout:
