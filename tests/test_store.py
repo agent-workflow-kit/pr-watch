@@ -809,6 +809,15 @@ def test_deleting_a_non_last_source_keeps_the_pr(store: Store) -> None:
     assert pr_ids(store.conn) == []
 
 
+def test_moving_a_pr_between_watches_inserts_the_new_source_first(store: Store) -> None:
+    with store.transaction() as c:
+        add_pr(c, "P1", ["w-aaaaaaaaaa"])
+        c.execute("INSERT OR IGNORE INTO watches VALUES ('w-bbbbbbbbbb', 'query', 'k', ?)", (TS,))
+        c.execute("INSERT INTO sources (pr_id, watch_id) VALUES ('P1', 'w-bbbbbbbbbb')")
+        c.execute("DELETE FROM sources WHERE pr_id = 'P1' AND watch_id = 'w-aaaaaaaaaa'")
+    assert pr_ids(store.conn) == ["P1"]
+
+
 def test_deleting_a_pr_cascades_its_sources(store: Store) -> None:
     with store.transaction() as c:
         add_pr(c, "P1", ["w-aaaaaaaaaa"])
@@ -1013,6 +1022,7 @@ BAD_EVENTS: list[Any] = [
     pytest.param(
         {"payload": {**COMMON, "watches": ["w-aaaaaaaaaa", "w-aaaaaaaaaa"]}}, id="watches-repeated"
     ),
+    pytest.param({"payload": {**COMMON, "watches": [["x"]]}}, id="watches-unhashable-element"),
 ]
 
 

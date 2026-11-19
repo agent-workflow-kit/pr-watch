@@ -598,8 +598,8 @@ def _check_common_fields(payload: Mapping[str, Any]) -> None:
     watches = payload.get("watches")
     if (
         not isinstance(watches, list | tuple)
-        or len(set(watches)) != len(watches)
         or not all(isinstance(w, str) and WATCH_ID_RE.match(w) for w in watches)
+        or len(set(watches)) != len(watches)
     ):
         raise EventError("event payload has no valid watches")
 
