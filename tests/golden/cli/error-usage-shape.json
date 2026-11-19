@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "usage",
+    "message": "--mine and --open must be given together",
+    "reason": null,
+    "details": {
+      "kind": "bad_combination"
+    }
+  }
+}

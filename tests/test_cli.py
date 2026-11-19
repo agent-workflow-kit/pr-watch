@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,7 @@ from pr_watch.cli import (
     CliError,
     Context,
     build_envelope,
+    config_error_to_cli,
     main,
     one_line,
 )
@@ -185,7 +188,11 @@ def test_flags_pr_watch_does_not_have_are_rejected(
     for name, argv in VALID.items():
         if name == "prune" and flag == "--dry-run":
             continue
-        assert run(capsys, *argv, flag)[0] == 2, name
+        code, out, _ = run(capsys, "--json", *argv, flag)
+        assert code == 2, name
+        error = envelope_of(out)
+        assert error["code"] == "usage", name
+        assert error["message"] == "unrecognized arguments (1)", name
     assert run(capsys, "--json", "prune", "--dry-run")[0] == 0
 
 
@@ -295,6 +302,32 @@ def test_watch_remove_takes_no_labels(
     assert run(capsys, "watch", "remove", "o/r#1", "--label", "a=b")[0] == 2
 
 
+@pytest.mark.parametrize("verb", ["add", "remove"])
+def test_label_owner_may_come_before_the_labels(
+    verb: str, stubs: list[tuple[Context, Any]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run(capsys, "label", verb, "o/r#1", "--owner", "me", "a=b", "c=d")[0] == 0
+    a = stubs[-1][1]
+    assert (a.pr, a.watch, a.labels, a.owner) == ("o/r#1", None, ["a=b", "c=d"], "me")
+    assert run(capsys, "label", verb, "--owner", "me", "o/r#1", "a=b")[0] == 0
+    a = stubs[-1][1]
+    assert (a.pr, a.labels, a.owner) == ("o/r#1", ["a=b"], "me")
+    assert run(capsys, "label", verb, "--watch", "W1", "--owner", "me", "a=b")[0] == 0
+    a = stubs[-1][1]
+    assert (a.pr, a.watch, a.labels, a.owner) == (None, "W1", ["a=b"], "me")
+
+
+@pytest.mark.parametrize("verb", ["add", "remove"])
+def test_label_leftover_unknown_option_is_still_a_usage_error(
+    verb: str, stubs: list[tuple[Context, Any]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = run(capsys, "--json", "label", verb, "o/r#1", "--owner", "me", "a=b", "--zzz")
+    assert code == 2
+    assert envelope_of(out)["message"] == "unrecognized arguments (1)"
+    assert err.startswith(f"usage: {cli_module.PROG} label {verb}")
+    assert stubs == []
+
+
 def test_label_splits_reference_from_labels(
     stubs: list[tuple[Context, Any]], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -376,6 +409,101 @@ def test_double_dash_ends_options(
     assert args.pr == "--json" and not ctx.json
 
 
+SENTINEL = "SENTINEL-tok-9f3a"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["poll", SENTINEL],
+        ["poll", f"--{SENTINEL}"],
+        ["poll", f"--json={SENTINEL}"],
+        ["list", "--status", SENTINEL],
+        [SENTINEL],
+        ["watch", SENTINEL],
+        ["label", "add", "o/r#1", "a=b", f"--{SENTINEL}"],
+        ["show", "o/r#1", SENTINEL],
+    ],
+)
+def test_usage_errors_never_echo_argv_values(
+    argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = run(capsys, "--json", *argv)
+    assert code == 2
+    assert SENTINEL not in out and SENTINEL not in err
+    assert envelope_of(out)["code"] == "usage"
+    code, out, err = run(capsys, *argv)
+    assert code == 2
+    assert SENTINEL not in out and SENTINEL not in err
+
+
+def test_invalid_choice_names_our_own_choices(capsys: pytest.CaptureFixture[str]) -> None:
+    _, out, _ = run(capsys, "--json", "list", "--status", SENTINEL)
+    message = envelope_of(out)["message"]
+    assert "--status" in message and "active" in message and "terminal" in message
+
+
+# --- output failures ---------------------------------------------------------------------------
+
+
+class _BrokenStdout:
+    def __init__(self, exc: OSError) -> None:
+        self.exc = exc
+
+    def write(self, text: str) -> int:
+        raise self.exc
+
+    def flush(self) -> None:
+        raise self.exc
+
+    def isatty(self) -> bool:
+        return False
+
+
+OUTPUT_FAILURES = [BrokenPipeError(errno.EPIPE, "pipe"), OSError(errno.ENOSPC, "no space")]
+
+
+@pytest.mark.parametrize("exc", OUTPUT_FAILURES, ids=["epipe", "enospc"])
+def test_stdout_failure_on_a_result_exits_1_quietly(
+    exc: OSError,
+    stubs: list[tuple[Context, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(sys, "stdout", _BrokenStdout(exc))
+    code = main(["--json", "poll"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "Traceback" not in err and err.count("\n") <= 1
+
+
+@pytest.mark.parametrize("exc", OUTPUT_FAILURES, ids=["epipe", "enospc"])
+def test_stdout_failure_on_an_error_envelope_exits_1_without_a_second_envelope(
+    exc: OSError,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setitem(HANDLERS, "poll", failing(CASES["not_found"]))
+    monkeypatch.setattr(sys, "stdout", _BrokenStdout(exc))
+    code = main(["--json", "poll"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "Traceback" not in err
+    assert err.count("PR is not stored") == 1
+    assert err.count("\n") <= 2
+
+
+def test_handler_oserror_is_still_an_internal_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def handler(ctx: Context, args: Any) -> int:
+        raise OSError(errno.ENOENT, "gone")
+
+    monkeypatch.setitem(HANDLERS, "poll", handler)
+    code, out, _ = run(capsys, "--json", "poll")
+    assert code == 1 and envelope_of(out)["code"] == "internal"
+
+
 # --- unimplemented commands --------------------------------------------------------------------
 
 OWNERS = {
@@ -443,6 +571,15 @@ CASES: dict[str, CliError] = {
         lower_error={"code": None, "reason": "unknown_host", "retry_after": None, "message": None},
     ),
     "internal": CliError("internal", "boom"),
+    "config_invalid": config_error_to_cli(
+        ConfigError("config.yaml", "poll.interval_hint", "not an accepted interval")
+    ),
+}
+
+# Real usage errors, raised by argparse and by the shape checks, through main().
+REAL_USAGE: dict[str, list[str]] = {
+    "usage-unknown_flag": ["poll", "--bogus", "--json"],
+    "usage-shape": ["watch", "add", "--mine", "--json"],
 }
 
 
@@ -461,8 +598,20 @@ def test_envelope_golden_and_exit_code(
     assert err == f"pr-watch: error: {CASES[code].message}\n"
 
 
+@pytest.mark.parametrize("name", sorted(REAL_USAGE))
+def test_real_usage_error_golden(name: str, capsys: pytest.CaptureFixture[str]) -> None:
+    exit_code, out, err = run(capsys, *REAL_USAGE[name])
+    assert exit_code == 2
+    doc = json.loads(out)
+    assert_valid("cli/error", doc)
+    assert doc == json.loads((GOLDEN / f"error-{name}.json").read_text())
+    assert err.startswith("usage: pr-watch ")
+    assert f"pr-watch: error: {doc['error']['message']}\n" in err
+
+
 def test_golden_directory_has_no_stale_files() -> None:
-    assert {p.name for p in GOLDEN.glob("*.json")} == {f"error-{c}.json" for c in CASES}
+    expected = {f"error-{c}.json" for c in CASES} | {f"error-{c}.json" for c in REAL_USAGE}
+    assert {p.name for p in GOLDEN.glob("*.json")} == expected
 
 
 def test_human_mode_prints_only_stderr_on_error(

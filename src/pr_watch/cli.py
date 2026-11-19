@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import sys
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
@@ -123,6 +125,10 @@ class CliError(Exception):
         return EXIT_CODES[self.code]
 
 
+class OutputError(Exception):
+    """Writing to stdout failed (a closed pipe, a full disk). `main` ends with exit 1, quietly."""
+
+
 class UsageError(CliError):
     """argparse rejected the command line; `usage` is the parser's usage text for stderr."""
 
@@ -184,10 +190,13 @@ class Context:
 
     def emit(self, data: Any, human: str | None = None) -> None:
         """Print a command result: a JSON document with `--json`, else `human` unless `--quiet`."""
-        if self.json:
-            print(json.dumps(data), flush=True)
-        elif human is not None and not self.quiet:
-            print(scrub_text(human), flush=True)
+        try:
+            if self.json:
+                print(json.dumps(data), flush=True)
+            elif human is not None and not self.quiet:
+                print(scrub_text(human), flush=True)
+        except OSError as exc:
+            raise OutputError from exc
 
 
 Handler = Callable[[Context, argparse.Namespace], int]
@@ -226,7 +235,21 @@ class _Parser(argparse.ArgumentParser):
         super().__init__(*args, **kwargs)
 
     def error(self, message: str) -> NoReturn:
-        raise UsageError(message, usage=self.format_usage())
+        raise UsageError(_without_values(message), usage=self.format_usage())
+
+
+_INVALID_CHOICE = re.compile(r"^(.*?)invalid choice: .*?(\(choose from .*\))$", re.S)
+_EXPLICIT_ARGUMENT = re.compile(r"^(.*?)ignored explicit argument .*$", re.S)
+
+
+def _without_values(message: str) -> str:
+    """argparse messages with the user's tokens taken out: envelopes never echo argv values.
+    Only our own option names and choices stay."""
+    if match := _INVALID_CHOICE.match(message):
+        return f"{match[1]}invalid choice {match[2]}"
+    if match := _EXPLICIT_ARGUMENT.match(message):
+        return f"{match[1]}does not take a value"
+    return message
 
 
 def _global_flags(*, suppress: bool) -> argparse.ArgumentParser:
@@ -262,7 +285,7 @@ def _command(sub: Any, name: str, path: str, help_text: str) -> argparse.Argumen
     parser = sub.add_parser(
         name, parents=[_global_flags(suppress=True)], help=help_text, description=help_text
     )
-    parser.set_defaults(command=path)
+    parser.set_defaults(command=path, leaf=parser)
     return parser
 
 
@@ -330,7 +353,8 @@ def build_parser() -> argparse.ArgumentParser:
         p = _command(label, verb, f"label {verb}", f"{verb} labels on a watch")
         p.add_argument("--watch", metavar="ID", help="name the watch by id instead of a PR")
         p.add_argument("--owner", metavar="O", help="owner of the labels")
-        p.add_argument("items", nargs="+", metavar="PR K=V", help="[PR] then labels k=v...")
+        # "*": an option between the items leaves later ones to parse_known_args (_merge_leftovers).
+        p.add_argument("items", nargs="*", metavar="PR K=V", help="[PR] then labels k=v...")
 
     p = _command(sub, "prune", "prune", "delete expired events, rows and leases")
     p.add_argument("--dry-run", action="store_true", help="report only")
@@ -370,12 +394,28 @@ def _check_watch_target(args: argparse.Namespace) -> None:
             raise _shape_error("bad_combination", "--host and --repo apply to the query form only")
 
 
+def _merge_leftovers(args: argparse.Namespace, extras: list[str]) -> None:
+    """Handle what parse_known_args left over. `label` items split by an option (`add PR --owner
+    O k=v`) come back here and join the items; anything else is an unrecognized argument, and the
+    message counts them without echoing them."""
+    if extras and args.command in ("label add", "label remove"):
+        values = [e for e in extras if not e.startswith("-")]
+        if len(values) == len(extras):
+            args.items = [*args.items, *values]
+            return
+        extras = [e for e in extras if e.startswith("-")]  # the values were fine
+    if extras:
+        raise UsageError(f"unrecognized arguments ({len(extras)})")
+
+
 def _check_label(args: argparse.Namespace) -> None:
     items: list[str] = args.items
     delattr(args, "items")
     if args.watch is not None:
         args.pr, args.labels = None, items
     else:
+        if not items:
+            raise _shape_error("missing_target", "give a PR (or --watch ID) and labels k=v")
         args.pr, args.labels = items[0], items[1:]
     if not args.labels:
         raise _shape_error("missing_labels", "give at least one label k=v")
@@ -398,30 +438,63 @@ def _wants_json(argv: Sequence[str]) -> bool:
     return "--json" in options
 
 
+def _stderr_line(text: str) -> None:
+    try:
+        sys.stderr.write(text)
+        sys.stderr.flush()
+    except OSError:
+        pass  # nowhere left to report it
+
+
+def _output_failed() -> int:
+    """stdout cannot be written: say so once on stderr, make the shutdown flush quiet, exit 1."""
+    _stderr_line(f"{PROG}: error: cannot write to stdout\n")
+    try:
+        sink = open(os.devnull, "w")  # noqa: SIM115 - kept open for the shutdown flush
+        if sys.stdout is sys.__stdout__:
+            os.dup2(sink.fileno(), 1)
+        sys.stdout = sink
+    except (OSError, ValueError):
+        pass
+    return 1
+
+
 def _report(error: CliError, as_json: bool) -> int:
     if isinstance(error, UsageError) and error.usage:
-        sys.stderr.write(error.usage)
-    sys.stderr.write(f"{PROG}: error: {one_line(error.message)}\n")
-    sys.stderr.flush()
+        _stderr_line(error.usage)
+    _stderr_line(f"{PROG}: error: {one_line(error.message)}\n")
     if as_json:
-        print(json.dumps(build_envelope(error)), flush=True)
+        try:
+            print(json.dumps(build_envelope(error)), flush=True)
+        except OSError:
+            return _output_failed()
     return error.exit_code
 
 
 def _execute(argv: Sequence[str]) -> int:
-    args = build_parser().parse_args(argv)
-    SHAPE_CHECKS.get(args.command, lambda _: None)(args)
-    if args.verbose and args.quiet:
-        raise _shape_error("conflicting_flags", "--verbose and --quiet cannot be combined")
+    args, extras = build_parser().parse_known_args(argv)
+    leaf = args.leaf
+    delattr(args, "leaf")
+    try:
+        _merge_leftovers(args, extras)
+        SHAPE_CHECKS.get(args.command, lambda _: None)(args)
+        if args.verbose and args.quiet:
+            raise _shape_error("conflicting_flags", "--verbose and --quiet cannot be combined")
+    except UsageError as exc:
+        exc.usage = exc.usage or leaf.format_usage()
+        raise
     loaded = load_config(args.config)
     ctx = Context(json=args.json, quiet=args.quiet, verbose=args.verbose, loaded=loaded)
     return HANDLERS[args.command](ctx, args)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # todo(#25): catch KeyboardInterrupt and SIGTERM here and exit 128+N (the signal contract).
     args = list(sys.argv[1:] if argv is None else argv)
     try:
         return _execute(args)
+    except OutputError:
+        return _output_failed()
     except CliError as exc:
         return _report(exc, _wants_json(args))
     except ConfigError as exc:
