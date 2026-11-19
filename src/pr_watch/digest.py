@@ -412,15 +412,22 @@ def _reviewer_entry(item: object) -> dict[str, Any]:
     }
 
 
+def _login_text(value: object) -> str:
+    return bounded_one_line(value, MAX_FIELD_CHARS) if isinstance(value, str) else ""
+
+
 def winning_reviewer_item(snapshot: Mapping[str, Any], key: str) -> Mapping[str, Any] | None:
     """The `latest_by_reviewer` item the digest builder keeps for reviewer `key` (the highest
-    `_rank` among the items with that key), or null when no item has it."""
+    `_rank` among the items with that key), or null when no item has it. Items that tie on
+    `_rank` (the rank carries no login) are ordered by their sanitized login, the larger wins,
+    so the choice never depends on input order."""
     items = snapshot.get("latest_by_reviewer")
     best: tuple[tuple[Any, ...], Mapping[str, Any]] | None = None
     for item in items if isinstance(items, list) else ():
         if reviewer_key(item) != key:
             continue
-        rank = _rank(_reviewer_entry(item))
+        login = _dict(item).get("login")
+        rank = (*_rank(_reviewer_entry(item)), _login_text(login))
         if best is None or rank > best[0]:
             best = (rank, _dict(item))
     return best[1] if best else None

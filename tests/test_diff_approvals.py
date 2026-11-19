@@ -226,6 +226,25 @@ def test_login_keyed_reviewer_has_a_null_id_and_the_original_case_login() -> Non
     assert _only_reviewer(nameless) == {"id": None, "login": "Some-User", "is_bot": None}
 
 
+@pytest.mark.parametrize("flip", [False, True])
+def test_login_keyed_duplicates_differing_only_in_case_pick_the_login_independent_of_order(
+    flip: bool,
+) -> None:
+    upper, lower = entry(login="Bob"), entry(login="bob")
+    del upper["id"], lower["id"]
+    who = _only_reviewer(*([lower, upper] if flip else [upper, lower]))
+    assert who == {"id": None, "login": "bob", "is_bot": None}
+
+
+@pytest.mark.parametrize("flip", [False, True])
+def test_id_keyed_duplicates_with_different_logins_pick_the_login_independent_of_order(
+    flip: bool,
+) -> None:
+    first, second = entry("55", login="alpha"), entry("55", login="beta")
+    who = _only_reviewer(*([second, first] if flip else [first, second]), reviews=[])
+    assert who == {"id": "55", "login": "beta", "is_bot": None}
+
+
 def test_hashed_overlong_login_key_has_null_id_and_login() -> None:
     nameless = entry(login="A" * 300)
     del nameless["id"]
