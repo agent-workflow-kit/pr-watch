@@ -3,27 +3,35 @@
 docs/interface.md (State, Files, Upgrades) is normative. `state.db` lives in the verified state
 directory (state_dir.py), is mode 0600 and runs in WAL mode.
 
-Opening. The file is opened relative to the state directory descriptor with `O_NOFOLLOW` (created
-`O_EXCL`, mode 0600, when missing) and checked with `verify_file` on the descriptor: a symlink, a
-non-regular file, a foreign owner or a group- or world-writable mode is `StateDirError` (exit 12
-`state_unsafe`). Existing `-wal` and `-shm` files get the same check. SQLite opens by path, so
-after connecting the path is compared (device and inode) with the checked descriptor; a swap in
-between is refused. `-wal` and `-shm` inherit the database's mode.
+Opening. This process never opens a descriptor on `state.db`, `-wal` or `-shm`: closing any
+descriptor on an inode drops every POSIX lock the process holds on it (SQLite's included), which
+loses commits. The files are checked with `lstat` relative to the state directory descriptor
+(`verify_path_at`): a symlink, a non-regular file, a foreign owner or a group- or world-writable
+mode is `StateDirError` (exit 12 `state_unsafe`). A missing `state.db` is created `O_EXCL`, mode
+0600, and closed at once (a brand-new inode has no locks to lose). SQLite opens by path, so after
+connecting the path is compared (device and inode) with the checked `lstat`; a swap in between is
+refused. `-wal` and `-shm` inherit the database's mode.
 
-Versions. `meta.schema_version` and `PRAGMA user_version` hold the same integer. A database whose
-version is above `SCHEMA_VERSION` is refused (`StoreTooNewError`, exit 12 `store_too_new`) before
-anything is written, including the WAL switch. Migrations (`MIGRATIONS`, version = position + 1)
-are additive and run in one `BEGIN IMMEDIATE` transaction together with the version bump, so a
-crash leaves the previous version intact and two processes opening a new file at once migrate it
-once (the second waits on the busy timeout, then sees the new version).
+Versions. `meta.schema_version` and `PRAGMA user_version` hold the same integer. Before anything
+is written, a separate read-only connection (it cannot checkpoint or delete a WAL) validates the
+file: an empty or 0-byte file is initialized; any other file must hold the pr-watch `meta` (with
+`store_id` and `schema_version`) and `events` tables, else it is `StoreCorruptError`, and a
+foreign database is left byte-for-byte unchanged. A version above `SCHEMA_VERSION` (the larger of
+`meta.schema_version` and `user_version`) is refused (`StoreTooNewError`, exit 12
+`store_too_new`); a lower mismatch is corrupt. Migrations (`MIGRATIONS`, version = position + 1)
+are additive and run in one `BEGIN IMMEDIATE` transaction together with the version bump, taken
+only when the database is behind; a current database is opened without the write lock, so
+read-only commands do not wait for a commit. The version is re-read under the lock, so two
+processes opening a new file at once migrate it once.
 
 Transactions. `Store.transaction()` is `BEGIN IMMEDIATE` ... `COMMIT`; writers are serialized, so
 event sequence numbers are assigned in commit order. The compare-and-set commit and the leases are
 built on it by #12; `append_event` must run inside it, so an event is stored in the same
-transaction as the digest it belongs to (docs/interface.md, Locks and commit).
+transaction as the digest it belongs to (docs/interface.md, Locks and commit). A trigger drops a
+`prs` row in the transaction that deletes its last `sources` row.
 
-An empty or malformed file is `StoreCorruptError`; the interface names no code for it, so it
-reports as `internal` (exit 1) rather than claiming a code the schema does not list.
+A corrupt, non-SQLite or foreign file and a database busy beyond the timeout report as `internal`
+(exit 1); the interface names no code for them.
 """
 
 from __future__ import annotations
@@ -35,6 +43,7 @@ import re
 import secrets
 import sqlite3
 import time
+import urllib.parse
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -43,7 +52,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Final
 
-from .state_dir import StateDir, StateDirError, verify_file
+from .state_dir import StateDir, StateDirError, verify_path_at
 from .text import one_line
 
 DB_NAME: Final = "state.db"
@@ -57,6 +66,15 @@ PR_RE: Final = re.compile(
     r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?"
     r"(?:/(?!\.\.?(?:/|#))[A-Za-z0-9._-]+)+#[1-9][0-9]{0,9}\Z"
 )
+PR_MAX_CHARS: Final = 512  # schemas/defs.json gives `pr` no maxLength; this is the store's cap
+REPO_RE: Final = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?"
+    r"(?:/(?!\.\.?(?:/|\Z))[A-Za-z0-9._-]+)+\Z"
+)
+SHA_RE: Final = re.compile(r"^[0-9a-f]{40}\Z")
+WATCH_ID_RE: Final = re.compile(r"^w-[a-z2-7]{10}\Z")
+MAX_SAFE_INT: Final = 2**53
+JOURNAL_SIZE_LIMIT: Final = 64 * 1024 * 1024
 PR_ID_RE: Final = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9:/_=.+-]{0,127}\Z")
 LABEL_RE: Final = re.compile(r"^[a-z][a-z0-9_-]{0,31}=[A-Za-z0-9._:@/#+-]{1,128}\Z")
 TS_RE: Final = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z\Z")
@@ -187,6 +205,12 @@ _V1_STATEMENTS: Final = (
         PRIMARY KEY (pr_id, watch_id)
     ) WITHOUT ROWID""",
     "CREATE INDEX sources_by_watch ON sources(watch_id)",
+    # A PR row is dropped in the transaction that deletes its last source (no orphan can exist).
+    """CREATE TRIGGER sources_drop_orphan_pr AFTER DELETE ON sources
+    BEGIN
+        DELETE FROM prs WHERE pr_id = OLD.pr_id
+            AND NOT EXISTS (SELECT 1 FROM sources WHERE pr_id = OLD.pr_id);
+    END""",
     # #12 owns the lease semantics; the holder identity is (pid, start time, boot id).
     """CREATE TABLE leases (
         pr_id TEXT PRIMARY KEY NOT NULL,
@@ -243,67 +267,40 @@ def format_ts(moment: datetime) -> str:
 # --- opening ---------------------------------------------------------------------------------
 
 
-def _open_checked_fd(state: StateDir) -> tuple[int, bool]:
-    """Open (creating 0600 when missing) `state.db` without following a symlink and verify it."""
-    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-    fd = -1
-    created = False
-    for _ in range(3):  # a concurrent creator can win the O_EXCL race; open its file next
-        try:
-            fd = os.open(DB_NAME, flags, dir_fd=state.fd)
+def _prepare_files(state: StateDir) -> os.stat_result:
+    """Check (creating `state.db` 0600 when missing) and return the database's `lstat`. Nothing
+    here keeps a descriptor on a database file open, nor opens an existing one."""
+    info = verify_path_at(state.fd, DB_NAME)
+    for _ in range(3):  # a concurrent creator can win the O_EXCL race; check its file next
+        if info is not None:
             break
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            raise _refuse(exc) from None
-        try:
-            fd = os.open(DB_NAME, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=state.fd)
-            created = True
-            break
-        except FileExistsError:
-            continue
-        except OSError as exc:
-            raise _refuse(exc) from None
-    if fd < 0:
+        _create_db_file(state)
+        info = verify_path_at(state.fd, DB_NAME)
+    if info is None:
         raise StateDirError(f"{DB_NAME} cannot be opened (it keeps changing)")
+    for suffix in ("-wal", "-shm"):
+        verify_path_at(state.fd, DB_NAME + suffix)
+    return info
+
+
+def _create_db_file(state: StateDir) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
-        if created:
-            os.fchmod(fd, 0o600)  # exact mode even under a permissive umask
-        verify_file(os.fstat(fd), DB_NAME)
-    except BaseException:
+        fd = os.open(DB_NAME, flags, 0o600, dir_fd=state.fd)
+    except FileExistsError:
+        return
+    except OSError as exc:
+        raise _refuse(exc) from None
+    try:  # a new inode: no lock of this process can be on it, so closing it is safe
+        os.fchmod(fd, 0o600)  # exact mode even under a permissive umask
+    finally:
         os.close(fd)
-        raise
-    return fd, created
 
 
 def _refuse(exc: OSError) -> StateDirError:
     if exc.errno == errno.ELOOP:
         return StateDirError(f"{DB_NAME} is a symlink")
     return StateDirError(f"{DB_NAME} cannot be opened ({one_line(exc.strerror or '', 100)})")
-
-
-def _check_sidecars(state: StateDir) -> None:
-    """`-wal` and `-shm`, when present, get the same checks as the database (SQLite would open
-    a symlink there without complaint)."""
-    for suffix in ("-wal", "-shm"):
-        name = DB_NAME + suffix
-        try:
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
-                         dir_fd=state.fd)  # fmt: skip
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            raise _refuse_named(name, exc) from None
-        try:
-            verify_file(os.fstat(fd), name)
-        finally:
-            os.close(fd)
-
-
-def _refuse_named(name: str, exc: OSError) -> StateDirError:
-    if exc.errno == errno.ELOOP:
-        return StateDirError(f"{name} is a symlink")
-    return StateDirError(f"{name} cannot be opened ({one_line(exc.strerror or '', 100)})")
 
 
 def _classify(exc: sqlite3.Error) -> StoreError:
@@ -318,19 +315,50 @@ def _classify(exc: sqlite3.Error) -> StoreError:
     return StoreError(f"{DB_NAME} failed ({one_line(type(exc).__name__, 60)})")
 
 
-def _read_version(conn: sqlite3.Connection) -> int:
-    """The schema version of an opened database (0 for an empty file), read-only. Raises
-    `StoreCorruptError` for a file that is not SQLite or is another program's database."""
-    version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if version == 0:
-        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if tables and "meta" not in tables:
-            raise StoreCorruptError(f"{DB_NAME} is not a pr-watch database")
-        if "meta" in tables:
-            row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-            if row is not None:
-                return _int_version(row[0])
-    return version
+def _is_event_id_collision(exc: sqlite3.IntegrityError) -> bool:
+    return getattr(
+        exc, "sqlite_errorname", ""
+    ) == "SQLITE_CONSTRAINT_UNIQUE" and "events.id" in str(exc)
+
+
+def _read_version(conn: sqlite3.Connection, latest: int) -> int:
+    """`_read_state` in one read transaction (unless the caller has one open), so a concurrent
+    migration commit cannot show half of its effect to the separate reads."""
+    if conn.in_transaction:
+        return _read_state(conn, latest)
+    conn.execute("BEGIN")
+    try:
+        return _read_state(conn, latest)
+    finally:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+
+
+def _read_state(conn: sqlite3.Connection, latest: int) -> int:
+    """The schema version of an opened database (0 for an empty file), read-only.
+
+    Any non-empty database must be ours: `meta` with `store_id` and `schema_version`, and
+    `events` (else `StoreCorruptError`, before the caller writes anything). The larger of
+    `meta.schema_version` and `user_version` above `latest` is `StoreTooNewError`; a lower
+    mismatch is corrupt."""
+    user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not tables and user_version == 0:
+        return 0
+    if not {"meta", "events"} <= tables:
+        raise StoreCorruptError(f"{DB_NAME} is not a pr-watch database")
+    meta = dict(
+        conn.execute("SELECT key, value FROM meta WHERE key IN ('store_id', 'schema_version')")
+    )
+    if "store_id" not in meta or "schema_version" not in meta:
+        raise StoreCorruptError(f"{DB_NAME} is not a pr-watch database")
+    recorded = _int_version(meta["schema_version"])
+    found = max(recorded, user_version)
+    if found > latest:
+        raise StoreTooNewError(found, latest)
+    if recorded != user_version:
+        raise StoreCorruptError(f"{DB_NAME} has inconsistent schema versions")
+    return recorded
 
 
 def _int_version(raw: object) -> int:
@@ -344,8 +372,11 @@ def _int_version(raw: object) -> int:
 
 
 def _enable_wal(conn: sqlite3.Connection, busy_ms: int) -> None:
-    """Switch to WAL (a no-op when already WAL). The switch can report 'locked' under contention
-    even with a busy timeout, so it is retried until the busy timeout has passed."""
+    """Switch to WAL only when the journal mode is not already WAL (the switch needs the write
+    lock). The switch can report 'locked' under contention even with a busy timeout, so it is
+    retried until the busy timeout has passed."""
+    if str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal":
+        return
     deadline = time.monotonic() + busy_ms / 1000
     while True:
         try:
@@ -366,7 +397,7 @@ def _apply_migrations(conn: sqlite3.Connection, migrations: Sequence[Migration])
     that migrated first is seen and nothing runs twice."""
     conn.execute("BEGIN IMMEDIATE")
     try:
-        current = _read_version(conn)
+        current = _read_version(conn, len(migrations))
         for step in range(current, len(migrations)):
             migrations[step](conn)
             _write_version(conn, step + 1)
@@ -375,7 +406,7 @@ def _apply_migrations(conn: sqlite3.Connection, migrations: Sequence[Migration])
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         raise
-    return max(current, len(migrations))
+    return len(migrations)
 
 
 def _write_version(conn: sqlite3.Connection, version: int) -> None:
@@ -401,21 +432,34 @@ def open_store(
     """
     if not 0 <= busy_timeout_ms <= 600_000:
         raise ValueError("busy_timeout_ms out of range")
-    fd, _ = _open_checked_fd(state)
+    checked = _prepare_files(state)
+    path = state.path_for(DB_NAME)
+    _peek(path, busy_timeout_ms, len(migrations))
+    conn = _connect(path, busy_timeout_ms)
     try:
-        _check_sidecars(state)
-        checked = os.fstat(fd)
-        path = state.path_for(DB_NAME)
-        conn = _connect(path, busy_timeout_ms)
-        try:
-            _confirm_same_file(state, checked)
-            store = _initialize(conn, migrations, busy_timeout_ms, state, path)
-        except BaseException:
-            conn.close()
-            raise
+        _confirm_same_file(state, checked)
+        return _initialize(conn, migrations, busy_timeout_ms, path)
+    except BaseException:
+        conn.close()
+        raise
+
+
+def _peek(path: Path, busy_ms: int, latest: int) -> None:
+    """Validate the file through a separate read-only connection before the read-write one
+    exists: a refusal then closes only a connection that cannot checkpoint or delete a WAL, so a
+    newer or foreign database is left byte-for-byte as it was."""
+    uri = "file:" + urllib.parse.quote(str(path)) + "?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=busy_ms / 1000, isolation_level=None)
+    except sqlite3.Error as exc:
+        raise _classify(exc) from None
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {int(busy_ms)}")
+        _read_version(conn, latest)
+    except sqlite3.Error as exc:
+        raise _classify(exc) from None
     finally:
-        os.close(fd)
-    return store
+        conn.close()
 
 
 def _connect(path: Path, busy_ms: int) -> sqlite3.Connection:
@@ -428,7 +472,7 @@ def _connect(path: Path, busy_ms: int) -> sqlite3.Connection:
 
 
 def _confirm_same_file(state: StateDir, checked: os.stat_result) -> None:
-    """The path SQLite opened must still be the file that passed `verify_file`."""
+    """The path SQLite opened must still be the file that passed the `lstat` check."""
     try:
         now = os.stat(DB_NAME, dir_fd=state.fd, follow_symlinks=False)
     except OSError:
@@ -438,38 +482,29 @@ def _confirm_same_file(state: StateDir, checked: os.stat_result) -> None:
 
 
 def _initialize(
-    conn: sqlite3.Connection,
-    migrations: Sequence[Migration],
-    busy_ms: int,
-    state: StateDir,
-    path: Path,
+    conn: sqlite3.Connection, migrations: Sequence[Migration], busy_ms: int, path: Path
 ) -> Store:
     latest = len(migrations)
     try:
-        found = _read_version(conn)  # read-only: a too-new database is refused before any write
-        if found > latest:
-            raise StoreTooNewError(found, latest)
+        found = _read_version(conn, latest)  # validates again: nothing is written before this
         _enable_wal(conn, busy_ms)
         conn.execute("PRAGMA synchronous = FULL")  # an event is durable once its commit returns
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA trusted_schema = OFF")
-        reached = _apply_migrations(conn, migrations)
-        if reached > latest:  # another process migrated past us between the peek and the lock
-            raise StoreTooNewError(reached, latest)
-        return _finish(conn, path)
+        conn.execute(f"PRAGMA journal_size_limit = {JOURNAL_SIZE_LIMIT}")
+        if found < latest:  # only a database that is behind takes the write lock
+            _apply_migrations(conn, migrations)
+        return _finish(conn, path, latest)
     except sqlite3.Error as exc:
         raise _classify(exc) from None
 
 
-def _finish(conn: sqlite3.Connection, path: Path) -> Store:
-    meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
-    store_id = meta.get("store_id")
-    version = _int_version(meta.get("schema_version"))
-    user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+def _finish(conn: sqlite3.Connection, path: Path, latest: int) -> Store:
+    version = _read_version(conn, latest)
+    row = conn.execute("SELECT value FROM meta WHERE key = 'store_id'").fetchone()
+    store_id = row[0] if row else None
     if not isinstance(store_id, str) or not STORE_ID_RE.match(store_id):
         raise StoreCorruptError(f"{DB_NAME} has no valid store id")
-    if version != user_version:
-        raise StoreCorruptError(f"{DB_NAME} has inconsistent schema versions")
     return Store(conn, path, store_id, version)
 
 
@@ -513,24 +548,60 @@ class StoredEvent:
         }
 
 
+def _check_text(text: str, what: str) -> None:
+    """A string that cannot encode as UTF-8 (a lone surrogate) is refused rather than stored
+    escaped, where a consumer decoding it would fail."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise EventError(f"event {what} is not valid text") from None
+
+
 def _check_json_value(value: Any, depth: int) -> None:
     if depth > MAX_PAYLOAD_DEPTH:
         raise EventError("event payload is nested too deeply")
     if isinstance(value, str):
         if len(value) > MAX_STRING_CHARS:
             raise EventError("event payload has an overlong string")
+        _check_text(value, "payload")
     elif isinstance(value, Mapping):
         for key, item in value.items():
             if not isinstance(key, str):
                 raise EventError("event payload has a non-string key")
             if len(key) > 64:
                 raise EventError("event payload has an overlong key")
+            _check_text(key, "payload")
             _check_json_value(item, depth + 1)
     elif isinstance(value, list | tuple):
         for item in value:
             _check_json_value(item, depth + 1)
-    elif value is not None and not isinstance(value, bool | int | float):
+    elif isinstance(value, bool) or value is None:
+        pass
+    elif isinstance(value, int):
+        if abs(value) > MAX_SAFE_INT:
+            raise EventError("event payload has an integer outside +/-2**53")
+    elif not isinstance(value, float):
         raise EventError("event payload holds a value that is not JSON")
+
+
+def _check_common_fields(payload: Mapping[str, Any]) -> None:
+    """The fields schemas/event.json requires of every type that are not columns."""
+    repo = payload.get("repo")
+    if not isinstance(repo, str) or not REPO_RE.match(repo):
+        raise EventError("event payload has no valid repo")
+    occurred = payload.get("occurred_at", ...)
+    if occurred is not None and (not isinstance(occurred, str) or not TS_RE.match(occurred)):
+        raise EventError("event payload has no valid occurred_at")
+    head = payload.get("head_sha")
+    if not isinstance(head, str) or not SHA_RE.match(head):
+        raise EventError("event payload has no valid head_sha")
+    watches = payload.get("watches")
+    if (
+        not isinstance(watches, list | tuple)
+        or len(set(watches)) != len(watches)
+        or not all(isinstance(w, str) and WATCH_ID_RE.match(w) for w in watches)
+    ):
+        raise EventError("event payload has no valid watches")
 
 
 def encode_payload(payload: Mapping[str, Any]) -> str:
@@ -549,19 +620,22 @@ def encode_payload(payload: Mapping[str, Any]) -> str:
     return text
 
 
-def _validate_event(event: NewEvent) -> str:
+def _validate_event(event: NewEvent, labels: list[str]) -> str:
+    """Check the event and return its encoded payload. `labels` is the one materialized list
+    that is validated and stored (a generator would be consumed by the first pass)."""
     if event.type not in EVENT_TYPES:
         raise EventError("unknown event type")
     if not isinstance(event.pr_id, str) or not PR_ID_RE.match(event.pr_id):
         raise EventError("event pr_id is malformed")
-    if not isinstance(event.pr, str) or not PR_RE.match(event.pr):
+    if not isinstance(event.pr, str) or len(event.pr) > PR_MAX_CHARS or not PR_RE.match(event.pr):
         raise EventError("event pr is malformed")
-    labels = list(event.labels)
     if len(labels) > MAX_LABELS or len(set(labels)) != len(labels):
         raise EventError("event labels are too many or repeated")
     if not all(isinstance(x, str) and LABEL_RE.match(x) for x in labels):
         raise EventError("event label is malformed")
-    return encode_payload(event.payload)
+    encoded = encode_payload(event.payload)
+    _check_common_fields(event.payload)
+    return encoded
 
 
 # --- the store -------------------------------------------------------------------------------
@@ -629,9 +703,10 @@ class Store:
         event commits (or vanishes) with the caller's other writes."""
         if not self.conn.in_transaction:
             raise StoreError("append_event must run inside a transaction")
-        payload = _validate_event(event)
+        labels_list = list(event.labels)
+        payload = _validate_event(event, labels_list)
         stamp = format_ts(detected_at if detected_at is not None else datetime.now(UTC))
-        labels = json.dumps(list(event.labels), ensure_ascii=True, separators=(",", ":"))
+        labels = json.dumps(labels_list, ensure_ascii=True, separators=(",", ":"))
         for _ in range(5):
             event_id = new_event_id()
             try:
@@ -640,8 +715,12 @@ class Store:
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (event_id, event.type, event.pr_id, event.pr, payload, stamp, labels),
                 )
-            except sqlite3.IntegrityError:
-                continue  # an id collision (about 2**-60): draw another
+            except sqlite3.IntegrityError as exc:
+                if _is_event_id_collision(exc):
+                    continue  # about 2**-60: draw another id
+                raise _classify(exc) from None
+            except sqlite3.Error as exc:
+                raise _classify(exc) from None
             seq = cur.lastrowid
             if seq is None:
                 raise StoreError("event insert returned no sequence number")
@@ -653,6 +732,6 @@ class Store:
                 pr=event.pr,
                 payload=json.loads(payload),
                 detected_at=stamp,
-                labels=list(event.labels),
+                labels=labels_list,
             )
         raise StoreError("could not draw an unused event id")

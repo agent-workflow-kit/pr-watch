@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import stat
 import subprocess
 import sys
 import textwrap
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -188,10 +190,13 @@ def test_the_older_binary_refuses_a_newer_database_without_writing(state: StateD
 
 
 def test_newer_refusal_precedes_the_wal_switch(state: StateDir) -> None:
-    # A rollback-journal database claiming a future version must stay in that mode.
+    # A rollback-journal pr-watch database claiming a future version must stay in that mode.
+    with open_store(state):
+        pass
     raw = sqlite3.connect(db_path(state))
+    raw.execute("PRAGMA journal_mode = DELETE")
+    raw.execute("UPDATE meta SET value = '99' WHERE key = 'schema_version'")
     raw.execute("PRAGMA user_version = 99")
-    raw.execute("CREATE TABLE t (x)")
     raw.commit()
     raw.close()
     with pytest.raises(StoreTooNewError):
@@ -302,8 +307,6 @@ def test_two_processes_creating_the_database_migrate_once(tmp_path: Path) -> Non
         with open_state_dir(Path(sys.argv[1])) as st, open_store(st) as s:
             print(s.store_id)
     """
-    import time
-
     go = str(time.time() + 1.0)
     procs = [
         subprocess.Popen(
@@ -479,7 +482,9 @@ def test_transactions_do_not_nest(store: Store) -> None:
     assert not store.conn.in_transaction
 
 
-def test_a_second_writer_waits_for_the_first(state: StateDir) -> None:
+def test_a_second_writer_times_out_as_busy_while_the_first_holds_the_lock(
+    state: StateDir,
+) -> None:
     with open_store(state) as a, open_store(state, busy_timeout_ms=50) as b:
         with a.transaction():
             with pytest.raises(StoreError, match="busy"):
@@ -487,6 +492,385 @@ def test_a_second_writer_waits_for_the_first(state: StateDir) -> None:
                     pass
         with b.transaction():
             pass
+
+
+HOLDER = """
+    import sys, time
+    from pathlib import Path
+    from pr_watch.state_dir import open_state_dir
+    from pr_watch.store import open_store
+    with open_state_dir(Path(sys.argv[1])) as st, open_store(st) as s:
+        with s.transaction():
+            print("held", flush=True)
+            time.sleep(float(sys.argv[2]))
+"""
+
+
+def start_holder(state: StateDir, seconds: float) -> subprocess.Popen[str]:
+    proc = subprocess.Popen(
+        [sys.executable, "-c", textwrap.dedent(HOLDER), str(state.path), str(seconds)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout is not None
+    assert proc.stdout.readline().strip() == "held"
+    return proc
+
+
+def test_a_second_writer_waits_for_the_first_then_succeeds(state: StateDir) -> None:
+    with open_store(state):
+        pass
+    holder = start_holder(state, 0.4)
+    with open_store(state, busy_timeout_ms=10_000) as b:
+        began = time.monotonic()
+        with b.transaction():
+            b.append_event(closed_event())
+        waited = time.monotonic() - began
+        assert b.head_seq() == 1
+    _, err = holder.communicate(timeout=30)
+    assert holder.returncode == 0, err
+    assert 0.1 < waited < 8
+
+
+def test_opening_a_current_database_does_not_wait_for_the_write_lock(state: StateDir) -> None:
+    with open_store(state):
+        pass
+    holder = start_holder(state, 1.5)
+    began = time.monotonic()
+    with open_store(state, busy_timeout_ms=10_000) as s:  # reads only: no lock needed
+        assert s.head_seq() == 0
+    assert time.monotonic() - began < 1.0
+    _, err = holder.communicate(timeout=30)
+    assert holder.returncode == 0, err
+
+
+def test_every_connection_sets_the_journal_size_limit(store: Store) -> None:
+    assert store.conn.execute("PRAGMA journal_size_limit").fetchone()[0] == 64 * 1024 * 1024
+    assert store.conn.execute("PRAGMA synchronous").fetchone()[0] == 2  # FULL
+    assert store.conn.execute("PRAGMA trusted_schema").fetchone()[0] == 0
+
+
+# --- state.db locks survive open and close (no descriptor of ours on state.db) ----------------
+
+TRY_LOCK = """
+    import sqlite3, sys
+    conn = sqlite3.connect(sys.argv[1], timeout=0, isolation_level=None)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError:
+        sys.exit(7)
+    sys.exit(0)
+"""
+
+
+def child_takes_write_lock(state: StateDir) -> int:
+    return run_child(TRY_LOCK, str(db_path(state))).returncode
+
+
+def test_a_second_open_in_the_same_process_does_not_drop_the_held_write_lock(
+    state: StateDir,
+) -> None:
+    with open_store(state) as a:
+        with a.transaction():
+            assert child_takes_write_lock(state) == 7
+            with open_store(state):  # opens and closes everything it touches on state.db
+                pass
+            assert child_takes_write_lock(state) == 7  # still held
+            a.append_event(closed_event())
+        assert child_takes_write_lock(state) == 0  # released by the commit
+    with open_store(state) as c:
+        assert c.head_seq() == 1
+
+
+def test_open_child_open_close_commit_again_keeps_every_row(state: StateDir) -> None:
+    with open_store(state) as a:
+        with a.transaction():
+            a.append_event(closed_event())
+        done = run_child(
+            """
+            import sys
+            from pathlib import Path
+            from pr_watch.state_dir import open_state_dir
+            from pr_watch.store import open_store
+            with open_state_dir(Path(sys.argv[1])) as st, open_store(st):
+                pass
+            """,
+            str(state.path),
+        )
+        assert done.returncode == 0, done.stderr
+        with a.transaction():
+            a.append_event(closed_event())
+    with open_store(state) as third:
+        assert third.head_seq() == 2
+        assert third.conn.execute("SELECT count(*) FROM events").fetchone()[0] == 2
+
+
+REOPEN_LOOP = """
+    import sys, time
+    from pathlib import Path
+    from pr_watch.state_dir import open_state_dir
+    from pr_watch.store import open_store, NewEvent
+    go = float(sys.argv[2])
+    while time.time() < go:
+        time.sleep(0.001)
+    for _ in range(int(sys.argv[3])):
+        with open_state_dir(Path(sys.argv[1])) as st, open_store(st) as s:
+            with s.transaction():
+                s.append_event(NewEvent("closed", "PR_abc123", "github.com/o/r#1",
+                    {"repo": "github.com/o/r", "occurred_at": None, "head_sha": "a" * 40,
+                     "watches": []}))
+"""
+
+
+def test_reopening_in_a_loop_from_three_processes_loses_no_commit(state: StateDir) -> None:
+    with open_store(state):
+        pass
+    iterations = 60
+    go = str(time.time() + 1.0)
+    procs = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                textwrap.dedent(REOPEN_LOOP),
+                str(state.path),
+                go,
+                str(iterations),
+            ],  # fmt: skip
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(3)
+    ]
+    results = [p.communicate(timeout=300) for p in procs]
+    codes = [p.returncode for p in procs]
+    detail = [r[1][-600:] for r in results]
+    assert codes == [0, 0, 0], detail
+    with open_store(state) as s:
+        count = s.conn.execute("SELECT count(*) FROM events").fetchone()[0]
+        assert count == 3 * iterations, (count, detail)
+        assert s.conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def test_the_process_holds_no_descriptor_on_the_database_files(state: StateDir) -> None:
+    with open_store(state):
+        pass
+    real_open = os.open
+    seen: list[str] = []
+
+    def spy(path: Any, *args: Any, **kwargs: Any) -> int:
+        seen.append(str(path))
+        return real_open(path, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(os, "open", spy)
+        with open_store(state):
+            pass
+    assert not [n for n in seen if "state.db" in n], seen
+
+
+# --- foreign and newer databases are refused without a write ----------------------------------
+
+
+def snapshot_files(state: StateDir) -> dict[str, tuple[bytes, int]]:
+    out = {}
+    for suffix in ("", "-wal", "-shm"):
+        p = Path(str(db_path(state)) + suffix)
+        if p.exists():
+            out[suffix] = (p.read_bytes(), p.stat().st_mtime_ns)
+    return out
+
+
+@pytest.mark.parametrize("version", [1, 7])
+def test_a_foreign_database_with_a_user_version_is_refused_untouched(
+    state: StateDir, version: int
+) -> None:
+    raw = sqlite3.connect(db_path(state))
+    raw.execute("CREATE TABLE somebody_elses (x)")
+    raw.execute(f"PRAGMA user_version = {version}")
+    raw.commit()
+    raw.close()
+    db_path(state).chmod(0o600)
+    before = snapshot_files(state)
+    with pytest.raises(StoreCorruptError) as info:
+        open_store(state)
+    assert info.value.code == "internal"
+    assert snapshot_files(state) == before
+    raw = sqlite3.connect(db_path(state))
+    assert raw.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    assert raw.execute("PRAGMA user_version").fetchone()[0] == version
+    raw.close()
+
+
+def test_a_user_version_with_no_tables_is_refused_untouched(state: StateDir) -> None:
+    raw = sqlite3.connect(db_path(state))
+    raw.execute("PRAGMA user_version = 7")
+    raw.close()
+    db_path(state).chmod(0o600)
+    before = snapshot_files(state)
+    with pytest.raises(StoreCorruptError):
+        open_store(state)
+    assert snapshot_files(state) == before
+
+
+def test_a_higher_user_version_than_meta_is_store_too_new(state: StateDir) -> None:
+    with open_store(state):
+        pass
+    raw = sqlite3.connect(db_path(state))
+    raw.execute("PRAGMA user_version = 9")
+    raw.close()
+    with pytest.raises(StoreTooNewError) as info:
+        open_store(state)
+    assert info.value.found == 9
+
+
+def test_a_meta_without_a_store_id_is_corrupt(state: StateDir) -> None:
+    with open_store(state):
+        pass
+    raw = sqlite3.connect(db_path(state))
+    raw.execute("DELETE FROM meta WHERE key = 'store_id'")
+    raw.commit()
+    raw.close()
+    with pytest.raises(StoreCorruptError):
+        open_store(state)
+
+
+def test_a_newer_database_with_an_uncheckpointed_wal_is_left_byte_identical(
+    state: StateDir,
+) -> None:
+    done = run_child(
+        """
+        import os, sys
+        from pathlib import Path
+        from pr_watch.state_dir import open_state_dir
+        from pr_watch.store import open_store, MIGRATIONS
+        def v2(conn):
+            conn.execute("ALTER TABLE hosts ADD COLUMN note TEXT")
+        st = open_state_dir(Path(sys.argv[1]))
+        s = open_store(st, migrations=(*MIGRATIONS, v2))
+        with s.transaction():
+            s.conn.execute("INSERT INTO hosts (host) VALUES ('h')")
+        os._exit(0)
+        """,
+        str(state.path),
+    )
+    assert done.returncode == 0, done.stderr
+    before = snapshot_files(state)
+    assert before["-wal"][0], "the child must leave an uncheckpointed WAL"
+    with pytest.raises(StoreTooNewError):
+        open_store(state)
+    after = snapshot_files(state)
+    # The db and the WAL (the data) are byte- and mtime-identical. -shm is only a volatile index
+    # that any reader updates, so only its presence is checked.
+    assert after[""] == before[""]
+    assert after["-wal"] == before["-wal"]
+    assert set(after) == set(before)
+
+
+def test_an_empty_state_db_file_is_initialized(state: StateDir) -> None:
+    db_path(state).write_bytes(b"")
+    db_path(state).chmod(0o600)
+    with open_store(state) as s:
+        assert s.schema_version == 1
+        assert STORE_ID_RE.match(s.store_id)
+
+
+# --- the PR row goes with its last source -----------------------------------------------------
+
+
+def add_pr(c: sqlite3.Connection, pr_id: str, watches: list[str]) -> None:
+    c.execute("INSERT INTO prs (pr_id, pr, repo, host) VALUES (?, ?, 'r', 'h')", (pr_id, PR))
+    for w in watches:
+        c.execute("INSERT OR IGNORE INTO watches VALUES (?, 'query', ?, ?)", (w, w, TS))
+        c.execute("INSERT INTO sources (pr_id, watch_id) VALUES (?, ?)", (pr_id, w))
+
+
+def pr_ids(c: sqlite3.Connection) -> list[str]:
+    return [r[0] for r in c.execute("SELECT pr_id FROM prs ORDER BY pr_id")]
+
+
+def test_deleting_the_last_source_drops_the_pr_in_the_same_transaction(store: Store) -> None:
+    with store.transaction() as c:
+        add_pr(c, "P1", ["w-aaaaaaaaaa"])
+        c.execute("DELETE FROM sources WHERE pr_id = 'P1'")
+        assert pr_ids(c) == []  # visible inside the transaction already
+    assert pr_ids(store.conn) == []
+
+
+def test_deleting_a_non_last_source_keeps_the_pr(store: Store) -> None:
+    with store.transaction() as c:
+        add_pr(c, "P1", ["w-aaaaaaaaaa", "w-bbbbbbbbbb"])
+        c.execute("DELETE FROM sources WHERE pr_id = 'P1' AND watch_id = 'w-aaaaaaaaaa'")
+    assert pr_ids(store.conn) == ["P1"]
+    with store.transaction() as c:
+        c.execute("DELETE FROM sources WHERE pr_id = 'P1'")
+    assert pr_ids(store.conn) == []
+
+
+def test_deleting_a_pr_cascades_its_sources(store: Store) -> None:
+    with store.transaction() as c:
+        add_pr(c, "P1", ["w-aaaaaaaaaa"])
+        add_pr(c, "P2", ["w-aaaaaaaaaa"])
+        c.execute("DELETE FROM prs WHERE pr_id = 'P1'")
+    assert pr_ids(store.conn) == ["P2"]
+    assert store.conn.execute("SELECT pr_id FROM sources").fetchall() == [("P2",)]
+
+
+def test_deleting_a_watch_drops_prs_left_without_a_source(store: Store) -> None:
+    with store.transaction() as c:
+        add_pr(c, "P1", ["w-aaaaaaaaaa"])
+        add_pr(c, "P2", ["w-aaaaaaaaaa", "w-bbbbbbbbbb"])
+        add_pr(c, "P3", ["w-bbbbbbbbbb"])
+        c.execute("DELETE FROM watches WHERE id = 'w-aaaaaaaaaa'")
+    assert pr_ids(store.conn) == ["P2", "P3"]
+
+
+# --- event append details ---------------------------------------------------------------------
+
+
+def test_labels_given_as_a_generator_are_stored(store: Store) -> None:
+    with store.transaction():
+        e = store.append_event(closed_event(labels=(x for x in ["a=b", "c=d"])))
+    assert e.labels == ["a=b", "c=d"]
+    (raw,) = store.conn.execute("SELECT labels FROM events WHERE seq = ?", (e.seq,)).fetchone()
+    assert raw == '["a=b","c=d"]'
+
+
+def test_a_sqlite_failure_during_append_is_a_store_error(store: Store) -> None:
+    with pytest.raises(StoreError) as info:
+        with store.transaction() as c:
+            c.execute("DROP TABLE events")
+            store.append_event(closed_event())
+    assert not isinstance(info.value.__cause__, sqlite3.Error) or info.value.__suppress_context__
+    assert type(info.value) is StoreError
+
+
+def test_only_an_event_id_collision_is_retried(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+
+    def draw() -> str:
+        calls.append(1)
+        return "ev-aaaaaaaaaaaa"
+
+    monkeypatch.setattr(store_module, "new_event_id", draw)
+    with pytest.raises(StoreError) as info:
+        with store.transaction() as c:
+            c.execute(
+                "CREATE TRIGGER no_events BEFORE INSERT ON events "
+                "BEGIN SELECT RAISE(ABORT, 'nope'); END"
+            )
+            store.append_event(closed_event())
+    assert len(calls) == 1
+    assert type(info.value) is StoreError
+
+
+def test_the_pr_cap_matches_the_schema() -> None:
+    defs = json.loads((Path(__file__).parents[1] / "schemas" / "defs.json").read_text())
+    assert store_module.PR_MAX_CHARS == defs["$defs"]["pr"].get("maxLength", 512)
 
 
 # --- events ----------------------------------------------------------------------------------
@@ -580,35 +964,59 @@ def test_every_event_type_is_accepted(store: Store) -> None:
             store.append_event(closed_event(type=t))
 
 
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"type": "bogus"},
-        {"type": ""},
-        {"pr_id": ""},
-        {"pr_id": "a..b"},
-        {"pr_id": "x" * 129},
-        {"pr_id": "-lead"},
-        {"pr": "not a pr"},
-        {"pr": PR + "\n"},
-        {"pr_id": PR_ID + "\n"},
-        {"labels": ["bad label"]},
-        {"labels": ["a=b", "a=b"]},
-        {"labels": [f"k=v{i}" for i in range(300)]},
-        {"labels": ["a=b\n"]},
-        {"payload": {"id": "ev-aaaaaaaaaaaa"}},
-        {"payload": {"seq": 1}},
-        {"payload": {"labels": []}},
-        {"payload": {"x": "y" * 5000}},
-        {"payload": {"x": "y" * 4096, "z": ["y" * 4096] * 40}},
-        {"payload": {"x": float("nan")}},
-        {"payload": {"x": object()}},
-        {"payload": {"x": {1: 2}}},
-        {"payload": {"a": {"b": {"c": {"d": {"e": {"f": {"g": 1}}}}}}}},
-        {"payload": {"k" * 65: 1}},
-    ],
-    ids=lambda c: str(sorted(c))[:30] + str(hash(str(c)) % 1000),
-)
+BAD_EVENTS: list[Any] = [
+    pytest.param({"type": "bogus"}, id="unknown-type"),
+    pytest.param({"type": ""}, id="empty-type"),
+    pytest.param({"pr_id": ""}, id="empty-pr-id"),
+    pytest.param({"pr_id": "a..b"}, id="pr-id-dotdot"),
+    pytest.param({"pr_id": "x" * 129}, id="pr-id-too-long"),
+    pytest.param({"pr_id": "-lead"}, id="pr-id-leading-dash"),
+    pytest.param({"pr": "not a pr"}, id="pr-malformed"),
+    pytest.param({"pr": PR + "\n"}, id="pr-trailing-newline"),
+    pytest.param({"pr": "github.com/" + "a" * 600 + "#1"}, id="pr-too-long"),
+    pytest.param({"pr_id": PR_ID + "\n"}, id="pr-id-trailing-newline"),
+    pytest.param({"labels": ["bad label"]}, id="label-malformed"),
+    pytest.param({"labels": ["a=b", "a=b"]}, id="labels-repeated"),
+    pytest.param({"labels": [f"k=v{i}" for i in range(300)]}, id="labels-too-many"),
+    pytest.param({"labels": ["a=b\n"]}, id="label-newline"),
+    pytest.param({"payload": {**COMMON, "id": "ev-aaaaaaaaaaaa"}}, id="payload-repeats-id"),
+    pytest.param({"payload": {**COMMON, "seq": 1}}, id="payload-repeats-seq"),
+    pytest.param({"payload": {**COMMON, "labels": []}}, id="payload-repeats-labels"),
+    pytest.param({"payload": {**COMMON, "x": "y" * 5000}}, id="payload-long-string"),
+    pytest.param({"payload": {**COMMON, "x": "y" * 4096, "z": ["y" * 4096] * 40}}, id="too-large"),
+    pytest.param({"payload": {**COMMON, "x": float("nan")}}, id="payload-nan"),
+    pytest.param({"payload": {**COMMON, "x": object()}}, id="payload-not-json"),
+    pytest.param({"payload": {**COMMON, "x": {1: 2}}}, id="payload-int-key"),
+    pytest.param(
+        {"payload": {**COMMON, "a": {"b": {"c": {"d": {"e": {"f": {"g": 1}}}}}}}},
+        id="payload-too-deep",
+    ),
+    pytest.param({"payload": {**COMMON, "k" * 65: 1}}, id="payload-long-key"),
+    pytest.param({"payload": {**COMMON, "x": 2**53 + 1}}, id="payload-int-too-big"),
+    pytest.param({"payload": {**COMMON, "x": -(2**53) - 1}}, id="payload-int-too-small"),
+    pytest.param({"payload": {**COMMON, "x": "bad \ud800 surrogate"}}, id="payload-surrogate"),
+    pytest.param({"payload": {**COMMON, "bad\udfff": 1}}, id="payload-surrogate-key"),
+    pytest.param({"payload": {k: v for k, v in COMMON.items() if k != "repo"}}, id="no-repo"),
+    pytest.param(
+        {"payload": {k: v for k, v in COMMON.items() if k != "occurred_at"}}, id="no-occurred-at"
+    ),
+    pytest.param(
+        {"payload": {k: v for k, v in COMMON.items() if k != "head_sha"}}, id="no-head-sha"
+    ),
+    pytest.param({"payload": {k: v for k, v in COMMON.items() if k != "watches"}}, id="no-watches"),
+    pytest.param({"payload": {**COMMON, "repo": "Not A Repo"}}, id="bad-repo"),
+    pytest.param({"payload": {**COMMON, "occurred_at": "yesterday"}}, id="bad-occurred-at"),
+    pytest.param({"payload": {**COMMON, "occurred_at": 5}}, id="occurred-at-not-string"),
+    pytest.param({"payload": {**COMMON, "head_sha": "abc"}}, id="bad-head-sha"),
+    pytest.param({"payload": {**COMMON, "watches": "w-aaaaaaaaaa"}}, id="watches-not-list"),
+    pytest.param({"payload": {**COMMON, "watches": ["nope"]}}, id="bad-watch-id"),
+    pytest.param(
+        {"payload": {**COMMON, "watches": ["w-aaaaaaaaaa", "w-aaaaaaaaaa"]}}, id="watches-repeated"
+    ),
+]
+
+
+@pytest.mark.parametrize("changes", BAD_EVENTS)
 def test_malformed_events_are_rejected_and_store_nothing(
     store: Store, changes: dict[str, Any]
 ) -> None:
@@ -625,8 +1033,6 @@ def test_hostile_text_is_stored_escaped_and_round_trips(store: Store) -> None:
     (raw,) = store.conn.execute("SELECT payload FROM events WHERE seq = ?", (e.seq,)).fetchone()
     assert raw.isascii() and "\x00" not in raw and "\x1b" not in raw
     assert store.conn.execute("SELECT count(*) FROM events").fetchone()[0] == 1
-    import json
-
     assert json.loads(raw)["note"] == nasty
 
 

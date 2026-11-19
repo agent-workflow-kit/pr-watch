@@ -15,7 +15,8 @@ the final component is refused.
 Other modules use `open_state_dir` for the descriptor, `StateDir.path_for` for a path SQLite needs,
 and `verify_file` for any file they open.
 
-`store.open_store` checks `state.db` with `verify_file` (docs/interface.md, Files).
+`store.open_store` checks `state.db` and its sidecars with `verify_path_at` (docs/interface.md,
+Files); it never opens them itself.
 """
 
 from __future__ import annotations
@@ -77,6 +78,27 @@ def verify_file(info: os.stat_result, what: str) -> None:
     if not stat.S_ISREG(info.st_mode):
         raise StateDirError(f"{one_line(what, 200)} is not a regular file")
     _check_owner_and_mode(info, what)
+
+
+def verify_path_at(dir_fd: int, name: str) -> os.stat_result | None:
+    """`verify_file` for `name` under `dir_fd` without opening it (`lstat`, so a symlink is
+    refused as such). Returns the stat, or None when the file does not exist.
+
+    Use this for a file SQLite or a lock holder keeps open: closing any descriptor of ours on an
+    inode releases the POSIX locks the process holds on it, so such files must never be opened
+    just to be checked. A swap after the check is caught by comparing device and inode later."""
+    try:
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise StateDirError(
+            f"{one_line(name, 200)} cannot be examined ({one_line(exc.strerror or '', 100)})"
+        ) from None
+    if stat.S_ISLNK(info.st_mode):
+        raise StateDirError(f"{one_line(name, 200)} is a symlink")
+    verify_file(info, name)
+    return info
 
 
 def _check_owner_and_mode(info: os.stat_result, what: str) -> None:
@@ -228,20 +250,7 @@ def _ensure_hooks_cwd(state_fd: int) -> None:
 
 def _check_cron_lock(state_fd: int) -> None:
     """When `cron.lock` exists it must be a regular file owned by the user, not group- or
-    world-writable, and not a symlink (the cron commands lock it, #26)."""
-    try:
-        fd = os.open(
-            CRON_LOCK,
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
-            dir_fd=state_fd,
-        )
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        if exc.errno == errno.ELOOP:
-            raise StateDirError(f"{CRON_LOCK} is a symlink") from None
-        raise StateDirError(f"{CRON_LOCK} cannot be opened ({exc.strerror})") from None
-    try:
-        verify_file(os.fstat(fd), CRON_LOCK)
-    finally:
-        os.close(fd)
+    world-writable, and not a symlink (the cron commands lock it, #26). Checked with `lstat`
+    semantics and no open: closing any descriptor on an inode drops the process's POSIX locks on
+    it, so a check must never open a file another part of the process may lock."""
+    verify_path_at(state_fd, CRON_LOCK)
