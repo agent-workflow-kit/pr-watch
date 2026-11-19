@@ -228,3 +228,9 @@ def isolated_env(
     hits.write_text("", encoding="utf-8")
     if recorded and request.node.get_closest_marker("expect_guard_hit") is None:
         pytest.fail(f"a guard stub or launch guard was hit (swallowed?):\n{recorded}")
+
+
+@pytest.fixture
+def state_dir(isolated_env: Path) -> Path:
+    """The default state directory path inside the sandboxed HOME (not created)."""
+    return isolated_env / ".local" / "state" / "pr-watch"

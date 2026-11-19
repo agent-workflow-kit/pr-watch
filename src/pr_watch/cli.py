@@ -26,13 +26,13 @@ import json
 import os
 import re
 import sys
-import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, NoReturn
 
 from . import __version__
 from .config import ConfigError, LoadedConfig, load_config
+from .log import NULL_LOG, Log
 from .refs import (
     RefError,
     parse_cursor,
@@ -51,10 +51,11 @@ from .refs import (
     resolve_owner,
     watch_key,
 )
+from .state_dir import StateDir, StateDirError, open_state_dir
+from .text import MAX_MESSAGE_CHARS, one_line, scrub_text
 
 PROG = "pr-watch"
 DESCRIPTION = "Watches PRs for changes and exposes them as events and hooks."
-MAX_MESSAGE_CHARS = 256
 
 # The error codes of schemas/defs.json and the exit code each one maps to (Exit codes).
 EXIT_CODES: dict[str, int] = {
@@ -74,42 +75,6 @@ EXIT_CODES: dict[str, int] = {
 # schemas/cli/error.json bounds on `details` strings; every other string is cut at 256.
 _DETAIL_LIMITS = {"required": 32, "found": 32, "kind": 32}
 _REQUIRED_DETAILS = {"tool_missing": ("install",), "tool_too_old": ("required", "found")}
-
-
-# --- text sanitizing -------------------------------------------------------------------------
-
-
-def _tokens(text: str, keep: str = "") -> list[str]:
-    """Each character, or a `<U+XXXX>` marker for a control, format (bidi), line/paragraph
-    separator or surrogate character (`keep` lists control characters to leave alone)."""
-    out: list[str] = []
-    for ch in text:
-        if ch not in keep and unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp", "Cs"):
-            out.append(f"<U+{ord(ch):04X}>")
-        else:
-            out.append(ch)
-    return out
-
-
-def one_line(text: str, limit: int = MAX_MESSAGE_CHARS) -> str:
-    """Sanitized one-line text of at most `limit` characters, cut at a marker boundary with a
-    trailing `...` kept inside the limit."""
-    tokens = _tokens(text)
-    if sum(map(len, tokens)) <= limit:
-        return "".join(tokens)
-    kept: list[str] = []
-    size = 0
-    for token in tokens:
-        if size + len(token) > limit - 3:
-            break
-        kept.append(token)
-        size += len(token)
-    return "".join(kept) + "..."
-
-
-def scrub_text(text: str) -> str:
-    """Multi-line human text: markers for control characters other than newline and tab."""
-    return "".join(_tokens(text, keep="\n\t"))
 
 
 # --- errors and the envelope -----------------------------------------------------------------
@@ -207,7 +172,9 @@ class Context:
     json: bool
     quiet: bool
     verbose: bool
-    loaded: LoadedConfig  # TODO(#10): write `loaded.warnings` to log.jsonl
+    loaded: LoadedConfig
+    state: StateDir | None = None  # open and verified by `_execute`; None only in unit tests
+    log: Log = NULL_LOG  # `<state dir>/log.jsonl`; logging never fails a command
 
     def emit(self, data: Any, human: str | None = None) -> None:
         """Print a command result: a JSON document with `--json`, else `human` unless `--quiet`."""
@@ -229,6 +196,11 @@ def _stub(issue: int) -> Handler:
 
     return handler
 
+
+# Commands that only read state: they open (and so verify) the state directory but write no
+# log record, so a consumer that polls `events` or `list` cannot fill log.jsonl with the same
+# configuration warnings on every call.
+READ_ONLY_COMMANDS = frozenset({"list", "show", "events", "export"})
 
 # One entry per command. A later issue replaces its stub with the real handler.
 HANDLERS: dict[str, Handler] = {
@@ -648,8 +620,27 @@ def _execute(argv: Sequence[str]) -> int:
             )
         except RefError as exc:
             raise ref_error_to_cli(exc, leaf.format_usage()) from None
-    ctx = Context(json=args.json, quiet=args.quiet, verbose=args.verbose, loaded=loaded)
-    return HANDLERS[args.command](ctx, args)
+    try:
+        state = open_state_dir()
+    except StateDirError as exc:
+        raise CliError("state_unsafe", str(exc)) from None
+    try:
+        log = Log(
+            state, on_error=None if args.quiet else lambda line: _stderr_line(f"{PROG}: {line}\n")
+        )
+        if args.command not in READ_ONLY_COMMANDS:
+            log.config_warnings(loaded.warnings)
+        ctx = Context(
+            json=args.json,
+            quiet=args.quiet,
+            verbose=args.verbose,
+            loaded=loaded,
+            state=state,
+            log=log,
+        )
+        return HANDLERS[args.command](ctx, args)
+    finally:
+        state.close()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
