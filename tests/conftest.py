@@ -6,8 +6,8 @@ and tool-config variables are scrubbed (see `scrub_env`), and PATH holds only th
 binaries (tests/fakebin) plus a sandbox bin directory. The sandbox bin holds:
 
 - symlinks to a small allowlist of harmless system tools (never git, ssh or crontab),
-- `python3`/`python` (the interpreter running the tests, not resolved) and `pr-watch` if it sits
-  beside that interpreter,
+- `python3`/`python` (wrapper scripts exec'ing the interpreter running the tests, so the venv
+  holds) and `pr-watch` if it sits beside that interpreter,
 - stubs for `forgectl` and `crontab` that exit 99 and record the hit in `hits.log`.
 
 A test that needs forgectl or crontab must put a fake in tests/fakebin. A stub hit fails the test
@@ -83,7 +83,11 @@ def build_sandbox_bin(directory: Path) -> Path:
         if found and not (directory / name).exists():
             (directory / name).symlink_to(found)
     for name in ("python3", "python"):
-        (directory / name).symlink_to(sys.executable)  # not resolved: keeps the venv
+        # A symlink would make python resolve pyvenv.cfg next to the link and lose the venv, so
+        # a wrapper script execs the interpreter by its real path instead.
+        wrapper = directory / name
+        wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+        wrapper.chmod(0o755)
     script = Path(sys.executable).parent / "pr-watch"
     if script.exists():
         (directory / "pr-watch").symlink_to(script)

@@ -187,6 +187,14 @@ def test_allowlisted_python_and_tools_resolve_and_run(sandbox_bin: Path) -> None
         check=False,
     )
     assert (py.returncode, py.stdout.strip()) == (0, "3"), py.stderr
+    venv = subprocess.run(
+        ["python3", "-c", "import pr_watch, jsonschema, sys; print(sys.prefix)"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert (venv.returncode, venv.stdout.strip()) == (0, sys.prefix), venv.stderr
     for tool in ("python", "kill", "timeout", "mkdir", "setsid", "mktemp"):
         assert shutil.which(tool) == str(sandbox_bin / tool), tool
     proc = subprocess.run(
