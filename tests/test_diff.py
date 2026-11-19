@@ -842,3 +842,10 @@ def test_review_after_incomplete_reviews_baseline_is_silent() -> None:
     assert old["baselined"]["reviews"] is False
     new_snap = plus_reviews(gh(), review())
     assert diff(old, build_digest(new_snap, old), new_snap) == []
+
+
+def test_event_ref_is_capped_at_256_like_the_row() -> None:
+    long_repo = "github.com/" + "o" * 300
+    new = gh(repo=long_repo, pr=f"{long_repo}#7")
+    assert run(gh(), with_(new, head={"sha": sha(2)})) == []
+    assert run(gh(), with_(new, head={"sha": sha(2)})).dropped

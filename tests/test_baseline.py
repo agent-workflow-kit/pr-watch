@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from pr_watch.baseline import PrIdMismatch, RowState, SnapshotPlan, plan_snapshot
+from pr_watch.baseline import MalformedSnapshot, PrIdMismatch, RowState, SnapshotPlan, plan_snapshot
 from pr_watch.commit import commit_snapshot
 from pr_watch.digest import build_digest, digest_from_json
 from pr_watch.state_dir import StateDir, open_state_dir
@@ -57,6 +57,7 @@ class Sim:
 
     def step(self, snap: dict[str, Any], **kw: Any) -> SnapshotPlan:
         self.tick += 1
+        kw.setdefault("persistent_after", 5)
         plan = plan_snapshot(self.state(), snap, now=at(self.tick), **kw)
         self.row.update(plan.fields)
         self.plans.append(plan)
@@ -344,7 +345,44 @@ def test_merged_is_final_even_with_rebaseline() -> None:
     merged = {**base, "state": "merged"}
     sim.step(merged)
     sim.row["rebaseline"] = 1
+    before = dict(sim.row)
+    plan = sim.step(busy(base, head=2))
+    assert types(plan) == []
+    for col in ("digest", "status", "terminal_kind", "terminal_at", "baselined_at"):
+        assert sim.row[col] == before[col]
+    assert sim.row["rebaseline"] == 0
+    assert types(sim.step(busy(base, head=3))) == []
+
+
+def _merged_sim() -> tuple[Sim, dict[str, Any]]:
+    base = gh()
+    sim = Sim(base)
+    sim.step({**base, "state": "merged"})
+    return sim, base
+
+
+def test_open_snapshot_after_merged_keeps_the_row_final() -> None:
+    sim, base = _merged_sim()
+    before = dict(sim.row)
     assert types(sim.step(busy(base, head=2))) == []
+    for col in ("digest", "status", "terminal_kind", "terminal_at"):
+        assert sim.row[col] == before[col]
+    assert sim.row["status"] == "terminal" and sim.row["terminal_kind"] == "merged"
+    assert types(sim.step({**base, "state": "merged"})) == []  # merged never fires twice
+
+
+def test_closed_snapshot_after_merged_keeps_the_row_merged() -> None:
+    sim, base = _merged_sim()
+    before = dict(sim.row)
+    assert types(sim.step(closed(base))) == []
+    for col in ("digest", "status", "terminal_kind", "terminal_at"):
+        assert sim.row[col] == before[col]
+
+
+def test_merged_row_still_counts_incomplete_parts_and_polls() -> None:
+    sim, base = _merged_sim()
+    sim.step(incomplete({**base, "state": "merged"}, "ci"))
+    assert sim.counters() == {"ci": 1}
 
 
 # --- rename ------------------------------------------------------------------------------------
@@ -408,6 +446,108 @@ def test_a_different_pr_id_is_refused() -> None:
         sim.step(other)
 
 
+def test_a_foreign_host_keeps_both_stored_refs() -> None:
+    base = gh()
+    sim = Sim(base)
+    other = new_pr("elsewhere.example", "example-org/widgets", 5)
+    other.update(pr_id=base["pr_id"])
+    plan = sim.step(other)
+    assert sim.row["pr"] == base["pr"] and sim.row["repo"] == base["repo"]
+    assert "pr" not in plan.fields and "repo" not in plan.fields
+
+
+def test_a_mismatched_pr_repo_pair_keeps_both_stored_refs() -> None:
+    base = gh()
+    sim = Sim(base)
+    bad = {**base, "repo": "github.com/example-org/other"}
+    plan = sim.step(bad)
+    assert "pr" not in plan.fields and "repo" not in plan.fields
+    assert sim.row["repo"] == base["repo"]
+
+
+@pytest.mark.parametrize("which", ["pr", "repo"])
+def test_one_invalid_ref_keeps_both_stored_refs(which: str) -> None:
+    base = gh()
+    sim = Sim(base)
+    plan = sim.step({**base, which: "not a ref"})
+    assert "pr" not in plan.fields and "repo" not in plan.fields
+
+
+def test_a_non_mapping_snapshot_is_malformed_not_a_pr_id_mismatch() -> None:
+    sim = Sim(gh())
+    for bad in (None, [], "x", 3):
+        with pytest.raises(MalformedSnapshot):
+            sim.step(bad)  # type: ignore[arg-type]
+    assert not issubclass(MalformedSnapshot, PrIdMismatch)
+
+
+@pytest.mark.parametrize("bad", [True, 0, -1, 2.0, "3", None])
+def test_persistent_after_must_be_a_positive_int(bad: Any) -> None:
+    sim = Sim(gh())
+    with pytest.raises(ValueError, match="persistent_after"):
+        sim.step(gh(), persistent_after=bad)
+
+
+def test_persistent_after_is_required() -> None:
+    sim = Sim(gh())
+    with pytest.raises(TypeError):
+        plan_snapshot(sim.state(), gh(), now=at(9))  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("status", ["unreachable"])
+def test_a_successful_snapshot_ends_unreachable(status: str) -> None:
+    base = gh()
+    sim = Sim(base)
+    sim.row["status"] = status
+    sim.step(base)
+    assert sim.row["status"] == "active"
+    sim.row["status"] = status
+    odd = {**base, "state": "weird"}
+    sim.step(odd)  # unreadable state
+    assert sim.row["status"] == "active"
+    sim.row["status"] = status
+    sim.step(closed(base))
+    assert (sim.row["status"], sim.row["terminal_kind"]) == ("terminal", "closed")
+
+
+def test_persistent_is_not_reported_for_a_terminal_result() -> None:
+    base = gh()
+    sim = Sim(base)
+    sim.step(incomplete(base, "threads"), persistent_after=2)
+    plan = sim.step(incomplete(closed(base), "threads"), persistent_after=2)
+    assert plan.persistent == ()
+    assert sim.counters() == {"threads": 2}
+
+
+def test_unchanged_snapshot_with_a_digest_and_no_flag_emits_nothing() -> None:
+    base = gh()
+    sim = Sim(base)
+    assert types(sim.step(base)) == []
+    assert sim.row["rebaseline"] == 0
+
+
+def test_forced_mapping_through_plan_snapshot() -> None:
+    base = gh()
+    pushed = gh(head={"sha": sha(2)})
+    for compare, expected in (
+        (lambda a, b: True, True), (lambda a, b: False, False), (None, None),
+    ):  # fmt: skip
+        sim = Sim(base)
+        (event,) = sim.step(pushed, forced=compare).events
+        assert event.payload["forced"] is expected
+
+
+def test_over_cap_part_never_emits_even_with_new_items() -> None:
+    base = gh()
+    sim = Sim(base)
+    huge = plus_threads(base, general("gh:ic:IC_new"))
+    huge["threads"] = huge["threads"] + [
+        thread(f"gh:rt:T{i}", [note(f"gh:rc:C{i}_{j}") for j in range(100)]) for i in range(101)
+    ]
+    for _ in range(2):
+        assert types(sim.step(huge)) == []
+
+
 # --- determinism, schemas, commit --------------------------------------------------------------
 
 
@@ -419,8 +559,8 @@ def test_plan_is_deterministic_and_leaves_inputs_alone() -> None:
     snap = busy(base, head=2)
     frozen = copy.deepcopy(snap)
     state = sim.state()
-    a = plan_snapshot(state, snap, now=at(9))
-    b = plan_snapshot(state, snap, now=at(9))
+    a = plan_snapshot(state, snap, now=at(9), persistent_after=5)
+    b = plan_snapshot(state, snap, now=at(9), persistent_after=5)
     assert snap == frozen
     assert a.fields == b.fields
     assert [(e.type, dict(e.payload)) for e in a.events] == [
@@ -488,6 +628,14 @@ def test_plan_fields_commit_and_events_validate_against_the_schema(store: Store)
         base["pr"], base["repo"], "terminal", "closed", 0, "2026-10-03T12:01:00.000000Z", "{}",
     )  # fmt: skip
     assert digest_from_json(row[7]) == sim.digest()
+
+
+@pytest.mark.parametrize(
+    "field,value", [("pr", "bad ref"), ("repo", "x" * 300), ("pr", 5), ("repo", None)]
+)
+def test_commit_snapshot_rejects_invalid_refs(store: Store, field: str, value: Any) -> None:
+    with pytest.raises(ValueError, match="valid reference"):
+        commit_snapshot(store, pr_id="p", expected_rev=0, snapshot_pr_id="p", fields={field: value})
 
 
 def test_fields_only_hold_writable_columns() -> None:

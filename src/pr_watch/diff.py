@@ -619,7 +619,7 @@ def diff(
     snap = _map(snapshot)
     repo, pr, pr_id = snap.get("repo"), snap.get("pr"), snap.get("pr_id")
     identity_ok = bool(
-        isinstance(repo, str) and REPO_RE.match(repo)
+        isinstance(repo, str) and len(repo) <= 256 and REPO_RE.match(repo)
         and isinstance(pr, str) and len(pr) <= 256 and PR_RE.match(pr)
         and isinstance(pr_id, str) and PR_ID_RE.match(pr_id)
     )  # fmt: skip
