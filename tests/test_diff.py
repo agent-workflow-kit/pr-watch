@@ -366,6 +366,22 @@ def test_gitlab_never_emits_review() -> None:
     ] == []
 
 
+def test_gitlab_group_named_pull_never_emits_review() -> None:
+    old = new_pr("gitlab.com", "pull/proj", backend="gitlab")
+    new = plus_reviews(old, review())
+    assert [e for e in run(old, new) if e.type == "review"] == []
+
+
+@pytest.mark.parametrize("url", [None, "missing"])
+def test_github_without_url_still_emits_review(url: Any) -> None:
+    old = gh(url=None)
+    if url == "missing":
+        del old["url"]
+    new = plus_reviews(old, review(state="approved", at=T2))
+    (event,) = [e for e in run(old, new) if e.type == "review"]
+    assert event.payload["review_id"] == "gh:r:PRR_new1"
+
+
 @pytest.mark.parametrize(
     "bad_id", ["gh:ic:bad id", "gh:xx:IC_1", "plain", "gl:n:0", "gh:ic:" + "a" * 120]
 )

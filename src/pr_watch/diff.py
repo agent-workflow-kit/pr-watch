@@ -192,8 +192,16 @@ def _pushed(ctx: Ctx) -> list[dict[str, Any]]:
 
 
 def _github_backed(snap: Mapping[str, Any]) -> bool:
+    """False only for a snapshot whose url positionally names a GitLab merge request.
+
+    A GitLab url ends `/merge_requests/<n>`; any other shape, or a missing url, is treated as
+    GitHub so a lost url never suppresses `review` (GitLab has no `gh:r:` review ids).
+    """
     url = snap.get("url")
-    return isinstance(url, str) and "pull" in urlsplit(url).path.split("/")
+    if not isinstance(url, str):
+        return True
+    parts = urlsplit(url).path.split("/")
+    return not (len(parts) >= 2 and parts[-2] == "merge_requests")
 
 
 def _review(ctx: Ctx) -> list[dict[str, Any]]:
