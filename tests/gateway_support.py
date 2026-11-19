@@ -136,11 +136,25 @@ def fake_gateway() -> Iterator[FakeGateway]:
         yield fake
 
 
+def _start_time(pid: int) -> str | None:
+    """Field 22 of /proc/<pid>/stat (clock ticks since boot): identifies a process with its pid."""
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return text.rsplit(")", 1)[1].split()[19]
+
+
 class Reaper:
-    """Kills exactly the processes it was told about (pidfd when available)."""
+    """Kills exactly the processes it was told about, never by name or pattern.
+
+    Each target is bound to its identity at track time: a pidfd where the interpreter has one,
+    else the pid plus its /proc start time (a recycled pid has another start time), else (no
+    /proc) only a direct child that is still unreaped.
+    """
 
     def __init__(self) -> None:
-        self._targets: list[tuple[int, int | None]] = []
+        self._targets: list[tuple[int, int | None, str | None]] = []
 
     def track(self, pid: int) -> None:
         """Remember `pid` for teardown; call as early as possible after launch."""
@@ -150,18 +164,19 @@ class Reaper:
                 fd = os.pidfd_open(pid)
             except OSError:  # already gone
                 return
-        self._targets.append((pid, fd))
+        self._targets.append((pid, fd, _start_time(pid)))
 
     def kill_all(self) -> None:
-        for pid, fd in self._targets:
+        for pid, fd, started in self._targets:
             try:
                 if fd is not None:
                     signal.pidfd_send_signal(fd, signal.SIGKILL)
-                else:
-                    # No pidfd: only a direct child that is still unreaped is certainly ours.
-                    if os.waitpid(pid, os.WNOHANG) == (0, 0):
+                elif started is not None:
+                    if _start_time(pid) == started:
                         os.kill(pid, signal.SIGKILL)
-                        os.waitpid(pid, 0)
+                elif os.waitpid(pid, os.WNOHANG) == (0, 0):
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
             except (ProcessLookupError, ChildProcessError):
                 pass
             finally:

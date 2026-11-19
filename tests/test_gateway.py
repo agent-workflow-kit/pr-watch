@@ -247,7 +247,7 @@ def test_an_unkillable_child_is_abandoned_not_waited_on_forever(
 ) -> None:
     monkeypatch.setattr(gateway, "_killpg", lambda pgid, sig: None)  # signals never land
     started = time.monotonic()
-    result = sh("sleep 60", timeout=0.2, term_grace=0.1, abandon_after=0.2)
+    result = sh("exec sleep 60", timeout=0.2, term_grace=0.1, abandon_after=0.2)
     assert result.abandoned and result.returncode is None and result.timed_out
     assert time.monotonic() - started < 3
 
