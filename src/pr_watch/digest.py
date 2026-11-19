@@ -167,6 +167,11 @@ def _scalar(new: object, check: Any, previous: Mapping[str, Any], key: str) -> A
 # --- identifiers -----------------------------------------------------------------------------
 
 
+def instant(value: object) -> datetime | None:
+    """A valid timestamp as an aware UTC datetime, else null (never raises)."""
+    return _instant(value)
+
+
 def _valid_ids(items: object, per_item: Any) -> list[str]:
     seen: set[str] = set()
     for item in items if isinstance(items, list) else ():
