@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -12,8 +13,11 @@ from typing import Any
 import pytest
 
 from pr_watch.digest import (
+    MAX_BLOCKED_BY,
     MAX_CHECKS,
+    MAX_REVIEWERS,
     MAX_SEEN,
+    PARTS,
     build_digest,
     check_key,
     comment_ids,
@@ -174,6 +178,8 @@ def test_github_digest_fields() -> None:
 
 
 def test_digest_has_exactly_the_documented_keys() -> None:
+    # The digest is an internal storage shape with no JSON schema under schemas/; the key list
+    # is specified in docs/interface.md, Digest.
     d = build_digest(gh())
     assert set(d) == {
         "head_sha", "state", "draft", "mergeable", "blocked_by", "ci", "review_decision",
@@ -430,6 +436,8 @@ def test_names_that_truncate_to_the_same_text_keep_distinct_keys() -> None:
 
 
 def test_key_is_taken_from_the_full_sanitized_value_not_the_truncated_one() -> None:
+    # forgectl pre-sanitizes text, so a raw control character and the literal marker text for it
+    # never both arrive in one snapshot; hashing the sanitized value is therefore collision-free.
     assert check_key("x" * 600 + "A", None) != check_key("x" * 600 + "B", None)
     assert check_key("a\x01b", None) == check_key("a<U+0001>b", None)
 
@@ -549,9 +557,19 @@ def test_unknown_ci_state_makes_the_ci_part_unreadable_and_carries_previous() ->
     assert d["baselined"]["ci"] is True
 
 
-def test_unreadable_ci_without_previous_is_null_and_unbaselined() -> None:
+EMPTY_CI = {
+    "state": None,
+    "head_sha": None,
+    "hold": 0,
+    "hold_to": None,
+    "checks": {},
+    "checks_more": 0,
+}
+
+
+def test_unreadable_ci_without_previous_is_the_empty_ci_and_unbaselined() -> None:
     d = build_digest(gh(ci={"state": "exploding"}))
-    assert d["ci"] is None
+    assert d["ci"] == EMPTY_CI
     assert d["baselined"]["ci"] is False
 
 
@@ -667,7 +685,7 @@ def test_incomplete_part_without_previous_is_empty_and_unbaselined() -> None:
     assert d["baselined"] == {"reviews": False, "threads": False, "ci": False}
     assert d["seen"] == {"comments": [], "reviews": []}
     assert d["reviewers"] == {} and d["review_decision"] is None and d["approvals_at_head"] is None
-    assert d["ci"] is None
+    assert d["ci"] == EMPTY_CI
     assert d["head_sha"] == snap["head"]["sha"]  # the PR object is always present
 
 
@@ -689,7 +707,7 @@ def test_corrupt_previous_is_ignored() -> None:
     snap = gh(incomplete=["ci"], complete=False)
     for previous in ({"ci": "x", "baselined": 4, "seen": 5, "reviewers": []}, {}, None):
         d = build_digest(snap, previous)  # type: ignore[arg-type]
-        assert d["ci"] is None and d["baselined"]["ci"] is False
+        assert d["ci"] == EMPTY_CI and d["baselined"]["ci"] is False
 
 
 def test_build_does_not_mutate_its_inputs() -> None:
@@ -698,3 +716,149 @@ def test_build_does_not_mutate_its_inputs() -> None:
     before = (copy.deepcopy(snap), copy.deepcopy(previous))
     build_digest(snap, previous)
     assert (snap, previous) == before
+
+
+# --- review round 1 --------------------------------------------------------------------------
+
+
+def _entry(**changes: Any) -> dict[str, Any]:
+    base = {"login": "u", "id": "1", "state": "approved", "commit_sha": None,
+            "at": "2026-10-02T09:00:00Z", "can_push": None}  # fmt: skip
+    return {**base, **changes}
+
+
+def _reviewers_of(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    snap = gh()
+    snap["latest_by_reviewer"] = entries
+    return build_digest(snap)["reviewers"]
+
+
+def test_duplicate_reviewers_rank_by_instant_not_by_text() -> None:
+    early_text_late_instant = _entry(state="approved", at="2026-10-02T09:00:00-05:00")  # 14:00Z
+    late_text_early_instant = _entry(state="changes_requested", at="2026-10-02T11:00:00+00:00")
+    for order in ([early_text_late_instant, late_text_early_instant],
+                  [late_text_early_instant, early_text_late_instant]):  # fmt: skip
+        assert _reviewers_of(order)["1"]["state"] == "approved"
+
+
+def test_duplicate_reviewers_unparseable_time_ranks_lowest() -> None:
+    bad = _entry(state="changes_requested", at="2026-13-45T99:00:00Z")
+    good = _entry(state="approved", at="2026-10-02T09:00:00Z")
+    assert _reviewers_of([bad, good])["1"]["state"] == "approved"
+    assert _reviewers_of([good, bad])["1"]["state"] == "approved"
+
+
+def test_duplicate_reviewers_full_tie_is_independent_of_input_order() -> None:
+    a = _entry(state="approved", can_push=True)
+    b = _entry(state="changes_requested", can_push=False)
+    c = _entry(state="dismissed", can_push=None)
+    results = {
+        json.dumps(_reviewers_of(list(order)), sort_keys=True)
+        for order in ([a, b, c], [c, b, a], [b, a, c])
+    }
+    assert len(results) == 1
+    assert _reviewers_of([a, b, c])["1"]["state"] == "changes_requested"
+
+
+def test_duplicate_reviewers_same_instant_ties_resolve_by_commit_then_can_push() -> None:
+    lo = _entry(commit_sha=sha(1), at="2026-10-02T09:00:00Z")
+    hi = _entry(commit_sha=sha(2), at="2026-10-02T10:00:00+01:00")  # the same instant
+    assert _reviewers_of([lo, hi])["1"]["commit_sha"] == sha(2)
+    assert _reviewers_of([hi, lo])["1"]["commit_sha"] == sha(2)
+    no, yes = _entry(can_push=False), _entry(can_push=True)
+    assert _reviewers_of([no, yes])["1"]["can_push"] is True
+    assert _reviewers_of([yes, no])["1"]["can_push"] is True
+
+
+def test_empty_ci_when_ci_is_incomplete_and_previous_ci_is_missing_or_malformed() -> None:
+    snap = gh(ci={"state": "exploding"})
+    assert build_digest(snap, {"ci": None})["ci"] == EMPTY_CI
+    assert build_digest(snap, {"ci": {"state": 5}})["ci"] == EMPTY_CI
+
+
+def test_blocked_by_is_bounded_to_the_smallest_keys() -> None:
+    items = [{"code": "other", "detail": f"d{i:04d}"} for i in range(MAX_BLOCKED_BY + 50)]
+    a = build_digest(gh(blocked_by=items))
+    b = build_digest(gh(blocked_by=list(reversed(items))))
+    assert len(a["blocked_by"]) == MAX_BLOCKED_BY == 100
+    assert a["blocked_by"][0]["detail"] == "d0000"
+    assert digest_to_json(a) == digest_to_json(b)
+
+
+def test_too_many_reviewers_make_the_reviews_part_incomplete() -> None:
+    snap = gh()
+    snap["latest_by_reviewer"] = [
+        _entry(id=str(i), login=f"u{i}") for i in range(MAX_REVIEWERS + 1)
+    ]
+    assert "reviews" in incomplete_parts(snap)
+    previous = build_digest(gh())
+    d = build_digest(snap, previous)
+    assert d["reviewers"] == previous["reviewers"]
+    snap["latest_by_reviewer"] = snap["latest_by_reviewer"][:MAX_REVIEWERS]
+    assert "reviews" not in incomplete_parts(snap)
+    assert len(build_digest(snap)["reviewers"]) == MAX_REVIEWERS == 1000
+
+
+@pytest.mark.parametrize("text", ['{"a": NaN}', '{"a": Infinity}', '{"a": -Infinity}'])
+def test_digest_from_json_rejects_non_finite_numbers(text: str) -> None:
+    assert digest_from_json(text) is None
+
+
+def test_previous_with_non_finite_numbers_is_shape_checked() -> None:
+    previous = build_digest(gh())
+    previous["ci"]["hold"] = math.nan
+    previous["reviewers"] = {"1": {"state": "approved", "at": math.inf}}
+    d = build_digest(gh(incomplete=["ci", "reviews"], complete=False), previous)
+    assert d["ci"] == EMPTY_CI
+    assert d["reviewers"] == {}
+    digest_to_json(d)
+
+
+def test_previous_with_a_huge_ci_state_is_bounded() -> None:
+    previous = build_digest(gh())
+    previous["ci"]["state"] = "x" * 1_000_000
+    d = build_digest(gh(incomplete=["ci"], complete=False), previous)
+    assert len(digest_to_json(d)) < 100_000
+
+
+def test_valid_previous_ci_and_reviewers_are_copied_for_incomplete_parts() -> None:
+    previous = build_digest(with_checks(gh(), [check("a", "failing")]))
+    d = build_digest(gh(incomplete=["ci", "reviews"], complete=False), previous)
+    assert d["ci"] == previous["ci"]
+    assert d["reviewers"] == previous["reviewers"]
+
+
+@pytest.mark.parametrize("snap", [None, [], "x", 5])
+def test_non_dict_snapshot_is_an_all_unknown_digest(snap: Any) -> None:
+    d = build_digest(snap)
+    digest_to_json(d)
+    assert d["head_sha"] is None and d["state"] is None
+    assert d["baselined"] == {"reviews": False, "threads": False, "ci": False}
+    assert incomplete_parts(snap) == frozenset(PARTS)
+
+
+def test_rebaseline_unbaselines_incomplete_parts_only() -> None:
+    previous = build_digest(gh())
+    snap = gh(incomplete=["threads"], complete=False)
+    assert build_digest(snap, previous)["baselined"]["threads"] is True
+    d = build_digest(snap, previous, rebaseline=True)
+    assert d["baselined"] == {"reviews": True, "threads": False, "ci": True}
+    assert d["seen"]["comments"] == previous["seen"]["comments"]  # old data is kept
+    assert build_digest(gh(), d, rebaseline=True)["baselined"]["threads"] is True
+
+
+def test_approvals_at_head_above_2_pow_53_is_unknown() -> None:
+    previous = build_digest(gh(approvals_at_head=2))
+    assert build_digest(gh(approvals_at_head=2**53), previous)["approvals_at_head"] == 2**53
+    assert build_digest(gh(approvals_at_head=2**53 + 1), previous)["approvals_at_head"] is None
+
+
+def test_checks_beyond_the_cap_keep_the_smallest_keys_and_only_those_get_display_names() -> None:
+    checks = [
+        check(f"job-{i}", "passing", f"https://example.org/{i}") for i in range(MAX_CHECKS + 5)
+    ]
+    d = build_digest(with_checks(gh(), checks))
+    expected = sorted(
+        check_key(f"job-{i}", f"https://example.org/{i}") for i in range(MAX_CHECKS + 5)
+    )
+    assert sorted(d["ci"]["checks"]) == expected[:MAX_CHECKS]
