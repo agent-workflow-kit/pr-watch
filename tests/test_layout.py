@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # docs/plan.md module map (stage in the comment). Later modules are stubs until their issue.
 MODULES = [
     "gateway", "config", "cli",  # stage 0
-    "refs", "forgectl_client",  # stage 1
+    "refs", "forgectl_client", "failures",  # stage 1
     "store", "watches",  # stage 2
     "digest", "diff",  # stage 3
     "poller",  # stage 4

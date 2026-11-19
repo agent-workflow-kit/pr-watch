@@ -21,8 +21,8 @@ What this module does (docs/interface.md: Failures, Version rule, Resolution):
 - Returns a structured raw `Outcome` and nothing more: the exit code, the parsed result (a
   complete one, or a partial `prs`/`whoami` object at exit 12), the parsed error envelope, the
   local failure (`too_large`, `killed`, `contract`) and the gateway's facts. Mapping an outcome to
-  a counter, a pause or a failure record is the failure table's job (TODO(#9)); exit codes above
-  128 and 137 are left to it as raw codes.
+  a counter, a pause or a failure record is the failure table's job (`pr_watch.failures`); exit
+  codes above 128 and 137 are left to it as raw codes.
 - Resolves the executable once against absolute `PATH` entries only and checks `--version`
   (`MIN_FORGECTL`) before every other call (cached once it succeeded): `ToolMissing` and
   `ToolTooOld` map to the exit 12 errors `tool_missing` and `tool_too_old`.
