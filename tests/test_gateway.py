@@ -291,8 +291,20 @@ def test_a_leader_that_exited_normally_is_not_waited_out_and_nothing_is_signalle
     assert sent == []
 
 
-def test_exit_racing_the_deadline_is_not_labelled_timed_out(reaper: Reaper) -> None:
-    result = sh("echo quick", timeout=0.05)
+def test_exit_racing_the_deadline_is_not_labelled_timed_out(
+    reaper: Reaper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The deadline has already passed when the loop first looks (timeout=1 ms), and the leader has
+    # exited by then: the exit wins, nothing is signalled, timed_out stays False.
+    real = gateway._Child.exited
+
+    def exited_once_dead(self: Any) -> bool:
+        while not real(self):
+            time.sleep(0.005)
+        return True
+
+    monkeypatch.setattr(gateway._Child, "exited", exited_once_dead)
+    result = sh("echo quick", timeout=0.001)
     assert (result.stdout, result.returncode) == ("quick\n", 0)
     assert not result.timed_out
 
@@ -495,7 +507,8 @@ def test_gateway_has_no_pattern_based_signalling() -> None:
     source = Path(gateway.__file__).read_text(encoding="utf-8")
     for forbidden in ("pkill", "killall", "pgrep", "os.kill(", "kill -"):
         assert forbidden not in source
-    assert source.count("_killpg(") == 1  # one choke point: _Child.signal_group
+    # Two call sites: _Child._send and the launch-window cleanup in _launch (exact leader pid).
+    assert source.count("_killpg(") == 2
 
 
 # --- launch failures and validation ----------------------------------------------------------
@@ -589,10 +602,33 @@ def test_a_cut_utf8_sequence_leaves_surrogate_escapes_callers_must_handle(reaper
     assert result.stdout.encode("utf-8", "replace")
 
 
-def test_a_fast_child_does_not_pay_a_full_poll_tick(reaper: Reaper) -> None:
-    # Generous bound (the old loop slept ~20 ms per call after EOF): median of several calls.
-    times = sorted(sh("true", timeout=10).elapsed for _ in range(9))
-    assert times[4] < 0.5
+def test_the_poll_interval_starts_tiny_and_caps_at_the_old_tick() -> None:
+    assert gateway._TICK_MIN <= 0.002
+    assert gateway._TICK == 0.02
+    ticks, tick = [], gateway._TICK_MIN
+    for _ in range(8):
+        ticks.append(tick)
+        tick = min(tick * 2, gateway._TICK)
+    assert ticks[0] <= 0.002 and ticks[-1] == gateway._TICK
+
+
+class _Interrupt(BaseException):
+    """Stands in for KeyboardInterrupt/SystemExit raised by a handler."""
+
+
+def _interrupted_wrap(proc: Any) -> Any:
+    raise _Interrupt
+
+
+def test_an_interrupt_between_popen_and_registration_leaves_no_live_child(
+    reaper: Reaper, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gateway, "_Child", _interrupted_wrap)
+    with pytest.raises(_Interrupt):
+        sh("sleep 60", timeout=30, term_grace=0.2)
+    pid = reaper._targets[0][0]
+    assert is_dead(pid)
+    assert gateway.live_pids() == []
 
 
 def test_an_exception_after_the_child_exists_stops_it_and_unregisters_it(

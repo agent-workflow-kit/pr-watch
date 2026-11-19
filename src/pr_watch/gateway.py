@@ -382,9 +382,19 @@ def _launch(request: Request, started: list[_Child] | None = None) -> _Child:
         )
     except OSError as exc:
         raise LaunchError(f"{request.argv[0]}: cannot start: {exc}") from exc
-    child = _Child(proc)
-    if started is not None:
-        started.append(child)
+    try:  # nothing may interrupt the gap between Popen returning and the child being tracked
+        child = _Child(proc)
+        if started is not None:
+            started.append(child)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            _killpg(proc.pid, signal.SIGKILL)  # the leader is unreaped: its group id is ours
+        proc.wait()
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                with contextlib.suppress(OSError):
+                    stream.close()
+        raise
     _register(child)
     return child
 
