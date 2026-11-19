@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import json
 import os
 import stat
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -16,6 +19,7 @@ from typing import Any
 import pytest
 
 from pr_watch import log as log_module
+from pr_watch import state_dir as sd
 from pr_watch.config import ConfigWarning
 from pr_watch.log import EVENT_FIELDS, MAX_LINE_BYTES, Log
 from pr_watch.state_dir import StateDir, open_state_dir
@@ -133,25 +137,29 @@ def test_a_record_is_one_ascii_line_ending_in_newline(state: StateDir) -> None:
 
 
 @pytest.mark.parametrize(
-    ("event", "fields"),
+    ("event", "fields", "reason"),
     [
-        ("nope", {}),
-        ("config_warning", {}),  # missing required key
-        ("config_warning", {"key": "k", "extra": 1}),  # unknown field
-        ("config_warning", {"key": "k", "ts": "x"}),  # framing field smuggled in
+        ("nope", {}, "unknown log event"),
+        ("config_warning", {}, "needs"),  # missing required key
+        ("config_warning", {"key": "k", "extra": 1}, "no fields"),  # unknown field
+        ("config_warning", {"key": "k", "ts": "x"}, "set by the writer"),  # framing smuggled in
     ],
 )
-def test_a_malformed_call_is_a_programming_error(
-    state: StateDir, event: str, fields: dict[str, Any]
+def test_a_malformed_call_is_dropped_and_reported_once_not_raised(
+    state: StateDir, event: str, fields: dict[str, Any], reason: str
 ) -> None:
-    with pytest.raises(ValueError):
-        Log(state).write(event, "warn", **fields)
+    problems: list[str] = []
+    lg = Log(state, on_error=problems.append)
+    assert lg.write(event, "warn", **fields) is False
+    assert lg.write(event, "warn", **fields) is False
     assert not log_path(state).exists()
+    assert len(problems) == 1 and "invalid record: " in problems[0] and reason in problems[0]
 
 
-def test_unknown_level_is_a_programming_error(state: StateDir) -> None:
-    with pytest.raises(ValueError):
-        Log(state).write("config_warning", "fatal", key="k")
+def test_unknown_level_is_dropped_and_reported(state: StateDir) -> None:
+    problems: list[str] = []
+    assert Log(state, on_error=problems.append).write("config_warning", "fatal", key="k") is False
+    assert "unknown log level" in problems[0] and not log_path(state).exists()
 
 
 # --- hostile text ----------------------------------------------------------------------------
@@ -195,8 +203,93 @@ def test_worst_case_record_fits_the_single_write_bound(state: StateDir) -> None:
 
 
 def test_non_string_junk_in_a_string_field_is_not_logged_as_code(state: StateDir) -> None:
-    with pytest.raises(ValueError):
-        Log(state).write("config_warning", "warn", key=object())
+    problems: list[str] = []
+    assert Log(state, on_error=problems.append).write("config_warning", "warn", key=object()) is (
+        False
+    )
+    assert not log_path(state).exists() and len(problems) == 1
+
+
+def _with(event: str, **changes: Any) -> dict[str, Any]:
+    return {**SAMPLES[event], **changes}
+
+
+HOSTILE: list[tuple[str, dict[str, Any]]] = [
+    ("poll_end", _with("poll_end", errors=True)),  # bool for an integer
+    ("poll_end", _with("poll_end", errors=-1)),  # below the minimum
+    ("poll_end", _with("poll_end", errors=1.0)),  # float for an integer
+    ("poll_end", _with("poll_end", truncated=1)),  # int for a boolean
+    ("poll_end", _with("poll_end", errors="1")),
+    ("hook_cap", _with("hook_cap", skipped=0)),  # minimum is 1
+    ("config_warning", {"key": "k", "message": None}),  # null for a non-nullable
+    ("config_warning", {"key": None}),
+    ("hook_run", _with("hook_run", hook=None)),
+    ("hook_run", _with("hook_run", exit_code=True)),
+    ("hook_run", _with("hook_run", event_id="ev-NOPE")),
+    ("pr_status", _with("pr_status", pr_id="x" * 129)),  # over-long, never truncated
+    ("pr_status", _with("pr_status", pr_id="a..b")),
+    ("pr_status", _with("pr_status", pr="github.com/o/r#0")),
+    ("pr_status", _with("pr_status", pr=PR + "\n")),  # `$`-style trailing newline
+    ("pr_status", _with("pr_status", to="gone")),
+    ("host_failed", _with("host_failed", host="Evil Host")),
+    ("host_failed", _with("host_failed", code="bad code")),
+    ("host_summary", _with("host_summary", paused_until="tomorrow")),
+    ("commit_skipped", _with("commit_skipped", reason="x" * 65)),
+]
+
+
+@pytest.mark.parametrize(("event", "fields"), HOSTILE)
+def test_a_schema_invalid_record_is_never_written(
+    state: StateDir, event: str, fields: dict[str, Any]
+) -> None:
+    problems: list[str] = []
+    assert Log(state, on_error=problems.append).write(event, "info", **fields) is False
+    assert not log_path(state).exists()
+    assert len(problems) == 1 and problems[0].startswith("log.jsonl not written: invalid record")
+
+
+def test_identifiers_are_never_truncated(state: StateDir) -> None:
+    long_pr = "github.com/" + "a" * 500 + "/r#1"
+    assert Log(state).write("pr_status", "info", **_with("pr_status", pr=long_pr))
+    (rec,) = records(log_path(state))
+    assert rec["pr"] == long_pr
+    assert_valid("log", rec)
+
+
+def _field_schema(name: str) -> dict[str, Any]:
+    """The schema of a log field (the first branch that defines it), `$ref` resolved."""
+    for branch in load_schema("log")["oneOf"]:
+        if name in branch["properties"]:
+            spec = branch["properties"][name]
+            break
+    else:
+        raise AssertionError(name)
+    if "oneOf" in spec:
+        spec = next(o for o in spec["oneOf"] if o.get("type") != "null")
+    if "$ref" in spec:
+        spec = load_schema("defs")["$defs"][spec["$ref"].split("/")[-1]]
+    return spec
+
+
+def test_value_tables_match_the_schema() -> None:
+    for name, pattern in log_module.PATTERNS.items():
+        assert f"^{pattern}$" == _field_schema(name)["pattern"], name
+    for name, values in log_module.ENUMS.items():
+        assert list(values) == _field_schema(name)["enum"], name
+    for name, minimum in log_module._INTS.items():
+        spec = _field_schema(name)
+        assert spec.get("minimum") == minimum, name
+    for name, limit in log_module._TEXT_LIMITS.items():
+        assert _field_schema(name)["maxLength"] == limit, name
+    for name in log_module._BOOLS:
+        assert _field_schema(name)["type"] == "boolean", name
+    nullable = set()
+    for branch in load_schema("log")["oneOf"]:
+        for name, spec in branch["properties"].items():
+            kinds = [o.get("type") for o in spec.get("oneOf", [])] + [spec.get("type")]
+            if "null" in kinds or (isinstance(spec.get("type"), list) and "null" in spec["type"]):
+                nullable.add(name)
+    assert nullable == set(log_module._NULLABLE)
 
 
 def test_config_warnings_become_records(state: StateDir) -> None:
@@ -273,7 +366,7 @@ def test_a_group_writable_log_is_refused(state: StateDir) -> None:
 def test_another_users_log_is_refused(state: StateDir, monkeypatch: pytest.MonkeyPatch) -> None:
     log_path(state).write_text("")
     other = os.geteuid() + 1
-    monkeypatch.setattr(log_module.os, "geteuid", lambda: other)
+    monkeypatch.setattr(sd, "_geteuid", lambda: other)
     problems: list[str] = []
     assert Log(state, on_error=problems.append).write("config_warning", "warn", key="k") is False
     assert log_path(state).read_text() == ""
@@ -289,8 +382,9 @@ def test_a_world_readable_log_is_accepted(state: StateDir) -> None:
 # --- failures never crash the command --------------------------------------------------------
 
 
-def _patch_os(monkeypatch: pytest.MonkeyPatch, name: str, fn: Callable[..., Any]) -> None:
-    monkeypatch.setattr(log_module.os, name, fn)
+def _seam(monkeypatch: pytest.MonkeyPatch, name: str, fn: Callable[..., Any]) -> None:
+    """Replace a seam of the writer (a module-level name, never the shared `os` module)."""
+    monkeypatch.setattr(log_module, name, fn)
 
 
 @pytest.mark.parametrize("code", [errno.ENOSPC, errno.EROFS, errno.EACCES, errno.EDQUOT, errno.EIO])
@@ -300,7 +394,7 @@ def test_write_failures_are_reported_once_and_do_not_raise(
     def failing(fd: int, data: bytes) -> int:
         raise OSError(code, os.strerror(code))
 
-    _patch_os(monkeypatch, "write", failing)
+    _seam(monkeypatch, "_write", failing)
     problems: list[str] = []
     lg = Log(state, on_error=problems.append)
     assert lg.write("config_warning", "warn", key="a") is False
@@ -312,14 +406,10 @@ def test_write_failures_are_reported_once_and_do_not_raise(
 def test_open_failures_are_reported_once_and_do_not_raise(
     state: StateDir, monkeypatch: pytest.MonkeyPatch, code: int
 ) -> None:
-    real_open = os.open
-
     def failing(path: Any, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
-        if path == "log.jsonl":
-            raise OSError(code, os.strerror(code))
-        return real_open(path, flags, mode, dir_fd=dir_fd)
+        raise OSError(code, os.strerror(code))
 
-    _patch_os(monkeypatch, "open", failing)
+    _seam(monkeypatch, "_open", failing)
     problems: list[str] = []
     assert Log(state, on_error=problems.append).write("config_warning", "warn", key="k") is False
     assert len(problems) == 1
@@ -337,7 +427,7 @@ def test_a_short_write_terminates_the_fragment_so_the_next_record_parses(
             return real_write(fd, data[: len(data) // 2])
         return real_write(fd, data)
 
-    _patch_os(monkeypatch, "write", short)
+    _seam(monkeypatch, "_write", short)
     lg = Log(state, on_error=lambda _: None)
     assert lg.write("config_warning", "warn", key="lost") is False
     assert lg.write("config_warning", "warn", key="kept") is True
@@ -357,6 +447,10 @@ def test_a_null_log_writes_nothing_and_never_raises() -> None:
 # --- rotation --------------------------------------------------------------------------------
 
 
+def _log_files(directory: Path) -> list[str]:
+    return sorted(p.name for p in directory.iterdir() if p.name.startswith("log.jsonl"))
+
+
 def _fill(lg: Log, count: int, tag: str) -> None:
     for i in range(count):
         assert lg.write("config_warning", "warn", key=f"{tag}{i}", message="m" * 100)
@@ -365,7 +459,7 @@ def _fill(lg: Log, count: int, tag: str) -> None:
 def test_rotation_keeps_three_files_in_order(state: StateDir) -> None:
     lg = Log(state, max_bytes=2000)
     _fill(lg, 80, "k")
-    names = sorted(p.name for p in state.path.iterdir())
+    names = _log_files(state.path)
     assert names == ["log.jsonl", "log.jsonl.1", "log.jsonl.2", "log.jsonl.3"]
     seen = []
     for name in ("log.jsonl.3", "log.jsonl.2", "log.jsonl.1", "log.jsonl"):
@@ -388,7 +482,7 @@ def test_default_cap_is_ten_mebibytes_and_three_files() -> None:
 
 def test_below_the_cap_nothing_rotates(state: StateDir) -> None:
     _fill(Log(state), 20, "k")
-    assert [p.name for p in state.path.iterdir()] == ["log.jsonl"]
+    assert _log_files(state.path) == ["log.jsonl"]
 
 
 def test_rotation_does_not_follow_planted_symlinks(state: StateDir, tmp_path: Path) -> None:
@@ -410,7 +504,7 @@ def test_rotation_failure_does_not_lose_the_record(
     def failing(*a: Any, **k: Any) -> None:
         raise OSError(errno.EROFS, "Read-only file system")
 
-    _patch_os(monkeypatch, "rename", failing)
+    _seam(monkeypatch, "_rename", failing)
     assert lg.write("config_warning", "warn", key="after", message="m" * 100)
     assert records(log_path(state))[-1]["key"] == "after"
 
@@ -421,6 +515,95 @@ def test_a_log_over_the_cap_at_start_rotates_on_first_write(state: StateDir) -> 
     Log(state, max_bytes=1000).write("config_warning", "warn", key="k")
     assert (state.path / "log.jsonl.1").read_text().startswith("xxx")
     assert [r["key"] for r in records(log_path(state))] == ["k"]
+
+
+def test_a_busy_lock_skips_rotation_within_a_bound_and_still_appends(state: StateDir) -> None:
+    lg = Log(state, max_bytes=500, lock_wait=0.2)
+    _fill(lg, 3, "a")
+    holder = os.open(state.path, os.O_RDONLY | os.O_DIRECTORY)
+    fcntl.flock(holder, fcntl.LOCK_EX)  # another open file description: it conflicts
+    try:
+        start = time.monotonic()
+        assert lg.write("config_warning", "warn", key="after", message="m" * 100)
+        assert time.monotonic() - start < 3
+    finally:
+        os.close(holder)
+    assert _log_files(state.path) == ["log.jsonl"]
+    assert records(log_path(state))[-1]["key"] == "after"
+
+
+def test_only_flock_errors_end_the_lock_attempt(
+    state: StateDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Interrupt(Exception):
+        pass
+
+    def raising(fd: int, op: int) -> None:
+        raise Interrupt  # e.g. a signal handler that raises while flock waits
+
+    monkeypatch.setattr(log_module.fcntl, "flock", raising)
+    lg = Log(state, max_bytes=500)
+    _fill(Log(state), 6, "a")
+    with pytest.raises(Interrupt):
+        lg.write("config_warning", "warn", key="b", message="m" * 100)
+
+
+def test_a_planted_empty_directory_in_a_slot_does_not_stop_rotation(state: StateDir) -> None:
+    (state.path / "log.jsonl.3").mkdir()
+    problems: list[str] = []
+    _fill(Log(state, max_bytes=800, on_error=problems.append), 40, "k")
+    assert problems == []
+    assert (state.path / "log.jsonl.1").is_file() and (state.path / "log.jsonl.3").is_file()
+
+
+def test_a_non_empty_directory_in_a_slot_is_reported_once_and_the_record_kept(
+    state: StateDir,
+) -> None:
+    stuck = state.path / "log.jsonl.2"
+    stuck.mkdir()
+    (stuck / "x").write_text("keep")
+    problems: list[str] = []
+    lg = Log(state, max_bytes=500, on_error=problems.append)
+    _fill(lg, 8, "k")  # every write still succeeds
+    assert len(problems) == 1 and "rotation failed" in problems[0]
+    assert (stuck / "x").read_text() == "keep"
+    assert records(log_path(state))[-1]["key"] == "k7"
+
+
+def test_a_restrictive_umask_does_not_leave_an_unwritable_log(state: StateDir) -> None:
+    old = os.umask(0o277)
+    try:
+        lg = Log(state)
+        assert lg.write("config_warning", "warn", key="a")
+        assert stat.S_IMODE(log_path(state).stat().st_mode) == 0o600
+        assert lg.write("config_warning", "warn", key="b")
+    finally:
+        os.umask(old)
+    assert [r["key"] for r in records(log_path(state))] == ["a", "b"]
+
+
+def test_an_existing_file_mode_is_never_changed(state: StateDir) -> None:
+    log_path(state).write_text("")
+    log_path(state).chmod(0o640)
+    assert Log(state).write("config_warning", "warn", key="k") is True
+    assert stat.S_IMODE(log_path(state).stat().st_mode) == 0o640
+
+
+def test_rotation_is_serialized_between_threads(state: StateDir) -> None:
+    lg = Log(state, max_bytes=500)
+    _fill(Log(state), 6, "a")
+    done = threading.Event()
+    with log_module._ROTATE_LOCK:
+        worker = threading.Thread(
+            target=lambda: (
+                lg.write("config_warning", "warn", key="b", message="m" * 100),
+                done.set(),
+            )  # fmt: skip
+        )
+        worker.start()
+        assert not done.wait(0.3)  # blocked on the rotation lock
+    worker.join(timeout=10)
+    assert done.is_set()
 
 
 # --- concurrent writers ----------------------------------------------------------------------
@@ -471,7 +654,7 @@ def test_concurrent_rotation_keeps_every_file_valid_and_bounded(tmp_path: Path) 
     directory = tmp_path / "pr-watch"
     open_state_dir(directory).close()
     _run_workers(directory, workers=3, count=60, cap=6000)
-    names = sorted(p.name for p in directory.iterdir())
+    names = _log_files(directory)
     assert set(names) <= {"log.jsonl", "log.jsonl.1", "log.jsonl.2", "log.jsonl.3"}
     total = 0
     for name in names:

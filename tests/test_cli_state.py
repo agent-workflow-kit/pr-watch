@@ -178,10 +178,10 @@ def test_a_log_failure_never_changes_the_result_and_warns_once_on_stderr(
     def failing(fd: int, data: bytes) -> int:
         raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
 
-    monkeypatch.setattr(log_module.os, "write", failing)
+    monkeypatch.setattr(log_module, "_write", failing)
     code, out, err = run(capsys, "--json", "prune")
     assert code == 0 and json.loads(out)["ok"] is True
-    assert err.count("log.jsonl not written") == 1 and "No space left" in err
+    assert err.count("pr-watch: log.jsonl not written: ") == 1 and "No space left" in err
 
 
 def test_quiet_silences_the_log_failure_line(
@@ -190,10 +190,15 @@ def test_quiet_silences_the_log_failure_line(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("PR_WATCH_BOGUS_ONE", "1")
-    monkeypatch.setattr(
-        log_module.os, "write", lambda fd, data: (_ for _ in ()).throw(OSError(5, "x"))
-    )
+    attempts: list[int] = []
+
+    def failing(fd: int, data: bytes) -> int:
+        attempts.append(fd)
+        raise OSError(5, "x")
+
+    monkeypatch.setattr(log_module, "_write", failing)
     code, _, err = run(capsys, "--quiet", "prune")
+    assert attempts  # the write was attempted and failed; only the stderr line is silenced
     assert code == 0 and err == ""
 
 
@@ -212,3 +217,44 @@ def test_a_symlinked_log_is_skipped_with_a_stderr_line_and_the_command_succeeds(
     code, _, err = run(capsys, "prune")
     assert code == 0 and "log.jsonl not written" in err
     assert victim.read_text() == "precious\n"
+
+
+def test_an_unsafe_hooks_cwd_exits_12_with_a_schema_valid_envelope(
+    stubs: list[tuple[Context, Any]],  # noqa: F811
+    state_dir: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state_dir.mkdir(mode=0o700, parents=True)
+    (state_dir / "hooks-cwd").symlink_to(tmp_path)
+    code, out, err = run(capsys, "--json", "prune")
+    assert code == 12 and stubs == []
+    error = envelope_of(out)  # validates cli/error
+    assert error["code"] == "state_unsafe" and "hooks-cwd is a symlink" in error["message"]
+    assert err == f"pr-watch: error: {error['message']}\n"
+
+
+def test_an_unsafe_cron_lock_exits_12_with_a_schema_valid_envelope(
+    stubs: list[tuple[Context, Any]],  # noqa: F811
+    state_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state_dir.mkdir(mode=0o700, parents=True)
+    (state_dir / "cron.lock").write_text("")
+    (state_dir / "cron.lock").chmod(0o666)
+    code, out, _ = run(capsys, "--json", "poll")
+    assert code == 12 and stubs == []
+    error = envelope_of(out)
+    assert (
+        error["code"] == "state_unsafe"
+        and "cron.lock is group- or world-writable" in (error["message"])
+    )
+
+
+def test_a_command_creates_hooks_cwd(
+    stubs: list[tuple[Context, Any]],  # noqa: F811
+    state_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert run(capsys, "list")[0] == 0
+    assert stat.S_IMODE((state_dir / "hooks-cwd").stat().st_mode) == 0o700
