@@ -1040,6 +1040,23 @@ def test_pad_on_prs_with_nothing_listed_is_exit_98(fake: FakeForgectl) -> None:
     assert_fake_refusal(fake.run("prs", "--author", "me"), "pad needs")
 
 
+def test_a_partial_prs_that_cannot_be_padded_is_a_clean_refusal(fake: FakeForgectl) -> None:
+    fake.host("gitlab.com", me="user-3")
+    fake.fail("prs", "network_error", host="gitlab.com")
+    fake.oversize("prs", 50_000)
+    proc = fake.run("prs", "--author", "x", "--json")
+    assert "Traceback" not in proc.stderr
+    assert_fake_refusal(proc, "pad needs")
+
+
+def test_one_pad_rule_on_two_hosts_pads_once(fake: FakeForgectl) -> None:
+    fake.host("gitlab.com", me="user-3")
+    fake.add(new_pr())
+    fake.oversize("prs", 50_000)
+    out = json.loads(fake.run("prs", "--author", "me", "--json").stdout)
+    assert 50_000 < len(out["items"][0]["title"]) < 100_000
+
+
 # --- prs with several hosts ----------------------------------------------------------------
 
 

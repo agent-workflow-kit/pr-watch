@@ -1178,8 +1178,8 @@ def run_action(session: Session, action: dict[str, Any], args: Namespace | None)
         time.sleep(min(float(action.get("seconds", 0)), MAX_HANG_SECONDS))
     if kind == "orphan":
         spawn_pipe_holder(session, float(action.get("seconds", MAX_DESCENDANT_SECONDS)))
-    if kind in POST_KINDS:
-        session.post_actions.append(action)
+    if kind in POST_KINDS and not any(seen is action for seen in session.post_actions):
+        session.post_actions.append(action)  # once per rule, however many hosts it fired for
 
 
 def spawn_pipe_holder(session: Session, seconds: float) -> None:
@@ -1635,8 +1635,12 @@ def run(argv: list[str], env: Any = None) -> int:
         command = args.command
         exit_code = execute(session, args, argv, out)
     except ForgectlError as err:
-        out.error(err, command=command, json_mode=json_mode)
-        exit_code = err.exit_code
+        try:
+            out.error(err, command=command, json_mode=json_mode)
+            exit_code = err.exit_code
+        except FakeBug as bug:  # a partial answer the scripted post actions cannot be applied to
+            _refuse(out, str(bug))
+            exit_code = FAKE_EXIT
     except RawExit as raw:
         exit_code = raw_answer(raw.action, out)
     except FakeBug as bug:
