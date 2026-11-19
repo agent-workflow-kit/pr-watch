@@ -21,6 +21,7 @@ import json
 import os
 import signal
 import subprocess
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -415,7 +416,7 @@ class FakeForgectl:
                 order.append(record["id"])
             elif record["phase"] == "end":
                 ends[record["id"]] = record
-            else:
+            elif record["phase"] == "descendant":
                 kids.setdefault(record["id"], []).append(record["pid"])
         result = []
         for call_id in order:
@@ -428,6 +429,16 @@ class FakeForgectl:
             if command is None or call.command == command:
                 result.append(call)
         return result
+
+    def wait_ready(self, timeout: float = 30.0) -> None:
+        """Block until a call's `ignore_term` hang has installed its SIGTERM-ignore handler."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            lines = (self.dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()
+            if any(json.loads(line)["phase"] == "ready" for line in lines):
+                return
+            time.sleep(0.02)
+        raise AssertionError("the fake never reported that it ignores SIGTERM")
 
     def argvs(self, command: str | None = None) -> list[list[str]]:
         return [c.argv for c in self.calls(command)]

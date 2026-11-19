@@ -972,6 +972,10 @@ class Session:
             }
         )  # fmt: skip
 
+    def log_ready(self) -> None:
+        """Say that the scripted behaviour is in place (SIGTERM ignored, descendant logged)."""
+        self._append({"phase": "ready", "id": self.call_id, "ts": time.time()})
+
     def log_descendant(self, pid: int) -> None:
         self._append(
             {"phase": "descendant", "id": self.call_id, "pid": pid, "start_ticks": start_ticks(pid)}
@@ -1198,8 +1202,12 @@ def hang(session: Session, action: dict[str, Any], args: Namespace | None) -> No
     seconds = min(float(action.get("seconds", MAX_HANG_SECONDS)), MAX_HANG_SECONDS)
     if action.get("ignore_term"):
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        if not action.get("descendant"):
+            session.log_ready()  # tests wait for this before signalling
     if action.get("descendant"):
         spawn_pipe_holder(session, seconds)
+        if action.get("ignore_term"):
+            session.log_ready()  # after the holder is logged, so a test that waits sees it
     budget = getattr(args, "timeout", None)
     if action.get("respect_timeout") and budget is not None:
         time.sleep(min(budget, seconds))
