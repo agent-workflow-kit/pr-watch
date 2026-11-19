@@ -4,13 +4,13 @@ environment, per-host and per-repo overrides, hostile YAML and the ownership and
 from __future__ import annotations
 
 import os
-import stat
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 import pr_watch.config as config_module
 from pr_watch.config import (
@@ -493,7 +493,7 @@ def test_retention_below_30_days_or_not_whole_days_is_refused_not_clamped(
     assert err.key == "retention.events"
 
 
-@pytest.mark.parametrize("value", ["30d", "31d", "99d", "100d", "365d", "9999d"])
+@pytest.mark.parametrize("value", ["30d", "31d", "99d", "100d", "365d", "3650d"])
 def test_retention_accepts_whole_days_of_at_least_30(
     cfgdir: Path, write: Write, value: str
 ) -> None:
@@ -764,7 +764,7 @@ def test_env_bool_parse_errors_name_the_variable(isolated_env: Path, value: str)
 
 
 @pytest.mark.parametrize(
-    "value", ["abc", "1.5", " 5", "5 ", "+5", "1_0", "0x10", "", "٣", "5\n", "9" * 400]
+    "value", ["abc", "1.5", " 5", "5 ", "+5", "1_0", "0x10", "", "٣", "5\n", "9" * 400, "007", "-"]
 )
 def test_env_integer_parse_errors_name_the_variable(isolated_env: Path, value: str) -> None:
     with pytest.raises(ConfigError) as info:
@@ -935,8 +935,9 @@ def test_repo_override_false_beats_global_true(cfgdir: Path, write: Write) -> No
 
 def test_config_is_immutable(isolated_env: Path) -> None:
     c = load().config
-    with pytest.raises(Exception):  # noqa: B017 (pydantic ValidationError)
+    with pytest.raises(ValidationError) as info:
         c.detect_force_push = True  # type: ignore[misc]
+    assert info.value.errors()[0]["type"] == "frozen_instance"
 
 
 # --- ownership and modes -----------------------------------------------------------------------
@@ -1084,5 +1085,195 @@ def test_config_error_is_typed_for_the_cli_frame() -> None:
     err = ConfigError(source="f.yaml", key="poll.concurrency", message="must be at most 64")
     assert err.code == "config_invalid"
     assert str(err) == "f.yaml: poll.concurrency: must be at most 64"
-    assert isinstance(err, Exception)
-    assert stat.S_ISREG(os.stat(ROOT / "pyproject.toml").st_mode)
+
+
+# --- round 1 review fixes ----------------------------------------------------------------------
+# R1: bounded magnitudes
+
+
+@pytest.mark.parametrize(
+    "value", ["99999999999999d", "9" * 4000 + "s", "3651d", "87601h", "999999999d", "0d1"]
+)
+def test_r1_huge_durations_fail_naming_the_key(cfgdir: Path, write: Write, value: str) -> None:
+    err = invalid(cfgdir, write, f"poll: {{overlap: '{value}'}}\n")
+    assert err.key == "poll.overlap"
+    assert value not in str(err)
+
+
+def test_r1_the_largest_duration_is_3650_days(cfgdir: Path, write: Write) -> None:
+    assert one_file(cfgdir, write, "poll: {overlap: 3650d}\n").poll.overlap == "3650d"
+    assert one_file(cfgdir, write, "poll: {overlap: 87600h}\n").poll.overlap == "87600h"
+    assert duration_ms("3650d") == 3650 * 86_400_000
+
+
+@pytest.mark.parametrize("key", ["retention.events", "poll.interval_hint"])
+def test_r1_huge_retention_and_interval_fail_naming_the_key(
+    cfgdir: Path, write: Write, key: str
+) -> None:
+    group, name = key.split(".")
+    unit = "d" if group == "retention" else "m"
+    err = invalid(cfgdir, write, f"{group}: {{{name}: '{'9' * 4000}{unit}'}}\n")
+    assert err.key == key
+
+
+@pytest.mark.parametrize("value", [1_000_001, 10**30])
+def test_r1_host_low_water_is_bounded(cfgdir: Path, write: Write, value: int) -> None:
+    assert invalid(cfgdir, write, f"poll: {{host_low_water: {value}}}\n").key == (
+        "poll.host_low_water"
+    )
+    assert one_file(cfgdir, write, "poll: {host_low_water: 1000000}\n").poll.host_low_water == (
+        1_000_000
+    )
+
+
+# R2: control characters
+
+
+@pytest.mark.parametrize("bad", ["\\x00", "\\x1b", "\\x07", "\\x7f", "\\x85", "\\r", "\\n"])
+def test_r2_control_characters_are_refused_in_names_and_paths(
+    cfgdir: Path, write: Write, bad: str
+) -> None:
+    assert invalid(cfgdir, write, f'me: {{name: "a{bad}b"}}\n').key == "me.name"
+    assert invalid(cfgdir, write, f'cron: {{env_file: "/a{bad}b"}}\n').key == "cron.env_file"
+
+
+@pytest.mark.parametrize("bad", ["\\x00", "\\x1b", "\\x7f", "\\x85", "\\r", "\\x0b"])
+def test_r2_control_characters_are_refused_in_hook_commands(
+    cfgdir: Path, write: Write, bad: str
+) -> None:
+    err = invalid(cfgdir, write, f'hooks: {{on-ci: [{{cmd: "echo a{bad}b"}}]}}\n')
+    assert err.key == "hooks.on-ci.0.cmd"
+
+
+def test_r2_hook_commands_may_hold_newlines_and_tabs(cfgdir: Path, write: Write) -> None:
+    c = one_file(cfgdir, write, 'hooks: {on-ci: [{cmd: "a\\n\\tb"}]}\n')
+    assert c.hooks.on_ci[0].cmd == "a\n\tb"
+
+
+@pytest.mark.parametrize("cmd", [" ", "   ", "\\n", "\\t \\n"])
+def test_r2_blank_hook_commands_are_refused(cfgdir: Path, write: Write, cmd: str) -> None:
+    err = invalid(cfgdir, write, f'hooks: {{on-ci: [{{cmd: "{cmd}"}}]}}\n')
+    assert err.key == "hooks.on-ci.0.cmd"
+
+
+def test_r2_env_me_name_with_control_characters_is_refused(isolated_env: Path) -> None:
+    with pytest.raises(ConfigError, match="PR_WATCH_ME__NAME"):
+        load(env={"PR_WATCH_ME__NAME": "a\x00b"})
+
+
+# R3: repo ids match case-insensitively
+
+
+def test_r3_repo_settings_ignore_case(cfgdir: Path, write: Write) -> None:
+    c = one_file(cfgdir, write, "repos: {github.com/Org/Repo: {ci: {settle_polls: 3}}}\n")
+    for repo_id in ("github.com/Org/Repo", "github.com/org/repo", "GitHub.com/ORG/REPO"):
+        assert c.repo_settings(repo_id).settle_polls == 3
+
+
+def test_r3_repos_keys_differing_only_in_case_are_refused(cfgdir: Path, write: Write) -> None:
+    err = invalid(cfgdir, write, "repos: {h/o/R: {}, h/o/r: {}}\n")
+    assert err.key is not None and err.key.startswith("repos")
+    assert "case" in str(err)
+
+
+def test_r3_case_duplicates_across_files_are_refused(
+    cfgdir: Path, dropins: Path, write: Write
+) -> None:
+    write(cfgdir / "config.yaml", "repos: {h/o/R: {}}\n")
+    write(dropins / "10.yaml", "repos: {h/o/r: {}}\n")
+    with pytest.raises(ConfigError) as info:
+        load()
+    assert info.value.key is not None and info.value.key.startswith("repos")
+
+
+# R4: warnings fit schemas/log.json
+
+
+def test_r4_warnings_validate_against_the_log_schema(isolated_env: Path, write: Write) -> None:
+    from tests.harness import assert_valid
+
+    env = {
+        "PR_WATCH_NOPE": "x",
+        "PR_WATCH_CRON__ENV_FILE": "x",
+        "PR_WATCH_" + "X" * 400: "x",
+        "PR_WATCH_\u00e9": "x",
+    }
+    path = write(isolated_env / "c.yaml", "hooks: {env_allow: [GH_TOKEN, " + "K" * 120 + "_KEY]}\n")
+    loaded = load(path, env=env)
+    assert len(loaded.warnings) == 6
+    for w in loaded.warnings:
+        assert isinstance(w.key, str) and w.key
+        record = {
+            "ts": "2026-01-01T00:00:00.000000Z",
+            "level": "warn",
+            "event": w.code,
+            "message": w.message,
+            "key": w.key,
+        }
+        assert_valid("log", record)
+
+
+def test_r4_warning_message_is_capped_at_256() -> None:
+    from pr_watch.config import ConfigWarning
+
+    w = ConfigWarning("config_warning", "m" * 1000, "k")
+    assert len(w.message) <= 256
+
+
+def test_r4_env_warning_key_is_the_escaped_variable_name(isolated_env: Path) -> None:
+    (w,) = load(env={"PR_WATCH_NOPE": "x"}).warnings
+    assert w.key == "PR_WATCH_NOPE"
+
+
+# R5: integers are plain decimal in files and the environment
+
+
+@pytest.mark.parametrize("value", ["9" * 19, "9" * 400, "+5", "007"])
+def test_r5_file_integers_beyond_the_grammar_name_the_key(
+    cfgdir: Path, write: Write, value: str
+) -> None:
+    assert invalid(cfgdir, write, f"poll: {{concurrency: {value}}}\n").key == "poll.concurrency"
+
+
+def test_r5_file_integers_accept_the_grammar(cfgdir: Path, write: Write) -> None:
+    assert one_file(cfgdir, write, "poll: {concurrency: 4}\n").poll.concurrency == 4
+    assert one_file(cfgdir, write, "poll: {max_snapshots: 0}\n").poll.max_snapshots == 0
+
+
+def test_r5_env_integer_message_is_accurate(isolated_env: Path) -> None:
+    with pytest.raises(ConfigError, match="decimal integer of at most 18 digits"):
+        load(env={"PR_WATCH_POLL__CONCURRENCY": "9" * 19})
+
+
+@pytest.mark.parametrize("value", ["0", "-0", "-5", "9" * 18])
+def test_r5_env_integer_grammar_matches_the_file(isolated_env: Path, value: str) -> None:
+    with pytest.raises(ConfigError) as info:  # parses, then fails the range check
+        load(env={"PR_WATCH_POLL__CONCURRENCY": value})
+    assert "decimal integer" not in str(info.value)
+
+
+# R9: reserved env_allow prefixes are case-insensitive
+
+
+@pytest.mark.parametrize("name", ["pr_watch_X", "Pr_Watch_x", "ld_preload", "Dyld_x"])
+def test_r9_reserved_prefixes_are_rejected_in_any_case(
+    cfgdir: Path, write: Write, name: str
+) -> None:
+    assert invalid(cfgdir, write, f"hooks: {{env_allow: [{name}]}}\n").key == "hooks.env_allow.0"
+
+
+# R10: NUL in a path
+
+
+@pytest.mark.parametrize("path", ["a\x00b", "/x/a\x00b/c.yaml"])
+def test_r10_nul_in_the_config_path_is_a_config_error(isolated_env: Path, path: str) -> None:
+    with pytest.raises(ConfigError) as info:
+        load_config(path, environ={})
+    assert info.value.code == "config_invalid"
+
+
+def test_r10_nul_in_an_explicit_config_d_parent_is_a_config_error(
+    isolated_env: Path,
+) -> None:
+    with pytest.raises(ConfigError):
+        config_module._dropin_paths(Path("/x\x00y"))

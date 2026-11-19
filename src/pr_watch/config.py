@@ -50,9 +50,15 @@ def _ecma(pattern: str) -> str:
     return pattern.replace("$", r"\Z")
 
 
-_DURATION: Final = _ecma(r"^(?:0|[0-9]+(?:ms|s|m|h|d))$")
-_INTERVAL: Final = _ecma(r"^(?:[1-9][0-9]*m|[1-9][0-9]*h)$")
-_RETENTION: Final = _ecma(r"^(?:[3-9][0-9]|[1-9][0-9]{2,})d$")
+_DURATION: Final = _ecma(r"^(?:0|[0-9]{1,9}(?:ms|s|m|h|d))$")
+_INTERVAL: Final = _ecma(r"^(?:[1-9][0-9]{0,8}m|[1-9][0-9]{0,8}h)$")
+_RETENTION: Final = _ecma(r"^(?:[3-9][0-9]|[1-9][0-9]{2,8})d$")
+# C0 and C1 control characters are refused; a hook command may keep \n and \t but needs a
+# non-blank character (leading space, tab and newline are skipped, so matching stays linear).
+_NO_CONTROLS: Final = _ecma(r"^[^\u0000-\u001f\u007f-\u009f]+$")
+_CMD: Final = _ecma(
+    r"^[ \t\n]*[^\u0000-\u0020\u007f-\u009f][^\u0000-\u0008\u000b-\u001f\u007f-\u009f]*$"
+)
 _HOST: Final = _ecma(
     r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$"
 )
@@ -62,6 +68,9 @@ _REPO: Final = _ecma(
 )
 _ENV_NAME: Final = re.compile(_ecma(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"))
 _RESERVED_PREFIXES: Final = ("PR_WATCH_", "LD_", "DYLD_")
+MAX_DURATION_MS: Final = 3650 * 86_400_000  # ten years
+MAX_HOST_LOW_WATER: Final = 1_000_000
+MAX_WARNING_CHARS: Final = 256
 _SECRET_WORDS: Final = ("TOKEN", "SECRET", "KEY", "PASSWORD")
 _DURATION_UNITS: Final = {"ms": 1, "s": 1000, "m": 60_000, "h": 3_600_000, "d": 86_400_000}
 
@@ -69,20 +78,23 @@ _DURATION_UNITS: Final = {"ms": 1, "s": 1000, "m": 60_000, "h": 3_600_000, "d": 
 def duration_ms(text: str) -> int:
     """A config duration (`0`, `500ms`, `60s`, `5m`, `2h`, `30d`) in milliseconds.
 
-    Raises ValueError for anything else (and for absurdly long digit strings)."""
+    Raises ValueError for anything else, and for more than 3650d."""
     if not re.fullmatch(_DURATION, text):
         raise ValueError("not a duration")
     if text == "0":
         return 0
     unit = "ms" if text.endswith("ms") else text[-1]
-    return int(text[: -len(unit)]) * _DURATION_UNITS[unit]
+    value = int(text[: -len(unit)]) * _DURATION_UNITS[unit]
+    if value > MAX_DURATION_MS:
+        raise ValueError("duration is too large")
+    return value
 
 
 def _duration_parses(text: str) -> str:
     try:
         duration_ms(text)
     except ValueError:
-        raise ValueError("duration is too large") from None
+        raise ValueError("duration is too large (at most 3650d)") from None
     return text
 
 
@@ -95,7 +107,7 @@ def _interval_divides(text: str) -> str:
 
 
 def _env_allow_name(name: str) -> str:
-    if name.startswith(_RESERVED_PREFIXES):
+    if name.upper().startswith(_RESERVED_PREFIXES):
         raise ValueError("names starting with PR_WATCH_, LD_ or DYLD_ are not allowed")
     if not _ENV_NAME.fullmatch(name):
         raise ValueError("is not a valid environment variable name")
@@ -112,6 +124,19 @@ RetentionDays = Annotated[
 HostKey = Annotated[str, StringConstraints(pattern=_HOST)]
 RepoKey = Annotated[str, StringConstraints(pattern=_REPO)]
 EnvAllowName = Annotated[str, AfterValidator(_env_allow_name)]
+NoControls = Annotated[str, StringConstraints(pattern=_NO_CONTROLS)]
+
+
+def _unique_ignoring_case(cls: Any, value: dict[str, Any]) -> dict[str, Any]:
+    seen: dict[str, str] = {}
+    for key in value:
+        other = seen.setdefault(key.casefold(), key)
+        if other != key:
+            raise ValueError(
+                f"{_esc(key)} and {_esc(other)} differ only in case (repo ids match "
+                "case-insensitively)"
+            )
+    return value
 
 
 def _not_null(cls: Any, value: Any) -> Any:
@@ -125,7 +150,7 @@ class _Model(BaseModel):
 
 
 class Me(_Model):
-    name: str | None = Field(default=None, min_length=1, max_length=128)
+    name: str | None = Field(default=None, min_length=1, max_length=128, pattern=_NO_CONTROLS)
     _nn = field_validator("name", mode="before")(_not_null)
 
 
@@ -133,7 +158,7 @@ class Poll(_Model):
     interval_hint: IntervalHint = "5m"
     full_every: int | None = Field(default=None, ge=1, le=10000)
     concurrency: int | None = Field(default=None, ge=1, le=64)
-    host_low_water: int = Field(default=100, ge=0)
+    host_low_water: int = Field(default=100, ge=0, le=MAX_HOST_LOW_WATER)
     overlap: Duration = "60s"
     hosts_ttl: Duration = "1h"
     max_duration: Duration = "15m"
@@ -170,7 +195,7 @@ class Forgectl(_Model):
 
 
 class HookCmd(_Model):
-    cmd: str = Field(min_length=1, max_length=4096)
+    cmd: str = Field(min_length=1, max_length=4096, pattern=_CMD)
     timeout: int = Field(default=30, ge=1, le=600)
     async_: bool = Field(default=True, alias="async")
 
@@ -197,7 +222,7 @@ HOOK_NAMES: Final = frozenset(f.alias for f in Hooks.model_fields.values() if f.
 
 
 class Cron(_Model):
-    env_file: str | None = Field(default=None, min_length=1, max_length=4096)
+    env_file: str | None = Field(default=None, min_length=1, max_length=4096, pattern=_NO_CONTROLS)
 
 
 class RepoCi(_Model):
@@ -246,6 +271,7 @@ class Config(_Model):
     hooks: Hooks = Field(default_factory=Hooks)
     cron: Cron = Field(default_factory=Cron)
     repos: dict[RepoKey, RepoOverride] = Field(default_factory=dict)
+    _repos_unique = field_validator("repos", mode="after")(_unique_ignoring_case)
 
     def host_settings(self, host: str, backend: Literal["github", "gitlab"]) -> HostSettings:
         """`hosts.<host>`, then `poll` (environment over files), then the backend's built-in."""
@@ -258,8 +284,10 @@ class Config(_Model):
         return HostSettings(full_every=full, concurrency=conc)
 
     def repo_settings(self, repo_id: str) -> RepoSettings:
-        """`repos.<repo_id>`, then the global values (environment over files over defaults)."""
-        entry = self.repos.get(repo_id)
+        """`repos.<repo_id>` (matched case-insensitively), then the global values (environment
+        over files over defaults)."""
+        wanted = repo_id.casefold()
+        entry = next((v for k, v in self.repos.items() if k.casefold() == wanted), None)
         return RepoSettings(
             detect_force_push=_first(
                 entry.detect_force_push if entry else None, self.detect_force_push
@@ -310,9 +338,16 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class ConfigWarning:
+    """A `config_warning` log record's content (schemas/log.json: `message` and `key` are
+    strings of at most 256 characters; `message` is cut to fit)."""
+
     code: str
     message: str
-    key: str | None = None
+    key: str
+
+    def __post_init__(self) -> None:
+        if len(self.message) > MAX_WARNING_CHARS:
+            object.__setattr__(self, "message", self.message[: MAX_WARNING_CHARS - 3] + "...")
 
 
 @dataclass(frozen=True)
@@ -369,11 +404,12 @@ class _StrictLoader(yaml.SafeLoader):
         return super().construct_mapping(node, deep)
 
 
-# YAML 1.2 core schema, narrowed: decimal integers without leading zeros or `_`; no timestamps,
-# no merge key, no `=` value tag, no yes/no/on/off.
+# YAML 1.2 core schema, narrowed: decimal integers (-?0 or no leading zero, at most 18 digits;
+# longer digit strings are not integers, so the model refuses them naming the key) without `_`;
+# no timestamps, no merge key, no `=` value tag, no yes/no/on/off.
 for _tag, _pattern, _first_chars in (
     ("bool", r"^(?:true|True|TRUE|false|False|FALSE)\Z", "tTfF"),
-    ("int", r"^[-+]?(?:0|[1-9][0-9]*)\Z", "-+0123456789"),
+    ("int", r"^-?(?:0|[1-9][0-9]{0,17})\Z", "-0123456789"),
     (
         "float",
         r"^(?:[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?"
@@ -410,6 +446,8 @@ def _read_file(path: Path) -> bytes:
         raise ConfigError(name, None, "not found") from None
     except OSError as exc:
         raise ConfigError(name, None, f"cannot be read ({exc.strerror})") from None
+    except ValueError:
+        raise ConfigError(name, None, "is not a valid path") from None
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
@@ -562,7 +600,7 @@ _ENV_PREFIX: Final = "PR_WATCH_"
 _ENV_BY_NAME: Final = {p.upper().replace(".", "__"): p for p in ENV_KEYS}
 _HOOK_ONLY_VARS: Final = frozenset({"HOOK", "ID", "EVENT_ID", "OBJECT_TYPE"})
 _NOT_FROM_ENV: Final = frozenset({"CRON", "HOSTS", "REPOS", "HOOKS"})
-_INT: Final = re.compile(r"-?[0-9]{1,18}")
+_INT: Final = re.compile(r"-?(?:0|[1-9][0-9]{0,17})")
 
 
 def _env_value(var: str, path: str, raw: str) -> Any:
@@ -574,7 +612,11 @@ def _env_value(var: str, path: str, raw: str) -> Any:
         return raw == "true"
     if kind == "int":
         if not _INT.fullmatch(raw):
-            raise ConfigError(source, path, "must be a decimal integer")
+            raise ConfigError(
+                source,
+                path,
+                "must be a plain decimal integer of at most 18 digits (no leading zeros)",
+            )
         return int(raw)
     return raw
 
@@ -608,7 +650,9 @@ def _env_overlay(
                 why = "cannot be set from the environment (file-only)"
             else:
                 why = "is not a config variable"
-            warnings.append(ConfigWarning("config_warning", f"{_esc(var)} {why}; ignored"))
+            warnings.append(
+                ConfigWarning("config_warning", f"{_esc(var)} {why}; ignored", _esc(var, 253))
+            )
             continue
         _set_path(overlay, path, _env_value(var, path, environ[var]))
         origin[path] = var
@@ -652,6 +696,8 @@ def _dropin_paths(directory: Path) -> list[Path]:
         return []
     except OSError as exc:
         raise ConfigError(name, None, f"cannot be read ({exc.strerror})") from None
+    except ValueError:
+        raise ConfigError(name, None, "is not a valid path") from None
     if not stat.S_ISDIR(info.st_mode):
         raise ConfigError(name, None, "not a directory")
     _check_owner_and_mode(info, directory)
