@@ -38,10 +38,13 @@ from typing import Any, Final
 from .store import NewEvent, Store, StoredEvent, classify_error
 
 # Columns of `prs` the snapshot-commit transaction writes (interface, State, transaction 2).
-# Identity (`pr_id`, `pr`, `repo`, `host`), `rev` and the columns owned by enumeration and the
+# `pr` and `repo` are refreshed from every snapshot (a rename or move keeps the `pr_id`). Identity
+# (`pr_id`, `host`), `rev` and the columns owned by enumeration and the
 # failure path (`listed_updated_at`, `last_attempt_at`, `last_failure_code`) are never writable.
 WRITABLE_FIELDS: Final = frozenset(
     {
+        "pr",
+        "repo",
         "status",
         "terminal_at",
         "terminal_kind",
