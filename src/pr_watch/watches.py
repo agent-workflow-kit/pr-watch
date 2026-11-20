@@ -35,6 +35,8 @@ QUERY_KIND: Final = "query"
 
 # The most labels a watch carries: the union over its owners (docs/interface.md, Labels). Keeps a
 # watch's labels, copied onto every event it detects, well inside the store's per-event cap.
+# `label add` enforces the cap via `label_count_after`; any other path that seeds labels (such as
+# `watch add --label`, #18) must call it too and refuse with `too_many_labels`.
 MAX_LABELS_PER_WATCH: Final = 64
 
 

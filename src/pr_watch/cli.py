@@ -182,8 +182,11 @@ class Context:
     quiet: bool
     verbose: bool
     loaded: LoadedConfig
-    state: StateDir | None = None  # open and verified by `_execute`; None only in unit tests
-    store: Store | None = None  # open and migrated by `_execute` for commands that use it
+    # Both are opened by `_execute`. Read-only commands (list/show/events/export) get `state` and
+    # `store` None when the state dir or state.db is missing (and in unit tests); those handlers
+    # must treat a None store as an empty store (owned by #19, #27).
+    state: StateDir | None = None
+    store: Store | None = None
     log: Log = NULL_LOG  # `<state dir>/log.jsonl`; logging never fails a command
 
     def emit(self, data: Any, human: str | None = None) -> None:
