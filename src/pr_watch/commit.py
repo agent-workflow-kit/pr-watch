@@ -127,6 +127,59 @@ def _check(
 _REF_FIELDS: Final = {"pr": PR_RE, "repo": REPO_RE}
 
 
+def _validate_fields(fields: Mapping[str, Any], snapshot_updated_at: str | None) -> None:
+    for name, value in fields.items():
+        if name not in WRITABLE_FIELDS:
+            raise ValueError(f"{name!r} is not a column a snapshot commit may write")
+        if value is not None and not isinstance(value, int | float | str | bytes):
+            raise TypeError(f"field {name!r} must be None, int, float, str or bytes")
+        if name in _REF_FIELDS:
+            ok = isinstance(value, str) and len(value) <= 256 and _REF_FIELDS[name].match(value)
+            if not ok:
+                raise ValueError(f"field {name!r} is not a valid reference")
+    if fields.get("terminal_kind") == "closed" and snapshot_updated_at is None:
+        raise ValueError("a closed snapshot needs snapshot_updated_at")
+
+
+def commit_in_transaction(
+    store: Store,
+    conn: sqlite3.Connection,
+    *,
+    pr_id: str,
+    expected_rev: int,
+    snapshot_pr_id: str,
+    fields: Mapping[str, Any],
+    prepare: Callable[[sqlite3.Connection], Sequence[NewEvent]] | None = None,
+    snapshot_updated_at: str | None = None,
+) -> CommitResult:
+    """`commit_snapshot` inside a transaction the caller already holds (`watch add` writes its
+    watch, source and baseline as one unit). A discard writes nothing."""
+    _validate_fields(fields, snapshot_updated_at)
+    discard = _check(conn, pr_id, expected_rev, snapshot_pr_id, fields, snapshot_updated_at)
+    if discard is not None:
+        return CommitResult(committed=False, reason=discard)
+    events: list[StoredEvent] = []
+    for event in prepare(conn) if prepare is not None else ():
+        events.append(store.append_event(event))
+    removed = False
+    if conn.execute("SELECT 1 FROM prs WHERE pr_id = ?", (pr_id,)).fetchone() is None:
+        removed = True  # prepare dropped the last source (trigger): no row to update
+    else:
+        assignments = "".join(f"{name} = ?, " for name in fields)
+        try:
+            cur = conn.execute(
+                f"UPDATE prs SET {assignments}rev = rev + 1 WHERE pr_id = ? AND rev = ?",  # noqa: S608  (names are allow-listed)
+                (*fields.values(), pr_id, expected_rev),
+            )
+        except sqlite3.Error as exc:
+            raise classify_error(exc) from None
+        if cur.rowcount != 1:  # unreachable under BEGIN IMMEDIATE; never commit on doubt
+            raise RuntimeError("compare-and-set update matched no row")
+    return CommitResult(
+        committed=True, new_rev=None if removed else expected_rev + 1, events=tuple(events)
+    )
+
+
 def commit_snapshot(
     store: Store,
     *,
@@ -142,40 +195,15 @@ def commit_snapshot(
     `snapshot_updated_at` is the snapshot's own `updated_at` (not `snap_updated_at`, which may be
     the larger of it and the listed time); it is required when `fields` shows `closed`.
     """
-    for name, value in fields.items():
-        if name not in WRITABLE_FIELDS:
-            raise ValueError(f"{name!r} is not a column a snapshot commit may write")
-        if value is not None and not isinstance(value, int | float | str | bytes):
-            raise TypeError(f"field {name!r} must be None, int, float, str or bytes")
-        if name in _REF_FIELDS:
-            ok = isinstance(value, str) and len(value) <= 256 and _REF_FIELDS[name].match(value)
-            if not ok:
-                raise ValueError(f"field {name!r} is not a valid reference")
-    if fields.get("terminal_kind") == "closed" and snapshot_updated_at is None:
-        raise ValueError("a closed snapshot needs snapshot_updated_at")
-    discard: DiscardReason | None = None
-    removed = False
-    events: list[StoredEvent] = []
+    _validate_fields(fields, snapshot_updated_at)
     with store.transaction() as conn:
-        discard = _check(conn, pr_id, expected_rev, snapshot_pr_id, fields, snapshot_updated_at)
-        if discard is None:
-            for event in prepare(conn) if prepare is not None else ():
-                events.append(store.append_event(event))
-            if conn.execute("SELECT 1 FROM prs WHERE pr_id = ?", (pr_id,)).fetchone() is None:
-                removed = True  # prepare dropped the last source (trigger): no row to update
-            else:
-                assignments = "".join(f"{name} = ?, " for name in fields)
-                try:
-                    cur = conn.execute(
-                        f"UPDATE prs SET {assignments}rev = rev + 1 WHERE pr_id = ? AND rev = ?",  # noqa: S608  (names are allow-listed)
-                        (*fields.values(), pr_id, expected_rev),
-                    )
-                except sqlite3.Error as exc:
-                    raise classify_error(exc) from None
-                if cur.rowcount != 1:  # unreachable under BEGIN IMMEDIATE; never commit on doubt
-                    raise RuntimeError("compare-and-set update matched no row")
-    if discard is not None:
-        return CommitResult(committed=False, reason=discard)
-    return CommitResult(
-        committed=True, new_rev=None if removed else expected_rev + 1, events=tuple(events)
-    )
+        return commit_in_transaction(
+            store,
+            conn,
+            pr_id=pr_id,
+            expected_rev=expected_rev,
+            snapshot_pr_id=snapshot_pr_id,
+            fields=fields,
+            prepare=prepare,
+            snapshot_updated_at=snapshot_updated_at,
+        )

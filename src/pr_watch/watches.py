@@ -291,3 +291,40 @@ def watch_view(conn: sqlite3.Connection, watch_id: str) -> dict[str, Any] | None
         view["pending_baseline"] = int(counts[1])
         view["enumerated_at"] = _enumerated_at(conn, key, created_at)
     return view
+
+
+# --- event context and expiry ---------------------------------------------------------------------
+
+
+def event_context(conn: sqlite3.Connection, pr_id: str) -> tuple[list[str], list[str]]:
+    """`(labels, watch ids)` for an event on the PR: the label union over, and the ids of, every
+    watch that includes it now (read inside the commit transaction). Both sorted."""
+    ids = sorted(
+        str(r[0]) for r in conn.execute("SELECT watch_id FROM sources WHERE pr_id = ?", (pr_id,))
+    )
+    labels = sorted(
+        {
+            str(r[0])
+            for r in conn.execute(
+                "SELECT label FROM labels WHERE watch_id IN "
+                "(SELECT watch_id FROM sources WHERE pr_id = ?)",
+                (pr_id,),
+            )
+        }
+    )
+    return labels, ids
+
+
+def drop_expired_pr(conn: sqlite3.Connection, pr_id: str, cutoff: str) -> bool:
+    """Delete the PR's row when it satisfies the expiry predicate, and end its per-PR watch (owners
+    and labels go with it, as in `prune`; a query watch just loses the member). True when deleted.
+    The predicate is evaluated here, inside the caller's transaction."""
+    hit = conn.execute(
+        f"SELECT 1 FROM prs WHERE pr_id = ? AND {EXPIRED_PREDICATE}",  # noqa: S608  (constant)
+        (pr_id, cutoff),
+    ).fetchone()
+    if hit is None:
+        return False
+    conn.execute("DELETE FROM watches WHERE kind = ? AND key = ?", (PR_KIND, pr_id))
+    conn.execute("DELETE FROM prs WHERE pr_id = ?", (pr_id,))
+    return True
