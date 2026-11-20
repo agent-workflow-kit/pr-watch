@@ -444,9 +444,44 @@ def open_existing_store(
     busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
     migrations: Sequence[Migration] = MIGRATIONS,
 ) -> Store | None:
-    """Like `open_store`, but a missing `state.db` returns None and nothing is created (read-only
-    commands treat it as an empty store). An existing file gets every check of `open_store`."""
-    return _open(state, busy_timeout_ms, migrations, create=False)
+    """The read-only open of `list`, `show`, `events` and `export`. A missing `state.db`, and a
+    file with no tables and `user_version` 0 (empty or 0-byte), return None: an empty store, and
+    nothing is created or written. An existing file gets every check of `open_store`, but is
+    opened `mode=ro` with `PRAGMA query_only=ON`: no WAL switch, no migration, no checkpoint on
+    close, no write pragma. A database behind the supported schema is not migrated here: it is
+    refused with a `StoreError` (`internal`) telling to run a mutating command first."""
+    if not 0 <= busy_timeout_ms <= 600_000:
+        raise ValueError("busy_timeout_ms out of range")
+    checked = _prepare_files(state, create=False)
+    if checked is None:
+        return None
+    path = state.path_for(DB_NAME)
+    latest = len(migrations)
+    uri = "file:" + urllib.parse.quote(str(path)) + "?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=busy_timeout_ms / 1000, isolation_level=None)
+    except sqlite3.Error as exc:
+        raise classify_error(exc) from None
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+        conn.execute("PRAGMA query_only = ON")
+        _confirm_same_file(state, checked)
+        found = _read_version(conn, latest)  # BEGIN ... ROLLBACK; validates the file
+        if found == 0:
+            conn.close()
+            return None
+        if found < latest:
+            raise StoreError(
+                f"{DB_NAME} is at schema {found}, older than {latest}; "
+                "run a command that writes (such as poll) to upgrade it"
+            )
+        return _finish(conn, path, latest)
+    except sqlite3.Error as exc:
+        conn.close()
+        raise classify_error(exc) from None
+    except BaseException:
+        conn.close()
+        raise
 
 
 def _open(

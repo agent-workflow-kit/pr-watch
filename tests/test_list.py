@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import sqlite3
+import subprocess
+import sys
+import textwrap
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from pr_watch import listing
 from pr_watch.cli import main
 from pr_watch.state_dir import open_state_dir
-from pr_watch.store import Store, open_store
+from pr_watch.store import MIGRATIONS, Store, StoreError, open_existing_store, open_store
+from pr_watch.watches import watch_view
 from tests.harness import assert_valid
 
 GOLDEN = Path(__file__).parent / "golden" / "list"
@@ -26,6 +34,15 @@ def run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str, str]:
     code = main(list(argv))
     captured = capsys.readouterr()
     return code, captured.out, captured.err
+
+
+NOW = datetime(2026, 6, 2, 0, 0, tzinfo=UTC)  # 24h after T0, 22h after T2
+
+
+@pytest.fixture(autouse=True)
+def pinned_now(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ci_stuck compares against the clock: every test sees the same pinned one."""
+    monkeypatch.setattr(listing, "_now", lambda: NOW)
 
 
 @pytest.fixture
@@ -69,6 +86,7 @@ def add_pr(
                 "(?, 'query', ?, ?)",
                 (w, "mine+open;host=" + w, T0),
             )
+            c.execute("INSERT OR IGNORE INTO owners (watch_id, owner) VALUES (?, ?)", (w, A))
         c.execute(
             f"INSERT INTO prs ({', '.join(names)}) VALUES ({', '.join('?' * len(vals))})",  # noqa: S608
             vals,
@@ -335,15 +353,21 @@ def test_list_writes_nothing(
     assert not (state_dir / "log.jsonl").exists()
 
 
-def test_an_unreadable_row_does_not_leak_sqlite_text(
+def test_a_sqlite_error_while_reading_leaks_no_sqlite_text(
     store: Store, state_dir: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     populate(store)
     store.close()
     db = sqlite3.connect(state_dir / "state.db")
-    db.execute("PRAGMA journal_mode = DELETE")
+    db.execute("DROP TABLE hosts")  # still a pr-watch database, but the read hits a sqlite error
+    db.commit()
     db.close()
-    assert run(capsys, "list", "--json")[0] == 0
+    code, out, err = run(capsys, "list", "--json")
+    assert code == 1
+    error = json.loads(out)["error"]
+    assert error["code"] == "internal"
+    assert error["message"] == "state.db cannot be used (SQLITE_ERROR)"
+    assert "no such table" not in out + err and "hosts" not in out + err
 
 
 # --- human output ------------------------------------------------------------------------------
@@ -406,3 +430,308 @@ def test_a_newer_store_is_exit_12(
     db.close()
     code, out, _ = run(capsys, "list", "--json")
     assert code == 12 and json.loads(out)["error"]["code"] == "store_too_new"
+
+
+# --- strictly read-only (R1, R2) ---------------------------------------------------------------
+
+
+def run_child(code: str, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(code), *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ},
+        check=False,
+    )
+
+
+def fingerprint(state_dir: Path) -> dict[str, tuple[str, int] | None]:
+    """sha256 and size of the db and the WAL (the data), and the names in the directory (-shm is
+    a volatile index that any reader may touch: only its presence counts). Call it only while no
+    connection of this process is open on the store."""
+    out: dict[str, tuple[str, int] | None] = {}
+    for name in sorted(os.listdir(state_dir)):
+        path = state_dir / name
+        if name in ("state.db", "state.db-wal"):
+            data = path.read_bytes()
+            out[name] = (hashlib.sha256(data).hexdigest(), len(data))
+        else:
+            out[name] = None
+    return out
+
+
+def settled(fp: dict[str, tuple[str, int] | None]) -> dict[str, tuple[str, int] | None]:
+    """Without the litter SQLite itself gives a read-only reader of a WAL database when the
+    directory lacks them: an empty -wal and a -shm (never written to the database file)."""
+    drop = {
+        k for k, v in fp.items() if k == "state.db-shm" or (k == "state.db-wal" and v and not v[1])
+    }
+    return {k: v for k, v in fp.items() if k not in drop}
+
+
+LEAVE_WAL = """
+    import os, sys
+    from pathlib import Path
+    from pr_watch.state_dir import open_state_dir
+    from pr_watch.store import open_store
+    st = open_state_dir(Path(sys.argv[1]))
+    s = open_store(st)
+    with s.transaction():
+        s.conn.execute("INSERT INTO hosts (host) VALUES ('wal-only.example')")
+    os._exit(0)  # no close: the commit stays in an uncheckpointed WAL
+"""
+
+
+def test_a_zero_byte_state_db_is_an_empty_store_and_is_not_touched(
+    state_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state_dir.mkdir(mode=0o700, parents=True)
+    db = state_dir / "state.db"
+    db.write_bytes(b"")
+    db.chmod(0o600)
+    before = fingerprint(state_dir)
+    d = jlist(capsys)
+    assert d == {"watches": [], "prs": [], "last_poll_finished_at": None, "hosts": []}
+    run(capsys, "list")
+    assert fingerprint(state_dir) == before == {"state.db": (hashlib.sha256().hexdigest(), 0)}
+
+
+def test_list_leaves_the_state_directory_byte_identical(
+    store: Store, state_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    populate(store)
+    store.close()
+    before = fingerprint(state_dir)
+    assert jlist(capsys)["watches"]
+    run(capsys, "list")
+    assert settled(fingerprint(state_dir)) == settled(before)
+
+
+def test_list_reads_a_leftover_wal_without_checkpointing_it(
+    state_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    done = run_child(LEAVE_WAL, str(state_dir))
+    assert done.returncode == 0, done.stderr
+    before = fingerprint(state_dir)
+    assert before["state.db-wal"] is not None and before["state.db-wal"][1] > 0
+    d = jlist(capsys)
+    assert [h["host"] for h in d["hosts"]] == ["wal-only.example"]  # the WAL is read
+    after = fingerprint(state_dir)
+    assert after == before  # nothing checkpointed, deleted or created
+
+
+@pytest.mark.parametrize("dir_mode, file_mode", [(0o500, 0o600), (0o700, 0o400)])
+def test_list_on_a_read_only_store_works_or_fails_cleanly_and_creates_nothing(
+    store: Store,
+    state_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+    dir_mode: int,
+    file_mode: int,
+) -> None:
+    populate(store)
+    store.close()
+    names = sorted(os.listdir(state_dir))
+    (state_dir / "state.db").chmod(file_mode)
+    state_dir.chmod(dir_mode)
+    try:
+        code, out, err = run(capsys, "list", "--json")
+        if code == 0:
+            assert len(json.loads(out)["watches"]) == 2
+        else:
+            assert json.loads(out)["error"]["code"] in {"internal", "state_unsafe"}
+            assert "Traceback" not in out + err
+        extra = set(os.listdir(state_dir)) - set(names)
+        assert extra <= {"state.db-shm", "state.db-wal"}  # a WAL reader's empty files, no more
+        assert set(names) <= set(os.listdir(state_dir))
+    finally:
+        state_dir.chmod(0o700)
+        (state_dir / "state.db").chmod(0o600)
+
+
+def test_list_does_not_wait_for_or_block_a_writer(
+    store: Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    populate(store)
+    # an open, uncommitted write transaction on another connection does not break list
+    store.conn.execute("BEGIN IMMEDIATE")
+    store.conn.execute("INSERT INTO hosts (host) VALUES ('uncommitted.example')")
+    assert "uncommitted.example" not in [h["host"] for h in jlist(capsys)["hosts"]]
+    store.conn.execute("COMMIT")
+    assert "uncommitted.example" in [h["host"] for h in jlist(capsys)["hosts"]]
+
+    # and a writer commits while list is reading: list still shows one consistent snapshot
+    original = listing._pr_ids
+
+    def commit_then_read(*a: Any, **k: Any) -> Any:
+        set_host(store, "late.example")  # takes the write lock and commits mid-read
+        return original(*a, **k)
+
+    monkeypatch.setattr(listing, "_pr_ids", commit_then_read)
+    seen = [h["host"] for h in jlist(capsys)["hosts"]]
+    assert "late.example" not in seen
+    monkeypatch.setattr(listing, "_pr_ids", original)
+    assert "late.example" in [h["host"] for h in jlist(capsys)["hosts"]]
+
+
+def test_open_existing_store_is_query_only(store: Store, state_dir: Path) -> None:
+    store.close()
+    with open_state_dir(state_dir) as state:
+        ro = open_existing_store(state)
+        assert ro is not None
+        with ro:
+            assert ro.conn.execute("PRAGMA query_only").fetchone()[0] == 1
+            with pytest.raises(sqlite3.OperationalError):
+                ro.conn.execute("INSERT INTO hosts (host) VALUES ('x')")
+
+
+def test_open_existing_store_never_migrates_an_older_database(
+    store: Store, state_dir: Path
+) -> None:
+    store.close()
+
+    def v2(conn: sqlite3.Connection) -> None:
+        conn.execute("ALTER TABLE hosts ADD COLUMN note TEXT")
+
+    before = fingerprint(state_dir)
+    with open_state_dir(state_dir) as state:
+        with pytest.raises(StoreError) as info:
+            open_existing_store(state, migrations=(*MIGRATIONS, v2))
+    assert info.value.code == "internal" and "older" in str(info.value)
+    assert settled(fingerprint(state_dir)) == settled(before)
+
+
+# --- watches, PRs, errors (R3, R5, R6, R8, R4) ---------------------------------------------------
+
+
+def test_pr_filter_selects_one_pr_and_does_not_narrow_watches_or_hosts(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    populate(store)
+    full = jlist(capsys)
+    only = jlist(capsys, "--pr", "github.com/o/r#1")
+    assert [p["pr_id"] for p in only["prs"]] == ["P1"]
+    assert only["watches"] == full["watches"]
+    assert only["hosts"] == full["hosts"]
+    missing = jlist(capsys, "--pr", "github.com/o/r#99")
+    assert missing["prs"] == [] and missing["watches"] == full["watches"]
+
+
+def ready(view: dict[str, Any]) -> bool:
+    """A query watch is ready when its enumeration is known and no member awaits a baseline."""
+    return view["enumerated_at"] is not None and view["pending_baseline"] == 0
+
+
+def view_of(store: Store, wid: str) -> dict[str, Any]:
+    view = watch_view(store.conn, wid)
+    assert view is not None
+    return view
+
+
+def test_query_watch_is_ready_with_baselined_members_and_an_enumerated_host(
+    store: Store,
+) -> None:
+    add_watch(store, "w-rrrrrrrrr1", "query", "mine+open;host=h1.example", {A: []}, T0)
+    add_pr(store, "P1", "h1.example/o/r#1", dig=digest(), sources=())
+    link(store, "P1", "w-rrrrrrrrr1")
+    set_host(store, "h1.example", last_enumerated_at=T2)
+    view = view_of(store, "w-rrrrrrrrr1")
+    assert view["enumerated_at"] == T2 and view["pending_baseline"] == 0
+    assert ready(view) is True
+
+
+def test_query_watch_is_not_ready_while_the_host_was_never_enumerated(store: Store) -> None:
+    add_watch(store, "w-rrrrrrrrr2", "query", "mine+open;host=h1.example", {A: []}, T0)
+    set_host(store, "h1.example", last_enumerated_at=None)
+    view = view_of(store, "w-rrrrrrrrr2")
+    assert view["enumerated_at"] is None and ready(view) is False
+    assert ready(view_of(store, "w-rrrrrrrrr2")) is False  # no hosts row at all, same
+
+
+def test_query_watch_is_not_ready_with_a_member_without_a_digest(store: Store) -> None:
+    add_watch(store, "w-rrrrrrrrr3", "query", "mine+open;host=h1.example", {A: []}, T0)
+    add_pr(store, "P1", "h1.example/o/r#1", dig=None, sources=())
+    link(store, "P1", "w-rrrrrrrrr3")
+    set_host(store, "h1.example", last_enumerated_at=T2)
+    view = view_of(store, "w-rrrrrrrrr3")
+    assert view["enumerated_at"] == T2 and view["pending_baseline"] == 1
+    assert ready(view) is False
+
+
+def test_query_watch_enumerated_at_is_the_oldest_host_and_null_if_any_is_null(
+    store: Store,
+) -> None:
+    add_watch(store, "w-rrrrrrrrr4", "query", "mine+open;host=h1.example,h2.example", {A: []}, T0)
+    set_host(store, "h1.example", last_enumerated_at=T2)
+    assert view_of(store, "w-rrrrrrrrr4")["enumerated_at"] is None  # h2 has no row
+    set_host(store, "h2.example", last_enumerated_at=None)
+    assert view_of(store, "w-rrrrrrrrr4")["enumerated_at"] is None  # h2 is null
+    set_host(store, "h2.example", last_enumerated_at=T1)
+    view = view_of(store, "w-rrrrrrrrr4")
+    assert view["enumerated_at"] == T1 and ready(view) is True  # the oldest of T1, T2
+
+
+def test_query_watch_enumerated_before_it_was_created_is_null(store: Store) -> None:
+    add_watch(store, "w-rrrrrrrrr5", "query", "mine+open;host=h1.example", {A: []}, T2)
+    set_host(store, "h1.example", last_enumerated_at=T1)  # older than created_at
+    view = view_of(store, "w-rrrrrrrrr5")
+    assert view["enumerated_at"] is None and ready(view) is False
+
+
+def test_a_pr_with_a_ci_hold_is_stale_with_no_ci_state(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    held = json.loads(digest())
+    held["ci"]["hold"] = 2
+    add_pr(store, "P5", "github.com/o/r#5", dig=json.dumps(held), sources=("w-sssssssssa",))
+    row = jlist(capsys)["prs"][0]
+    assert row["ci_stale"] is True and row["ci_state"] is None
+    assert "ci=stale" in run(capsys, "list")[1]
+
+
+def test_a_pending_pr_inside_the_age_limit_is_not_stuck(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # NOW is 2026-06-02T00:00Z and ci.pending_max_age is 6h: 4h pending is not stuck, 7h is
+    for pr_id, since in (
+        ("P5", "2026-06-01T20:00:00.000000Z"),
+        ("P6", "2026-06-01T17:00:00.000000Z"),
+    ):
+        add_pr(
+            store, pr_id, f"github.com/o/r#{pr_id[1]}", dig=digest(ci="pending"),
+            unsettled_since=since, sources=("w-sssssssssa",),
+        )  # fmt: skip
+    by = {p["pr_id"]: p["ci_stuck"] for p in jlist(capsys)["prs"]}
+    assert by == {"P5": False, "P6": True}
+
+
+def test_an_ambiguous_pr_name_is_exit_2(store: Store, capsys: pytest.CaptureFixture[str]) -> None:
+    add_pr(store, "Q1", "github.com/o/r#5", dig=digest(), sources=("w-sssssssssa",))
+    add_pr(store, "Q2", "github.com/o/r#5", dig=digest(), sources=("w-sssssssssa",))
+    code, out, _ = run(capsys, "list", "--json", "--pr", "github.com/o/r#5")
+    err = json.loads(out)["error"]
+    assert code == 2 and err["code"] == "usage" and err["details"]["kind"] == "ambiguous_reference"
+    assert [p["pr_id"] for p in jlist(capsys, "--pr", "Q1")["prs"]] == ["Q1"]  # the id works
+
+
+def test_a_bad_owner_or_pr_value_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    for argv, code_name in (
+        (("--owner", "Bad Owner"), "usage"),
+        (("--pr", "not a pr#x"), "invalid_pr"),
+        (("--pr", ""), "invalid_pr"),
+    ):
+        code, out, _ = run(capsys, "list", "--json", *argv)
+        assert code == 2, argv
+        assert json.loads(out)["error"]["code"] == code_name
+
+
+def test_status_with_no_matching_pr_still_prints_the_watches(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    add_watch(store, "w-aaaaaaaaaa", "pr", "P1", {A: []})
+    add_pr(store, "P1", "github.com/o/r#1", dig=digest())
+    link(store, "P1", "w-aaaaaaaaaa")
+    d = jlist(capsys, "--status", "terminal")
+    assert d["prs"] == [] and [w["id"] for w in d["watches"]] == ["w-aaaaaaaaaa"]
+    out = run(capsys, "list", "--status", "terminal")[1]
+    assert "watches (1)" in out and "prs (0)" in out and "w-aaaaaaaaaa" in out

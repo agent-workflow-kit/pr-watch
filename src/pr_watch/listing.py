@@ -12,7 +12,8 @@ Judgment calls where the interface is silent:
 - `--owner` and `--label` select watches; the PRs shown are those with a source among them. A
   watch that is shown keeps all its owners and labels.
 - `--pr` naming a PR that is not stored (or an ambiguous-free miss) selects nothing: exit 0 with
-  an empty `prs`, unlike `show` (exit 10). It intersects with the watch filters and `--status`.
+  an empty `prs`, unlike `show` (exit 10). It intersects with the watch filters and `--status`
+  and never narrows `watches` or `hosts`.
 - Watches are ordered by `created_at` then id, PRs by canonical `pr` then `pr_id`, hosts by name.
 - `enumerated_at` of an unfiltered query watch stays null (as `watch_view` prints it).
 - The human text renders every stored string through `bounded_one_line`, so a stored newline or
@@ -97,12 +98,16 @@ def _pr_ids(
     return [str(r[0]) for r in conn.execute(query, params)]
 
 
-def build(ctx: Context, args: argparse.Namespace) -> dict[str, Any]:
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def build(ctx: Context, args: argparse.Namespace, *, now: datetime | None = None) -> dict[str, Any]:
     store = ctx.store
     if store is None:
         return {k: ([] if isinstance(v, list) else v) for k, v in _EMPTY.items()}
     conn = store.conn
-    now = datetime.now(UTC)
+    now = _now() if now is None else now
     pending_ms = duration_ms(ctx.loaded.config.ci.pending_max_age)
     filtered = args.owner is not None or bool(args.label)
     try:
