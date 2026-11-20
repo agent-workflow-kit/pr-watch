@@ -48,7 +48,7 @@ from collections import deque
 from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from . import failures as table
@@ -62,7 +62,7 @@ from .enumeration import EnumerationResult, Failure, note_rate, parse_stamp, rec
 from .forgectl_client import ForgectlClient, Outcome, ToolError
 from .leases import Lease, Leases
 from .log import Log
-from .refs import parse_pr
+from .refs import duration_ms, parse_pr
 from .selection import Selection, Task
 from .store import MAX_LABELS, EventError, NewEvent, Store, StoredEvent, StoreError, format_ts
 from .watches import event_context
@@ -510,6 +510,11 @@ class _Pool:
     def _log(self, event: str, level: str = "info", **fields: Any) -> None:
         if self.log is not None:
             self.log.write(event, level, **fields)
+
+
+def make_leases(store: Store, config: Config) -> Leases:
+    """The leases of one poll: a ttl of `3 x forgectl.timeout` (6 minutes by default)."""
+    return Leases(store, timedelta(milliseconds=3 * duration_ms(config.forgectl.timeout)))
 
 
 def run_snapshots(

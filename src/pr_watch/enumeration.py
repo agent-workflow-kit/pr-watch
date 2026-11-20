@@ -46,8 +46,9 @@ Judgment calls where the interface is silent (kept conservative):
 - An empty first listing of a repo with no `scopes` row stores the start it used, without the
   overlap, as the watermark, so the scope exists from then on.
 
-TODO(#22): choose snapshots from the persisted triggers; TODO(#23): pause and low water from
-`HostFacts`; TODO(#24): over-cap fallback; TODO(#25): the report, `meta`, housekeeping.
+Snapshot selection and the pool are `selection.py` and `snapshots.py` (#22).
+TODO(#23): pause and low water from `HostFacts`; TODO(#24): over-cap fallback;
+TODO(#25): the report, `meta`, housekeeping.
 """
 
 from __future__ import annotations
