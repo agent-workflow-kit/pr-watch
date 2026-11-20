@@ -732,15 +732,17 @@ def test_a_deadline_hit_during_a_shutdown_still_gives_the_child_its_term_grace(
     reaper: Reaper, shutdown_reset: None, tmp_path: Path
 ) -> None:
     ready, done = tmp_path / "trap-set", tmp_path / "cleaned"
-    # On TERM the shell cleans up for 1.5 s (its helper ignores TERM), then writes `done`.
+    # On TERM the shell cleans up for 4 s (its helper ignores TERM), then writes `done`: longer
+    # than the 3 s deadline, which therefore lands inside the cleanup.
     script = (
-        f"trap '(trap \"\" TERM; sleep 1.5); : > {done}; exit 7' TERM; : > {ready}; "
+        f"trap '(trap \"\" TERM; sleep 4); : > {done}; exit 7' TERM; : > {ready}; "
         "while :; do sleep 0.05; done"
     )
     results: list[gateway.Result] = []
     thread = threading.Thread(
-        target=lambda: results.append(sh(script, timeout=1.0, term_grace=6.0))
+        target=lambda: results.append(sh(script, timeout=3.0, term_grace=8.0))
     )
+    launched = time.monotonic()
     thread.start()
     try:
         end = time.monotonic() + 10
@@ -748,9 +750,14 @@ def test_a_deadline_hit_during_a_shutdown_still_gives_the_child_its_term_grace(
             time.sleep(0.01)
         assert ready.exists()
         assert gateway.signal_live(signal.SIGTERM, refuse_new=True) == 1
+        signalled = time.monotonic() - launched
     finally:
         thread.join(20)
-    assert results[0].timed_out  # the deadline came 0.9 s later, inside the 1.5 s cleanup
+    # Not vacuous: the shutdown began well before the deadline, which then hit during it.
+    assert signalled < 2.0, (
+        f"the signal came {signalled:.1f} s in: too late to precede the deadline"
+    )
+    assert results[0].timed_out  # the deadline came after the signal, inside the 4 s cleanup
     assert done.exists(), "the child was killed without its term_grace"
     assert results[0].returncode == 7
 

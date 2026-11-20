@@ -31,4 +31,10 @@ def main() -> int:
     install_early_handlers()
     from .cli import main as cli_main
 
-    return cli_main()
+    try:
+        return cli_main()
+    finally:  # `cli_main` restored the early handlers: past this point a signal must not os._exit
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.signal(signal.SIGHUP, signal.SIG_DFL)

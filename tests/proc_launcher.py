@@ -20,7 +20,8 @@ Environment (all optional):
   an open transaction) has rolled it back: write this file, then wait until `PRW_GO` exists: the
   window for a second signal during shutdown.
 - `PRW_NOTE_SIGNAL`: append a line to this file whenever the gateway is told to signal its
-  children, i.e. once the poll's signal handler has run (the handshake for "the signal landed").
+  children (once the poll's signal handler has run) or to stop one (a non-poll command's unwind
+  has begun): the handshake for "the signal landed".
 """
 
 from __future__ import annotations
@@ -119,6 +120,15 @@ def _patch_signal_note(path: str) -> None:
         return original(*args, **kwargs)
 
     gateway.signal_live = noted  # type: ignore[assignment]
+
+    stop = gateway._Child.stop  # noqa: SLF001
+
+    def stopping(self: Any, *args: Any, **kwargs: Any) -> bool:
+        with open(path, "a", encoding="utf-8") as fh:  # a non-poll command's unwind reaches here
+            fh.write("stopping\n")
+        return stop(self, *args, **kwargs)
+
+    gateway._Child.stop = stopping  # type: ignore[method-assign]  # noqa: SLF001
 
 
 def main() -> int:

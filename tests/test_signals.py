@@ -788,13 +788,15 @@ def test_a_second_signal_during_a_non_poll_commands_forgectl_shutdown_does_not_c
     fake.add(pr(1))
     fake.hang("snapshot", seconds=60, ignore_term=True, descendant=True)
     seen = len(fake.calls("snapshot"))
-    run = launch("watch", "add", f"{HOST}/example-org/widgets#1", "--owner", OWNER)
+    run = launch(
+        "watch", "add", f"{HOST}/example-org/widgets#1", "--owner", OWNER, PRW_NOTE_SIGNAL="1"
+    )
     wait_for_new_call(fake, "snapshot", seen)
     fake.wait_ready()  # the child ignores SIGTERM: its shutdown takes the 2 s term grace
     call = fake.calls("snapshot")[seen]
     assert call.descendants
     run.signal(signal.SIGTERM)
-    time.sleep(0.3)  # the unwind is in the child's grace (2 s); the handler ran long ago
+    run.wait_noted()  # the first handler has run: the unwind is in the child's 2 s grace
     run.signal(signal.SIGINT)
     check_clean_exit(run, signal.SIGTERM, timeout=30)  # 143, not 130, and not a leaked child
     for pid in [call.pid, *call.descendants]:
@@ -879,6 +881,24 @@ def test_a_stop_signal_before_the_cli_is_loaded_exits_128_plus_it_without_a_trac
         [sys.executable, "-c", code], capture_output=True, text=True, env=_env(), timeout=60
     )
     assert done.returncode == 128 + number and done.stderr == ""
+
+
+def test_the_entry_point_leaves_no_exit_now_handler_after_the_cli_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pr_watch import _entry, cli
+
+    saved = {n: signal.getsignal(n) for n in STOPS}
+    monkeypatch.setattr(cli, "main", lambda: 0)
+    try:
+        assert _entry.main() == 0
+        after = {n: signal.getsignal(n) for n in STOPS}
+    finally:
+        for number, old in saved.items():
+            signal.signal(number, old)
+    assert all(h is not _entry._exit_now for h in after.values())  # noqa: SLF001
+    assert after[signal.SIGINT] is signal.default_int_handler
+    assert after[signal.SIGTERM] == signal.SIG_DFL and after[signal.SIGHUP] == signal.SIG_DFL
 
 
 def test_the_module_entry_point_runs_the_cli() -> None:
