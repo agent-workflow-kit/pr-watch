@@ -41,7 +41,7 @@ from typing import Any, Final
 
 from .cli import CliError, Context, OutputError, ref_error_to_cli, store_error_to_cli
 from .refs import PrId, PrRef, RefError, duration_ms, match_stored
-from .store import StoredEvent, classify_error, format_ts
+from .store import DB_NAME, StoredEvent, classify_error, format_ts
 from .text import bounded_one_line
 from .watches import label_text, resolve_stored_pr
 
@@ -67,15 +67,29 @@ def read_snapshot(conn: sqlite3.Connection) -> Iterator[None]:
 
 
 def stored_event(row: Any) -> StoredEvent:
+    """One `events` row. A payload that is not a JSON object, or labels that are not a JSON list of
+    strings, is a corrupt store: a fixed one-line `internal` error naming the seq (no content)."""
+    seq = int(row[0])
+    try:
+        payload = json.loads(row[5])
+        labels = json.loads(row[7])
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(labels, list)
+            or not all(isinstance(x, str) for x in labels)
+        ):
+            raise ValueError("malformed event")
+    except (ValueError, TypeError):
+        raise CliError("internal", f"{DB_NAME} holds a malformed event (seq {seq})") from None
     return StoredEvent(
-        seq=int(row[0]),
+        seq=seq,
         id=str(row[1]),
         type=str(row[2]),
         pr_id=str(row[3]),
         pr=str(row[4]),
-        payload=json.loads(row[5]),
+        payload=payload,
         detected_at=str(row[6]),
-        labels=json.loads(row[7]),
+        labels=labels,
     )
 
 
@@ -99,7 +113,12 @@ class Filters:
             out += f" AND type IN ({', '.join('?' * len(self.types))})"
             params += self.types
         for label in self.labels:
-            out += " AND EXISTS (SELECT 1 FROM json_each(events.labels) WHERE value = ?)"
+            # malformed labels pass the filter so that stored_event reports the row, not SQLite
+            out += (
+                " AND CASE WHEN json_valid(events.labels)"
+                " THEN EXISTS (SELECT 1 FROM json_each(events.labels) WHERE value = ?)"
+                " ELSE 1 END"
+            )
             params.append(label)
         return out, params
 
@@ -180,7 +199,9 @@ def build(ctx: Context, args: argparse.Namespace) -> dict[str, Any]:
     since: str | None = args.since
     if store is None:
         filters = resolve_filters(None, args)  # an unresolvable --pr is exit 10
-        gap = since is not None and since.split(".")[1] != PLACEHOLDER_STORE_ID
+        gap = since is not None and (
+            since.split(".")[1] != PLACEHOLDER_STORE_ID or int(since.split(".")[2]) > 0
+        )
         return {
             "events": [],
             "cursor": f"v1.{PLACEHOLDER_STORE_ID}.0",

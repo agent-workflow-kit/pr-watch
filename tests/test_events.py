@@ -119,6 +119,14 @@ def test_missing_state_dir_is_an_empty_store_and_creates_nothing(
     assert not state_dir.exists()
 
 
+def test_missing_store_placeholder_cursor_above_zero_is_a_gap(
+    state_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert events(capsys, "--since", "v1.aaaaaaaa.5")["gap"] is True
+    assert events(capsys, "--since", "v1.aaaaaaaa.0")["gap"] is False
+    assert not state_dir.exists()
+
+
 def test_without_since_returns_no_event_and_the_head(
     store: Store, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -829,3 +837,64 @@ def test_export_json_lines_contain_stored_text_escaped_not_raw(
     code, out, _ = run(capsys, "export")
     assert code == 0 and out.count("\n") == 1  # the newline in the login did not split the line
     assert json.loads(out)["author"]["login"] == "a\nb c"
+
+
+def test_export_golden(store: Store, capsys: pytest.CaptureFixture[str]) -> None:
+    add_event(store, "pushed", labels=("team=x",), detected=D0)
+    add_event(
+        store, "comment", comment_id="gh:ic:1", thread_id=None,
+        author={"id": "u1", "login": "ann", "is_bot": False},
+    )  # fmt: skip
+    lines = export_lines(capsys)
+    for e in lines:
+        e["id"] = "ev-" + "a" * 12
+    path = GOLDEN / "export.jsonl"
+    text = "".join(json.dumps(e, sort_keys=True) + "\n" for e in lines)
+    if not path.exists():  # first run: write it, fail, and review the file before committing
+        path.write_text(text)
+        pytest.fail(f"golden {path.name} was missing and has been written; review it")
+    assert text == path.read_text()
+
+
+# --- corrupt stored rows ------------------------------------------------------------------------
+
+MALFORMED = "state.db holds a malformed event (seq 2)"
+
+
+def corrupt(store: Store, column: str, value: str) -> None:
+    with store.transaction() as c:
+        c.execute(f"UPDATE events SET {column} = ? WHERE seq = 2", (value,))  # noqa: S608
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("payload", "{not json"),
+        ("payload", "[1, 2]"),
+        ("labels", "not json"),
+        ("labels", '{"a": 1}'),
+        ("labels", "[1, 2]"),
+    ],
+)
+@pytest.mark.parametrize("argv", [["events", "--since", "CUR0"], ["export"]])
+def test_malformed_stored_row_is_a_fixed_internal_error(
+    store: Store, capsys: pytest.CaptureFixture[str], column: str, value: str, argv: list[str]
+) -> None:
+    add_many(store, 3)
+    corrupt(store, column, value)
+    argv = [cur(store, 0) if a == "CUR0" else a for a in argv]
+    code, err = error_of(capsys, *argv)
+    assert code == 1 and err["code"] == "internal" and err["message"] == MALFORMED
+
+
+def test_label_filter_over_malformed_labels_reports_the_row_error_not_sqlite(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    add_many(store, 3, labels=("a=b",))
+    corrupt(store, "labels", "not json")
+    for argv in (
+        ["events", "--since", cur(store, 0), "--label", "a=b"],
+        ["export", "--label", "a=b"],
+    ):
+        code, err = error_of(capsys, *argv)
+        assert code == 1 and err["code"] == "internal" and err["message"] == MALFORMED
