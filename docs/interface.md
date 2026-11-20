@@ -247,7 +247,7 @@ Prints the watches (id, kind, key or reference, owners, labels, `created_at`, an
 
 `pr-watch show <pr>`
 
-One watched PR: its row, its watches and the digest summary (the same fields as in `list`, plus `blocked_by`, `review_decision`, `approvals_at_head`, the reviewers' latest states, and the counts in `seen`) and its most recent 20 events, oldest first. Exit 10 when the PR is not stored. `<pr>` is matched on the canonical `pr`, a URL or the `pr_id` of a stored row (Identifiers); each reviewer is printed with its reviewer `key`.
+One watched PR: its row, its watches and the digest summary (the same fields as in `list`, plus `blocked_by`, `review_decision`, `approvals_at_head`, the reviewers' latest states, and the counts in `seen`) and its most recent 20 events, oldest first. Exit 10 when the PR is not stored. `<pr>` is matched on the canonical `pr`, a URL or the `pr_id` of a stored row (Identifiers); each reviewer is printed with its reviewer `key`. A reviewer whose stored state is `unknown` is not listed (it counts as no entry); `at` is printed as UTC microsecond text. `show` prints stored rows only: a PR that only has retained events is exit 10 (`events --pr` still resolves it).
 
 ### `events`
 
@@ -257,6 +257,7 @@ Prints events after the cursor, oldest first. Never contacts a host and never ch
 
 - `seq` is an AUTOINCREMENT integer (deleted numbers are never reused). `meta.pruned_through_seq` is the highest deleted seq. `gap` is true iff the cursor's `store_id` differs, or its `seq` is greater than the head, or its `seq` is less than `pruned_through_seq`; a cursor equal to `pruned_through_seq`, or at the head after a quiet month, is no gap, and a cursor at 50 with an empty table and head 100 is a gap. The head is the AUTOINCREMENT high-water mark (`sqlite_sequence`), 0 on a new store. The head and the rows are read in one read transaction.
 - `cursor` in the result is the head read in that transaction when `more` is false (everything up to it was examined, so filters do not rescan), and the `seq` of the last returned event when `more` is true. With a gap and a backlog the same rules apply and the filters apply to the backlog. With a gap, the events from the oldest retained one are still returned (all of the current store when the id differs); the consumer must re-sync current state through forgectl and treat the events as possibly incomplete.
+- With no store at all (no state directory, no `state.db`, or an empty file) `events` creates nothing and reports an empty store: head 0 and the placeholder `store_id` `aaaaaaaa`, so a cursor of another id is a `gap`. A consumer that took that cursor before the first `watch add` sees one `gap` afterwards; the `cursor` of the `watch add` result avoids it. A cursor with another `store_id`, or above the head, reads from the start of the store; one below `pruned_through_seq` reads after its own seq. `rev` is not an output of any read command, so a rename changes nothing `events`, `show` or `export` print.
 - `--limit` outside 1 to 1000, an unknown `--type`, an invalid `--label` or a bad cursor is exit 2 (`code: usage`, `details.kind`: `bad_limit`, `bad_type`, `bad_label`, `bad_cursor`).
 - Output without `--json` is human text with no stability guarantee; tests and consumers use `--json`.
 
@@ -289,7 +290,7 @@ A block starts at a line that is exactly `# pr-watch managed` or begins with `# 
 
 `pr-watch export [--since D] [--label k=v]... [--type T]... [--pr <ref>]...`
 
-Prints the stored events oldest first as JSON lines (each `schemas/event.json`), always JSON whatever the global flags. `D` is a duration (Time) and selects events detected within the last `D` (without it, every retained event); the three filters are those of `events` (a human who wants "what happened overnight" runs `export --since 1d`). pr-watch takes no external action, so it writes no `audit.jsonl` and `export` has no audit records to print.
+Prints the stored events oldest first as JSON lines (each `schemas/event.json`), always JSON whatever the global flags. `D` is a duration (Time) and selects events detected within the last `D` (without it, every retained event); the three filters are those of `events` (a human who wants "what happened overnight" runs `export --since 1d`). `--since 0` selects nothing; `export` has no limit, and `--quiet` does not silence it. pr-watch takes no external action, so it writes no `audit.jsonl` and `export` has no audit records to print.
 
 ### Global flags
 
