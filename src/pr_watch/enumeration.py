@@ -683,7 +683,7 @@ def plan_repo_scopes(
 # --- the pipeline stage ---
 
 
-def _note_rate(facts: HostFacts, result: dict[str, Any]) -> None:
+def note_rate(facts: HostFacts, result: dict[str, Any]) -> None:
     rate = result.get("rate_limit")
     if not isinstance(rate, dict):
         return
@@ -696,7 +696,7 @@ def _note_rate(facts: HostFacts, result: dict[str, Any]) -> None:
         facts.reset_at = reset if isinstance(reset, str) else None
 
 
-def _record_failure(
+def record_failure(
     res: EnumerationResult,
     facts: HostFacts,
     decision: table.Decision,
@@ -831,10 +831,10 @@ def _list_query(
     decision = table.decide(outcome, "query")
     effect = decision.effect
     if not (effect.commit or effect.use_result) or outcome.result is None:
-        _record_failure(res, facts, decision, kind_ref=host, log=log)
+        record_failure(res, facts, decision, kind_ref=host, log=log)
         return
     facts.listings += 1
-    _note_rate(facts, outcome.result)
+    note_rate(facts, outcome.result)
     items, clean = _items(outcome.result, host)
     complete = _is_complete(outcome.result, clean) and effect.commit
     if effect.use_result:
@@ -863,7 +863,7 @@ def _partial_entries(
             continue
         reason = err.get("reason")
         one = table.decide_code(err["code"], reason if isinstance(reason, str) else None, call)
-        _record_failure(res, facts, one, kind_ref=ref, log=log)
+        record_failure(res, facts, one, kind_ref=ref, log=log)
 
 
 def _list_repo(
@@ -881,10 +881,10 @@ def _list_repo(
     decision = table.decide(outcome, "repo")
     effect = decision.effect
     if not (effect.commit or effect.use_result) or outcome.result is None:
-        _record_failure(res, facts, decision, kind_ref=repo, log=log)
+        record_failure(res, facts, decision, kind_ref=repo, log=log)
         return
     facts.listings += 1
-    _note_rate(facts, outcome.result)
+    note_rate(facts, outcome.result)
     items, clean = _items(outcome.result, facts.host)
     complete = _is_complete(outcome.result, clean) and effect.commit
     if effect.use_result:

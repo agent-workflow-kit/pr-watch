@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
+from . import settle
 from .digest import PARTS, digest_from_json
-from .store import format_ts
 
 
 def _counters(text: str) -> dict[str, int]:
@@ -47,16 +47,9 @@ def pr_row(
     raw_ci = d.get("ci")
     ci: dict[str, Any] = raw_ci if isinstance(raw_ci, dict) else {}
     raw_hold = ci.get("hold")
-    hold = raw_hold if isinstance(raw_hold, int) else 0
-    stale = hold > 0
+    stale = isinstance(raw_hold, int) and not isinstance(raw_hold, bool) and raw_hold > 0
     ci_state = None if stale or digest is None else ci.get("state")
-    raw_blocked = d.get("blocked_by")
-    blocked: list[Any] = raw_blocked if isinstance(raw_blocked, list) else []
-    unsettled = ci.get("state") == "pending" or stale or "mergeability_unknown" in blocked
-    stuck = False
-    if unsettled and r[10]:
-        cutoff = format_ts(now - timedelta(milliseconds=pending_max_age_ms))
-        stuck = str(r[10]) <= cutoff
+    stuck = settle.is_unsettled(digest) and settle.is_stuck(r[10], now, pending_max_age_ms)
     counts = _counters(str(r[9]))
     full = conn.execute("SELECT last_full_at FROM hosts WHERE host = ?", (r[2],)).fetchone()
     sources = sorted(
