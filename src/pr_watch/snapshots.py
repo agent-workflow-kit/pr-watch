@@ -30,6 +30,10 @@
   leases are released and `interrupted` is set; PRs in flight keep their persisted triggers.
   `out_of_time` (the `poll.max_duration` budget, `pacing.time_budget`) only stops starting: the
   rest is `deferred` and `truncated` is set. The per-host cap is applied by `selection.py`.
+- **Host end.** `on_host_done(host, out)` is called from the calling thread when a host's queue
+  and in-flight entries have all ended (every result committed or failed), so the poll writes
+  that host's state (pause, low water, pass) before the other hosts' long phases; never after a
+  signal or a tool failure halted the pool.
 
 Judgment calls where the interface is silent (kept conservative):
 
@@ -351,7 +355,10 @@ class _Pool:
         should_stop: Callable[[], bool] | None,
         out_of_time: Callable[[], bool] | None,
         forced_for: ForcedFor | None,
+        on_host_done: Callable[[str, PoolResult], None] | None = None,
     ) -> None:
+        self.on_host_done = on_host_done
+        self.done: set[str] = set()
         self.store, self.client, self.config, self.res = store, client, config, res
         self.log, self.leases, self.clock = log, leases, clock
         self.should_stop, self.out_of_time = should_stop, out_of_time
@@ -384,6 +391,7 @@ class _Pool:
                     self._drain(host)
                     if self.halt:
                         break
+                self._notify_done()
                 if all(not h.queue and not h.entries for h in self.hosts.values()):
                     break
                 pending = [e.future for h in self.hosts.values() for e in h.entries]
@@ -394,6 +402,16 @@ class _Pool:
             self._release_all()
             executor.shutdown(wait=True)
         return self.out
+
+    def _notify_done(self) -> None:
+        """Tell the caller each host whose queue and entries have ended (State transaction 4 is
+        written per host as it ends). Never after a halt: that host's cycle was cut off."""
+        if self.on_host_done is None or self.halt:
+            return
+        for host in self.hosts.values():
+            if host.name not in self.done and not host.queue and not host.entries:
+                self.done.add(host.name)
+                self.on_host_done(host.name, self.out)
 
     def _release_all(self) -> None:
         for host in self.hosts.values():
@@ -688,6 +706,7 @@ def run_snapshots(
     should_stop: Callable[[], bool] | None = None,
     out_of_time: Callable[[], bool] | None = None,
     forced_for: ForcedFor | None = None,
+    on_host_done: Callable[[str, PoolResult], None] | None = None,
 ) -> PoolResult:
     """Run the chosen snapshots (see the module docstring). Failures and host facts are added to
     `res`; the counters and the committed events are returned."""
@@ -695,4 +714,5 @@ def run_snapshots(
         store, client, config, selection, res,
         log=log, leases=leases, clock=clock or (lambda: datetime.now(UTC)),
         should_stop=should_stop, out_of_time=out_of_time, forced_for=forced_for,
+        on_host_done=on_host_done,
     ).run()  # fmt: skip

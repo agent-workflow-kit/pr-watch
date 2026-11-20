@@ -150,6 +150,14 @@ class Poll(_Model):
     max_snapshots: int = Field(default=40, ge=0, le=1000)
     _nn = field_validator("full_every", "concurrency", mode="before")(_not_null)
 
+    @field_validator("max_duration", mode="after")
+    @classmethod
+    def _max_duration_is_positive(cls, value: str) -> str:
+        # 0 would make every snapshot stage start out of time: refused rather than read as "no limit"
+        if duration_ms(value) < 1:
+            raise ValueError("must be at least 1ms (use a long duration for no practical limit)")
+        return value
+
 
 class HostOverride(_Model):
     full_every: int | None = Field(default=None, ge=1, le=10000)

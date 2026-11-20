@@ -158,6 +158,7 @@ class EnumerationResult:
     candidates: set[str] = field(default_factory=set)  # listed PRs that have a stored row
     scopes_listed: list[str] = field(default_factory=list)  # repos listed successfully
     interrupted: bool = False
+    stop_poll: bool = False  # forgectl's own config_invalid on a host call: the poll ends (exit 12)
 
     def facts(self, host: str) -> HostFacts:
         found = self.hosts.get(host)
@@ -367,6 +368,8 @@ def load_host_list(
         return host_list, res
     code = decision.code or "internal"
     failure = Failure("host", None, code, effect.poll_exit)
+    if effect.stop_poll:
+        res.stop_poll = True
     if effect.pause != "none":
         res.whoami_retry_after = decision.retry_after
     if cached is not None:
@@ -709,6 +712,8 @@ def record_failure(
     host or query failure is named by the host."""
     effect = decision.effect
     code = decision.code or "internal"
+    if effect.stop_poll:
+        res.stop_poll = True
     if effect.failed_kind is not None:
         ref = kind_ref if effect.failed_kind in ("repo", "pr") else facts.host
         res.failures.append(Failure(effect.failed_kind, ref, code, effect.poll_exit))
@@ -725,9 +730,10 @@ def record_failure(
 
 
 def _stopped(res: EnumerationResult, should_stop: Callable[[], bool] | None) -> bool:
+    """A signal, or a failure that ends the whole poll (`stop_poll`): no further call is made."""
     if should_stop is not None and should_stop():
         res.interrupted = True
-    return res.interrupted
+    return res.interrupted or res.stop_poll
 
 
 def enumerate_scopes(

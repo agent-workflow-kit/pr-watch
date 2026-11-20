@@ -1035,3 +1035,32 @@ def test_first_listing_start_before_year_one_is_left_to_the_full_pass(
     per_pr(store, 1, "0001-01-01T00:00:00.000000Z")
     res = run(store)
     assert fake.calls("prs") == [] and res.failures == []
+
+
+# --- forgectl's own config_invalid stops the poll (#25) ---
+
+
+def test_config_invalid_on_a_host_call_stops_the_poll_and_lists_no_other_host(
+    store: Store, fake: FakeForgectl
+) -> None:
+    fake.host("gitlab.example.net", me="user-1")
+    add_query(store)
+    fake.add(pr(1))
+    fake.fail("prs", "config_invalid", details={"key": "hosts.github.com"}, host=HOST)
+    res = run(store)
+    assert res.stop_poll
+    assert [(f.kind, f.ref, f.code, f.poll_exit) for f in res.failures] == [
+        ("host", HOST, "config_invalid", 12)
+    ]
+    assert [c.argv for c in fake.calls("prs") if "--host=gitlab.example.net" in c.argv] == []
+
+
+def test_a_listing_failure_without_stop_poll_lists_the_next_host(
+    store: Store, fake: FakeForgectl
+) -> None:
+    fake.host("gitlab.example.net", me="user-1")
+    add_query(store)
+    fake.network_error("prs", host=HOST)
+    res = run(store)
+    assert not res.stop_poll
+    assert len(fake.calls("prs")) == 2
