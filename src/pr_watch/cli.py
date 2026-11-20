@@ -221,7 +221,7 @@ HANDLERS: dict[str, Handler] = {
     "watch remove": lambda ctx, args: _watch_remove(ctx, args),
     "label add": lambda ctx, args: _label_add(ctx, args),
     "label remove": lambda ctx, args: _label_remove(ctx, args),
-    "list": _stub(19),  # TODO(#19): list
+    "list": lambda ctx, args: _list(ctx, args),
     "prune": _stub(20),  # TODO(#20): prune
     "poll": _stub(25),  # TODO(#25): poll (and the signal contract, exit 128+N)
     "events": _stub(27),  # TODO(#27): events
@@ -254,6 +254,12 @@ def _watch_add(ctx: Context, args: argparse.Namespace) -> int:
     from .watch_add import watch_add  # lazy: it imports this module (failures needs CliError)
 
     return watch_add(ctx, args)
+
+
+def _list(ctx: Context, args: argparse.Namespace) -> int:
+    from .listing import list_command  # lazy: it imports this module
+
+    return list_command(ctx, args)
 
 
 def _remove_target(conn: Any, args: argparse.Namespace) -> tuple[str | None, str, str | None]:
