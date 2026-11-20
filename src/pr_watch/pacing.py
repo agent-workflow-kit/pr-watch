@@ -505,6 +505,10 @@ def observed(store: Store, res: EnumerationResult, pool: PoolResult | None) -> b
     return store.conn.execute("SELECT 1 FROM watches LIMIT 1").fetchone() is None
 
 
+class _StopRequested(Exception):
+    """Rolls back `finish_poll`'s transaction when the poll was stopped meanwhile."""
+
+
 def finish_poll(
     store: Store,
     res: EnumerationResult,
@@ -514,18 +518,25 @@ def finish_poll(
     restricted: bool,
     exit_ok: bool,
     interrupted: bool,
+    should_stop: Callable[[], bool] = lambda: False,
 ) -> bool:
     """Write `meta.last_poll_finished_at` when the poll was not restricted, was not
     `already_running`, ended with exit 0, was not interrupted and observed something (`truncated`
-    polls count). Returns whether it was written."""
+    polls count). `should_stop` is asked again inside the transaction: a signal that arrived after
+    `interrupted` was read rolls the write back. Returns whether it was written."""
     if restricted or not exit_ok or interrupted or (pool is not None and pool.already_running):
         return False
     if not observed(store, res, pool):
         return False
-    with store.transaction() as conn:
-        conn.execute(
-            "INSERT INTO meta (key, value) VALUES ('last_poll_finished_at', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (format_ts(now),),
-        )
+    try:
+        with store.transaction() as conn:
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('last_poll_finished_at', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (format_ts(now),),
+            )
+            if should_stop():
+                raise _StopRequested
+    except _StopRequested:
+        return False
     return True

@@ -16,9 +16,9 @@ Environment (all optional):
   first `PRW_PAUSE_SKIP` (default 0) qualifying transactions run on.
 - `PRW_PAUSE_AT=module:function`: pause before that function runs (patched before any pr_watch
   module that imports it by name is loaded).
-- `PRW_ROLLBACK_FILE`: stall in `Store._rollback` (the first thing a signalled command does with
-  an open transaction) after writing this file, until `PRW_GO` exists: the window for a second
-  signal during shutdown.
+- `PRW_ROLLBACK_FILE`: stall after `Store._rollback` (the first thing a signalled command does with
+  an open transaction) has rolled it back: write this file, then wait until `PRW_GO` exists: the
+  window for a second signal during shutdown.
 - `PRW_NOTE_SIGNAL`: append a line to this file whenever the gateway is told to signal its
   children, i.e. once the poll's signal handler has run (the handshake for "the signal landed").
 """
@@ -99,10 +99,11 @@ def _patch_rollback_stall(marker: str) -> None:
     original = Store._rollback
 
     def stalled(self: Any) -> None:
-        if self.conn.in_transaction:
+        was_open = self.conn.in_transaction
+        original(self)  # the rollback itself runs first, as in production ...
+        if was_open:  # ... and the window for a second signal opens after it
             _write_atomic(marker, str(os.getpid()))
             _wait_for_go()
-        original(self)
 
     Store._rollback = stalled  # type: ignore[method-assign]
 

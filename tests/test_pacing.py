@@ -510,6 +510,18 @@ def test_finish_poll_writes_only_when_allowed(store: Store) -> None:
     assert fin(store, res)
 
 
+def test_finish_poll_rolls_back_when_the_stop_flag_rises_inside_its_transaction(
+    store: Store,
+) -> None:
+    res = empty()
+    assert not fin(store, res, should_stop=lambda: True)  # `interrupted` was still False
+    assert (
+        store.conn.execute("SELECT 1 FROM meta WHERE key = 'last_poll_finished_at'").fetchone()
+        is None
+    )
+    assert not store.conn.in_transaction
+
+
 # --- review round 1 ---
 
 

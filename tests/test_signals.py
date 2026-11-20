@@ -31,7 +31,7 @@ from pr_watch import watches
 from pr_watch.state_dir import open_state_dir
 from pr_watch.store import NewEvent, Store, open_store
 from tests.forgectl_support import FakeForgectl, new_pr, sha
-from tests.gateway_support import Reaper
+from tests.gateway_support import Reaper, _start_time
 from tests.harness import assert_valid
 
 HOST = "github.com"
@@ -153,12 +153,22 @@ class Run:
         return self.proc.returncode, out, err
 
     def kill_group(self) -> None:
-        """Whatever of this run's own group is left; the group was created by this test."""
-        if group_members(self.pgid):
+        """Whatever of this run's own group is left. While the leader is unreaped its pid is the
+        group id and `killpg` is exact; after that the id may be recycled, so only the members seen
+        now are signalled, each re-checked by pid and start time."""
+        members = [(pid, _start_time(pid)) for pid in group_members(self.pgid)]
+        if self.proc.returncode is None:
             try:
                 os.killpg(self.pgid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+        else:
+            for pid, started in members:
+                if started is not None and _start_time(pid) == started:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
         self.proc.communicate()
 
 
@@ -166,7 +176,7 @@ Launch = Callable[..., Run]
 
 
 @pytest.fixture
-def launch(tmp_path: Path, reaper: Reaper) -> Iterator[Launch]:
+def launch(tmp_path: Path, reaper: Reaper, fake_forgectl: FakeForgectl) -> Iterator[Launch]:
     runs: list[Run] = []
     directory = tmp_path / "handshakes"
     directory.mkdir()
@@ -181,6 +191,14 @@ def launch(tmp_path: Path, reaper: Reaper) -> Iterator[Launch]:
     finally:
         for run in runs:
             run.kill_group()
+        # The fake forgectl runs in its own session, so no group above reaches it: a failed test
+        # must not leave a 60 s hang behind.
+        try:
+            for call in fake_forgectl.calls():
+                for pid in (call.pid, *call.descendants):
+                    reaper.track(pid)
+        except OSError:  # the fake was never called
+            pass
 
 
 def check_clean_exit(run: Run, number: int, timeout: float = 120.0) -> tuple[str, str]:
@@ -221,6 +239,17 @@ def dump(store: Store, skip: tuple[str, ...] = ()) -> dict[str, list[tuple[Any, 
 def assert_sound(store: Store) -> None:
     assert store.conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
     assert store.conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+# Enumeration and the host stages of an interrupted poll legitimately update `hosts` and the
+# listing's columns of `prs`; `leases` is the poll's own lock. Everything else is compared whole.
+ENUMERATION_OWNED = ("leases", "hosts", "prs")
+
+
+def poll_state(store: Store) -> tuple[dict[str, list[tuple[Any, ...]]], list[tuple[Any, ...]]]:
+    """The state a snapshot commit or a poll's end could change: every other table whole, plus the
+    per-PR columns the snapshot commit owns."""
+    return dump(store, skip=ENUMERATION_OWNED), pr_state(store)
 
 
 def pr_state(store: Store) -> list[tuple[Any, ...]]:
@@ -354,6 +383,14 @@ def _setup_watched(launch: Launch, fake: FakeForgectl, store: Store) -> None:
         assert code == 0, doc
 
 
+def _setup_labeled(launch: Launch, fake: FakeForgectl, store: Store) -> None:
+    _setup_watched(launch, fake, store)
+    code, doc = run_to_end(
+        launch, "label", "add", f"{HOST}/example-org/widgets#1", "--owner", OWNER, "k=v"
+    )
+    assert code == 0, doc
+
+
 def _setup_prune(launch: Launch, fake: FakeForgectl, store: Store) -> None:
     seed_expired(store)
 
@@ -374,6 +411,15 @@ CASES = [
     Case(
         "prune", ("prune",), None, _setup_prune,
         lambda s: count(s, "events") == 0 and count(s, "prs") == 0,
+    ),
+    Case(
+        "watch-add-query", ("watch", "add", "--mine", "--open", "--owner", OWNER),
+        "SELECT 1 FROM watches", _setup_none, lambda s: count(s, "watches") == 1,
+    ),
+    Case(
+        "label-remove",
+        ("label", "remove", f"{HOST}/example-org/widgets#1", "--owner", OWNER, "k=v"),
+        None, _setup_labeled, lambda s: count(s, "labels") == 0,
     ),
 ]  # fmt: skip
 
@@ -454,13 +500,13 @@ def test_sigkill_inside_a_poll_commit_leaves_no_partial_pr_and_the_next_poll_emi
 ) -> None:
     baselined(launch, fake)
     pushed(fake)
-    before = pr_state(store)
+    before = poll_state(store)
     run = launch("poll", **POLL_COMMIT)
     run.wait_ready()
     run.signal(signal.SIGKILL)
     code, _, _ = run.finish()
     assert code == -signal.SIGKILL
-    assert pr_state(store) == before and events(store) == []
+    assert poll_state(store) == before  # every other table, explicitly
     assert_sound(store)
     assert count(store, "leases") == 1  # the dead holder's lease is left; the next poll takes it
     code, doc = run_to_end(launch, "poll")
@@ -478,15 +524,18 @@ def test_a_stop_signal_inside_a_poll_commit_lets_that_commit_finish_whole_then_e
     baselined(launch, fake)
     pushed(fake)
     rev = pr_state(store)[0][1]
-    run = launch("poll", **POLL_COMMIT)
+    finished = meta(store, "last_poll_finished_at")
+    run = launch("poll", PRW_NOTE_SIGNAL="1", **POLL_COMMIT)
     run.wait_ready()
     run.signal(number)  # the poll's handler only sets a flag: the open transaction is not torn
+    run.wait_noted()  # the handler has run before the commit is let go
     run.release()
     out, _ = check_clean_exit(run, number)
     assert out == ""
     assert events(store) == ["pushed"]  # all of it: the event, the digest and the revision
     assert pr_state(store)[0][1] == rev + 1  # one revision, with its event and digest
     assert count(store, "leases") == 0
+    assert meta(store, "last_poll_finished_at") == finished  # an interrupted poll stamps nothing
     ends = [r for r in log_records(state_dir) if r["event"] == "poll_end"]
     assert ends[-1]["interrupted"] is True
     code, doc = run_to_end(launch, "poll")  # no duplicate on the next poll
@@ -498,19 +547,19 @@ def test_a_second_signal_during_poll_shutdown_still_ends_it_once_with_the_first_
 ) -> None:
     baselined(launch, fake)
     pushed(fake)
-    fake.slow("snapshot", 60.0)
-    fake.term_delay(30.0)  # the child ignores the stop until pr-watch's own KILL
-    before = pr_state(store)
+    fake.hang("snapshot", seconds=60, ignore_term=True)  # ignores the stop until pr-watch's KILL
+    before = poll_state(store)
     seen = len(fake.calls("snapshot"))
     run = launch("poll", PRW_NOTE_SIGNAL="1")
     child = wait_for_new_call(fake, "snapshot", seen).pid
+    fake.wait_ready()  # its SIGTERM-ignore is installed: the signal below really is ignored
     run.signal(signal.SIGTERM)
     run.wait_noted()  # the handler has run: the shutdown is under way
     run.signal(signal.SIGINT)
-    code, out, err = run.finish(timeout=30)  # not the fake's 30 s term_delay
+    code, out, err = run.finish(timeout=30)  # not the fake's 60 s hang
     assert code == 128 + signal.SIGTERM and out == "" and "Traceback" not in err
     assert wait_gone(child)
-    assert pr_state(store) == before and events(store) == [] and count(store, "leases") == 0
+    assert poll_state(store) == before and count(store, "leases") == 0
     ends = [r for r in log_records(state_dir) if r["event"] == "poll_end"]
     assert len(ends) == 2 and ends[-1]["interrupted"] is True  # the baseline poll and this one
 
@@ -521,13 +570,14 @@ def test_a_stop_signal_after_the_snapshot_and_before_its_commit_commits_nothing(
 ) -> None:
     baselined(launch, fake)
     pushed(fake)
-    before = pr_state(store)
-    run = launch("poll", **POLL_BEFORE_DRAIN)
+    before = poll_state(store)
+    run = launch("poll", PRW_NOTE_SIGNAL="1", **POLL_BEFORE_DRAIN)
     run.wait_ready()
     run.signal(number)
+    run.wait_noted()
     run.release()
     check_clean_exit(run, number)
-    assert pr_state(store) == before and events(store) == []
+    assert poll_state(store) == before and events(store) == []
     assert count(store, "leases") == 0
     code, doc = run_to_end(launch, "poll")
     assert code == 0 and doc["prs"]["snapshotted"] == 1 and events(store) == ["pushed"]
@@ -555,12 +605,21 @@ def test_a_forgectl_exiting_143_unsignalled_is_an_interrupted_pr_with_no_counter
     pushed(fake)
     pushed(fake, 3, number=2)
     fake.raw("snapshot", exit=143, times=1)  # the first snapshot call only
+    before = pr_state(store)
     code, doc = run_to_end(launch, "poll")
     assert code == 0, doc  # pr-watch was not signalled: the poll goes on and ends normally
     assert_valid("cli/poll", doc)
     assert doc["prs"]["snapshotted"] == 1
     assert store.conn.execute("SELECT sum(failure_count) FROM prs").fetchone()[0] == 0
     assert events(store) == ["pushed"]
+    after = pr_state(store)
+    kept = [
+        b[:4] == a[:4] for b, a in zip(before, after, strict=True)
+    ]  # pr_id, rev, digest, status
+    assert sorted(kept) == [
+        False,
+        True,
+    ]  # exactly one PR advanced; the interrupted one is as it was
     code, doc = run_to_end(launch, "poll")  # the interrupted PR is retried next cycle
     assert code == 0 and doc["prs"]["snapshotted"] == 1 and events(store) == ["pushed", "pushed"]
 
@@ -662,8 +721,10 @@ def test_a_second_signal_while_a_command_rolls_back_still_exits_143_quietly(
     run = launch(*case.argv, PRW_ROLLBACK_FILE="1", **paused(case))
     run.wait_ready()
     run.signal(signal.SIGTERM)
-    run.wait_rollback()  # the first signal is being unwound
-    run.signal(signal.SIGTERM)
+    run.wait_rollback()  # the first signal is being unwound, the rollback already done
+    run.signal(signal.SIGINT)
+    time.sleep(0.2)  # the second signal is delivered while the stall is still on
+    run.release()
     out, err = check_clean_exit(run, signal.SIGTERM)
     assert out == "" and err == ""
     assert dump(store) == before and not case.effect(store)
@@ -716,3 +777,141 @@ def test_list_json_into_a_pipe_that_closes_early_ends_quietly_without_a_tracebac
     assert "Traceback" not in err and "Exception ignored" not in err
     assert err.count("cannot write to stdout") == 1
     assert dump(store) == before
+
+
+# --- the first signal wins, everywhere ------------------------------------------------------------
+
+
+def test_a_second_signal_during_a_non_poll_commands_forgectl_shutdown_does_not_change_the_exit(
+    launch: Launch, fake: FakeForgectl, store: Store
+) -> None:
+    fake.add(pr(1))
+    fake.hang("snapshot", seconds=60, ignore_term=True, descendant=True)
+    seen = len(fake.calls("snapshot"))
+    run = launch("watch", "add", f"{HOST}/example-org/widgets#1", "--owner", OWNER)
+    wait_for_new_call(fake, "snapshot", seen)
+    fake.wait_ready()  # the child ignores SIGTERM: its shutdown takes the 2 s term grace
+    call = fake.calls("snapshot")[seen]
+    assert call.descendants
+    run.signal(signal.SIGTERM)
+    time.sleep(0.3)  # the unwind is in the child's grace (2 s); the handler ran long ago
+    run.signal(signal.SIGINT)
+    check_clean_exit(run, signal.SIGTERM, timeout=30)  # 143, not 130, and not a leaked child
+    for pid in [call.pid, *call.descendants]:
+        assert wait_gone(pid), f"pid {pid} outlived the command"
+    assert count(store, "watches") == 0
+
+
+def test_a_signal_just_before_finish_poll_writes_nothing_and_exits_with_it(
+    launch: Launch, fake: FakeForgectl, store: Store
+) -> None:
+    baselined(launch, fake)
+    finished = meta(store, "last_poll_finished_at")
+    assert finished is not None
+    before = dump(store)
+    run = launch("poll", PRW_NOTE_SIGNAL="1", PRW_PAUSE_AT="pr_watch.pacing:finish_poll")
+    run.wait_ready()  # the stop flag was read (clear) by the caller; the write has not begun
+    run.signal(signal.SIGTERM)
+    run.wait_noted()
+    run.release()
+    check_clean_exit(run, signal.SIGTERM)
+    assert meta(store, "last_poll_finished_at") == finished
+    assert dump(store, skip=ENUMERATION_OWNED) == {
+        k: v for k, v in before.items() if k not in ENUMERATION_OWNED
+    }
+
+
+# --- more commands, one signal each ---------------------------------------------------------------
+
+
+def test_a_signal_to_prune_dry_run_exits_with_it_and_changes_nothing(
+    launch: Launch, fake: FakeForgectl, store: Store
+) -> None:
+    seed_expired(store)
+    before = dump(store)
+    run = launch("prune", "--dry-run", PRW_PAUSE_AT="pr_watch.prune:plan")
+    run.wait_ready()
+    run.signal(signal.SIGTERM)
+    out, err = check_clean_exit(run, signal.SIGTERM)
+    assert out == "" and err == "" and dump(store) == before
+
+
+@pytest.mark.parametrize("scope", ["pr", "repo"])
+def test_a_signal_to_a_restricted_poll_commits_nothing_and_exits_with_it(
+    scope: str, launch: Launch, fake: FakeForgectl, store: Store
+) -> None:
+    baselined(launch, fake)
+    pushed(fake)
+    before = poll_state(store)
+    target = (
+        ("--pr", f"{HOST}/example-org/widgets#1")
+        if scope == "pr"
+        else ("--repo", f"{HOST}/example-org/widgets")
+    )
+    run = launch("poll", *target, PRW_NOTE_SIGNAL="1", **POLL_BEFORE_DRAIN)
+    run.wait_ready()
+    run.signal(signal.SIGTERM)
+    run.wait_noted()
+    run.release()
+    check_clean_exit(run, signal.SIGTERM)
+    assert poll_state(store) == before and count(store, "leases") == 0
+
+
+# --- the startup window, closed stdout and closed stderr ------------------------------------------
+
+
+def _env() -> dict[str, str]:
+    return {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
+
+
+@pytest.mark.parametrize("number", STOPS)
+def test_a_stop_signal_before_the_cli_is_loaded_exits_128_plus_it_without_a_traceback(
+    number: signal.Signals,
+) -> None:
+    code = (
+        "from pr_watch._entry import install_early_handlers\n"
+        "install_early_handlers()\n"
+        "import os, signal, time\n"
+        f"os.kill(os.getpid(), {int(number)})\n"
+        "time.sleep(30)\n"
+    )
+    done = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", code], capture_output=True, text=True, env=_env(), timeout=60
+    )
+    assert done.returncode == 128 + number and done.stderr == ""
+
+
+def test_the_module_entry_point_runs_the_cli() -> None:
+    done = subprocess.run(  # noqa: S603
+        [sys.executable, "-m", "pr_watch", "--version"],
+        capture_output=True, text=True, env=_env(), timeout=60,
+    )  # fmt: skip
+    assert done.returncode == 0 and done.stdout.strip()
+
+
+def test_a_closed_stdout_is_exit_1_with_one_stderr_line_even_after_the_command_committed(
+    launch: Launch, fake: FakeForgectl, store: Store, reaper: Reaper
+) -> None:
+    fake.add(pr(1))
+    proc = subprocess.run(  # noqa: S603
+        [
+            "sh", "-c", 'exec "$@" >&-', "sh", sys.executable, str(LAUNCHER), "--json",
+            "watch", "add", f"{HOST}/example-org/widgets#1", "--owner", OWNER,
+        ],
+        stderr=subprocess.PIPE, text=True, env=_env(), timeout=60,
+    )  # fmt: skip
+    assert proc.returncode == 1, proc.stderr
+    assert proc.stderr.count("cannot write to stdout") == 1 and "Traceback" not in proc.stderr
+    assert count(store, "watches") == 1  # the write itself had committed
+
+
+def test_a_closed_stderr_does_not_stop_a_usage_error_from_reporting_on_stdout() -> None:
+    proc = subprocess.run(  # noqa: S603
+        [
+            "sh", "-c", 'exec "$@" 2>&-', "sh", sys.executable, str(LAUNCHER), "--json",
+            "watch", "add",
+        ],
+        stdout=subprocess.PIPE, text=True, env=_env(), timeout=60,
+    )  # fmt: skip
+    assert proc.returncode == 2
+    assert json.loads(proc.stdout)["error"]

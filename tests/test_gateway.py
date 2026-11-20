@@ -726,3 +726,59 @@ def test_python_is_the_interpreter_running_the_tests(reaper: Reaper) -> None:
         max_output=1000,
     )
     assert result.stdout.strip() == str(sys.version_info[:2])
+
+
+def test_a_deadline_hit_during_a_shutdown_still_gives_the_child_its_term_grace(
+    reaper: Reaper, shutdown_reset: None, tmp_path: Path
+) -> None:
+    ready, done = tmp_path / "trap-set", tmp_path / "cleaned"
+    # On TERM the shell cleans up for 1.5 s (its helper ignores TERM), then writes `done`.
+    script = (
+        f"trap '(trap \"\" TERM; sleep 1.5); : > {done}; exit 7' TERM; : > {ready}; "
+        "while :; do sleep 0.05; done"
+    )
+    results: list[gateway.Result] = []
+    thread = threading.Thread(
+        target=lambda: results.append(sh(script, timeout=1.0, term_grace=6.0))
+    )
+    thread.start()
+    try:
+        end = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < end:
+            time.sleep(0.01)
+        assert ready.exists()
+        assert gateway.signal_live(signal.SIGTERM, refuse_new=True) == 1
+    finally:
+        thread.join(20)
+    assert results[0].timed_out  # the deadline came 0.9 s later, inside the 1.5 s cleanup
+    assert done.exists(), "the child was killed without its term_grace"
+    assert results[0].returncode == 7
+
+
+def test_a_shutdown_kills_a_descendant_that_ignored_sigterm_when_the_leader_obeyed(
+    reaper: Reaper, shutdown_reset: None, tmp_path: Path
+) -> None:
+    pidfile = tmp_path / "descendant.pid"
+    script = (
+        "trap 'exit 0' TERM; "
+        f"(trap '' TERM; exec sh -c 'echo $$ > {pidfile}; exec sleep 60') & "
+        "wait"
+    )
+    results: list[gateway.Result] = []
+    thread = threading.Thread(target=lambda: results.append(sh(script, timeout=50)))
+    thread.start()
+    descendant = 0
+    try:
+        end = time.monotonic() + 10
+        while time.monotonic() < end:
+            if pidfile.exists() and pidfile.read_text().strip():
+                descendant = int(pidfile.read_text())
+                break
+            time.sleep(0.01)
+        assert descendant
+        reaper.track(descendant)
+        assert gateway.signal_live(signal.SIGTERM, refuse_new=True) == 1
+    finally:
+        thread.join(20)
+    assert results[0].returncode == 0
+    assert is_dead(descendant), "a descendant that ignored SIGTERM outlived the shutdown"

@@ -356,7 +356,8 @@ def signal_live(sig: int = signal.SIGTERM, *, refuse_new: bool = False) -> int:
     including on a thread that is inside `run` (see the module docstring). A child that was busy
     is counted as signalled: its signal is queued and delivered by its `run` loop at the next tick,
     unless the leader was reaped meanwhile. Each `run` then sees its child exit and returns
-    normally; the caller recognises an interrupted call by its returncode.
+    normally; the caller recognises an interrupted call by its own stop flag (the returncode can
+    be -SIGTERM or, for a child that ignored it for `SHUTDOWN_KILL_AFTER`, -SIGKILL).
 
     With `refuse_new` the shutdown flag is set first: a launch that starts later fails with
     `LaunchError`, and one that is between `Popen` and its registration is signalled by `_launch`
@@ -463,6 +464,7 @@ def _run_real(request: Request) -> Result:
     proc: subprocess.Popen[bytes] | None = None
     timed_out = False
     shutdown_seen: float | None = None
+    shutdown_kill = False  # the loop ended because the child ignored the shutdown's SIGTERM
     try:
         child = _launch(request, started)
         proc = child.proc
@@ -500,7 +502,10 @@ def _run_real(request: Request) -> Result:
                 if shutdown_seen is None:
                     shutdown_seen = now
                 elif now - shutdown_seen >= SHUTDOWN_KILL_AFTER:
+                    shutdown_kill = True
                     break  # SIGTERM was sent by signal_live; it was not obeyed: kill below
+            else:
+                shutdown_seen = None
             events = sel.select(min(tick, deadline - now)) if sel.get_map() else []
             if not events:
                 if not sel.get_map():
@@ -527,11 +532,13 @@ def _run_real(request: Request) -> Result:
             if cap.too_large:
                 break
         reaped = False
-        if shutdown_seen is not None and not child.exited():
+        if shutdown_kill and not child.exited():
             reaped = child.stop(0.0, request.abandon_after)  # SIGTERM already went out
         elif timed_out or cap.too_large:
             reaped = child.stop(request.term_grace, request.abandon_after)
         else:
+            if _SHUTDOWN.is_set():  # the leader obeyed SIGTERM: a descendant may not have
+                child.signal_group(signal.SIGKILL)  # leader still unreaped: its group id is ours
             reaped = child.wait(request.abandon_after)  # the leader has exited: reaps at once
         return Result(
             returncode=proc.returncode if reaped else None,

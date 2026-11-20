@@ -194,6 +194,9 @@ class Context:
 
     def emit(self, data: Any, human: str | None = None) -> None:
         """Print a command result: a JSON document with `--json`, else `human` unless `--quiet`."""
+        wanted = self.json or (human is not None and not self.quiet)
+        if wanted and sys.stdout is None:  # fd 1 closed at start: `print` would drop it silently
+            raise OutputError
         try:
             if self.json:
                 print(json.dumps(data), flush=True)
@@ -754,7 +757,7 @@ def _stderr_line(text: str) -> None:
     try:
         sys.stderr.write(text)
         sys.stderr.flush()
-    except OSError:
+    except (OSError, AttributeError):  # closed (fd 2 closed: `sys.stderr` is None)
         pass  # nowhere left to report it
 
 
@@ -868,7 +871,15 @@ class Signaled(BaseException):
 _SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
 
-def _raise_signaled(number: int, frame: FrameType | None) -> NoReturn:
+_FIRST_SIGNAL: list[int] = []  # the first stop signal of this process; later ones are ignored
+
+
+def _raise_signaled(number: int, frame: FrameType | None) -> None:
+    """First signal wins: it raises `Signaled`; later ones neither raise again nor change the
+    code, so they cannot interrupt the unwind (the child's shutdown, the rollback)."""
+    if _FIRST_SIGNAL:
+        return
+    _FIRST_SIGNAL.append(number)
     raise Signaled(number)
 
 
@@ -882,6 +893,7 @@ def _install_signal_handlers() -> dict[int, Any]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    _FIRST_SIGNAL.clear()
     saved = _install_signal_handlers()
     try:
         return _main(args)

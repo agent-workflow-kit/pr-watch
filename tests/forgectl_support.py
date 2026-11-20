@@ -404,13 +404,19 @@ class FakeForgectl:
             check=False,
         )
 
+    def _records(self) -> list[dict[str, Any]]:
+        """The call log's records; a line the fake is still writing (no newline yet) is not one."""
+        text = (self.dir / "calls.jsonl").read_text(encoding="utf-8")
+        if not text.endswith("\n"):
+            text = text[: text.rfind("\n") + 1]
+        return [json.loads(line) for line in text.splitlines()]
+
     def calls(self, command: str | None = None) -> list[Call]:
         starts: dict[str, dict[str, Any]] = {}
         ends: dict[str, dict[str, Any]] = {}
         kids: dict[str, list[int]] = {}
         order: list[str] = []
-        for line in (self.dir / "calls.jsonl").read_text(encoding="utf-8").splitlines():
-            record = json.loads(line)
+        for record in self._records():
             if record["phase"] == "start":
                 starts[record["id"]] = record
                 order.append(record["id"])
@@ -434,8 +440,7 @@ class FakeForgectl:
         """Block until a call's `ignore_term` hang has installed its SIGTERM-ignore handler."""
         end = time.monotonic() + timeout
         while time.monotonic() < end:
-            lines = (self.dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()
-            if any(json.loads(line)["phase"] == "ready" for line in lines):
+            if any(record["phase"] == "ready" for record in self._records()):
                 return
             time.sleep(0.02)
         raise AssertionError("the fake never reported that it ignores SIGTERM")

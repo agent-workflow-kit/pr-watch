@@ -39,7 +39,7 @@ def test_every_module_of_the_map_imports(module: str) -> None:
 
 def test_console_script_is_declared() -> None:
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'pr-watch = "pr_watch.cli:main"' in text
+    assert 'pr-watch = "pr_watch._entry:main"' in text
 
 
 def test_module_entry_point_runs_and_reports_version() -> None:
@@ -67,7 +67,7 @@ def test_installed_console_script_runs() -> None:
 
 def test_console_script_entry_point_is_registered() -> None:
     eps = importlib.metadata.entry_points(group="console_scripts")
-    assert {ep.name: ep.value for ep in eps}.get("pr-watch") == "pr_watch.cli:main"
+    assert {ep.name: ep.value for ep in eps}.get("pr-watch") == "pr_watch._entry:main"
 
 
 def test_version_output_matches_pyproject() -> None:
