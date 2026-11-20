@@ -186,10 +186,24 @@ def open_state_dir(path: Path | None = None) -> StateDir:
 
     Raises `StateDirError` for an unsafe directory or one that cannot be created.
     """
+    state = _open_state_dir(path, create=True)
+    assert state is not None
+    return state
+
+
+def open_existing_state_dir(path: Path | None = None) -> StateDir | None:
+    """Like `open_state_dir`, but nothing is created (read-only commands): a missing directory
+    returns None, and a missing `hooks-cwd` is left missing. An existing one is fully verified."""
+    return _open_state_dir(path, create=False)
+
+
+def _open_state_dir(path: Path | None, *, create: bool) -> StateDir | None:
     target = default_state_dir() if path is None else Path(path)
     try:
         fd = os.open(target, _OPEN_FLAGS)
     except FileNotFoundError:
+        if not create:
+            return None
         try:
             _create(target)
         except OSError as exc:
@@ -207,7 +221,7 @@ def open_state_dir(path: Path | None = None) -> StateDir:
         if not stat.S_ISDIR(info.st_mode):
             raise StateDirError(f"state directory {_label(target)} is not a directory")
         _check_owner_and_mode(info, f"state directory {_label(target)}")
-        _ensure_hooks_cwd(fd)
+        _ensure_hooks_cwd(fd, create=create)
         _check_cron_lock(fd)
     except BaseException:
         os.close(fd)
@@ -215,14 +229,28 @@ def open_state_dir(path: Path | None = None) -> StateDir:
     return StateDir(target, fd)
 
 
-def _ensure_hooks_cwd(state_fd: int) -> None:
+def _exists_at(dir_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # let the open below report why it cannot be used
+    return True
+
+
+def _ensure_hooks_cwd(state_fd: int, *, create: bool = True) -> None:
     """Create `hooks-cwd` (0700) under the state directory and verify it: a directory, not a
     symlink, owned by the user, not group- or world-writable. A missing one that cannot be created
-    because the filesystem is read-only or access is denied (EROFS, EACCES) is left missing."""
+    because the filesystem is read-only or access is denied (EROFS, EACCES) is left missing, and
+    with `create=False` a missing one is left missing (an existing one is still verified)."""
     created = False
     try:
-        _mkdir(HOOKS_CWD, DIR_MODE, dir_fd=state_fd)
-        created = True
+        if create:
+            _mkdir(HOOKS_CWD, DIR_MODE, dir_fd=state_fd)
+            created = True
+        elif not _exists_at(state_fd, HOOKS_CWD):
+            return
     except FileExistsError:
         pass
     except OSError as exc:

@@ -30,10 +30,11 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, NoReturn
 
-from . import __version__
+from . import __version__, watches
 from .config import ConfigError, LoadedConfig, load_config
 from .log import NULL_LOG, Log
 from .refs import (
+    PrId,
     RefError,
     parse_cursor,
     parse_duration,
@@ -51,7 +52,8 @@ from .refs import (
     resolve_owner,
     watch_key,
 )
-from .state_dir import StateDir, StateDirError, open_state_dir
+from .state_dir import StateDir, StateDirError, open_existing_state_dir, open_state_dir
+from .store import Store, StoreError, open_existing_store, open_store
 from .text import MAX_MESSAGE_CHARS, one_line, scrub_text
 
 PROG = "pr-watch"
@@ -118,8 +120,15 @@ class OutputError(Exception):
 class UsageError(CliError):
     """argparse rejected the command line; `usage` is the parser's usage text for stderr."""
 
-    def __init__(self, message: str, usage: str = "", kind: str | None = None) -> None:
-        super().__init__("usage", message, details={"kind": kind} if kind else None)
+    def __init__(
+        self,
+        message: str,
+        usage: str = "",
+        kind: str | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        merged = {**({"kind": kind} if kind else {}), **(details or {})}
+        super().__init__("usage", message, details=merged or None)
         self.usage = usage
 
 
@@ -173,7 +182,11 @@ class Context:
     quiet: bool
     verbose: bool
     loaded: LoadedConfig
-    state: StateDir | None = None  # open and verified by `_execute`; None only in unit tests
+    # Both are opened by `_execute`. Read-only commands (list/show/events/export) get `state` and
+    # `store` None when the state dir or state.db is missing (and in unit tests); those handlers
+    # must treat a None store as an empty store (owned by #19, #27).
+    state: StateDir | None = None
+    store: Store | None = None
     log: Log = NULL_LOG  # `<state dir>/log.jsonl`; logging never fails a command
 
     def emit(self, data: Any, human: str | None = None) -> None:
@@ -205,9 +218,9 @@ READ_ONLY_COMMANDS = frozenset({"list", "show", "events", "export"})
 # One entry per command. A later issue replaces its stub with the real handler.
 HANDLERS: dict[str, Handler] = {
     "watch add": _stub(18),  # TODO(#18): watch add
-    "watch remove": _stub(17),  # TODO(#17): watch remove
-    "label add": _stub(17),  # TODO(#17): label add
-    "label remove": _stub(17),  # TODO(#17): label remove
+    "watch remove": lambda ctx, args: _watch_remove(ctx, args),
+    "label add": lambda ctx, args: _label_add(ctx, args),
+    "label remove": lambda ctx, args: _label_remove(ctx, args),
     "list": _stub(19),  # TODO(#19): list
     "prune": _stub(20),  # TODO(#20): prune
     "poll": _stub(25),  # TODO(#25): poll (and the signal contract, exit 128+N)
@@ -217,6 +230,156 @@ HANDLERS: dict[str, Handler] = {
     "cron install": _stub(29),  # TODO(#29): cron install
     "cron uninstall": _stub(29),  # TODO(#29): cron uninstall
 }
+
+
+# --- watch remove, label add, label remove -----------------------------------------------------
+
+# Commands that never read or write state.db: they must not fail on a bad or newer database.
+NO_STORE_COMMANDS = frozenset({"cron install", "cron uninstall"})
+
+
+def store_error_to_cli(exc: StoreError) -> CliError:
+    """`StoreTooNewError` is `store_too_new`; every other store failure is `internal` (the message
+    is the store's own one-line text, never database content)."""
+    return CliError(exc.code, str(exc))
+
+
+def _store(ctx: Context) -> Store:
+    if ctx.store is None:
+        raise CliError("internal", "the state store is not open")
+    return ctx.store
+
+
+def _remove_target(conn: Any, args: argparse.Namespace) -> tuple[str | None, str, str | None]:
+    """`(watch id, reference, reason when there is no watch)` of a `watch remove` command."""
+    if args.pr is None:
+        key = watch_key(args.host or [], args.repo or [])
+        return watches.find_watch(conn, watches.QUERY_KIND, key), key, "not_held"
+    found = watches.resolve_stored_pr(conn, args.pr)
+    if found is None:
+        ref = args.pr.value if isinstance(args.pr, PrId) else args.pr.canonical
+        return None, ref, "pr_unknown"
+    pr_id, pr = found
+    return watches.pr_watch_id(conn, pr_id), pr, "not_held"
+
+
+def _watch_remove(ctx: Context, args: argparse.Namespace) -> int:
+    store = _store(ctx)
+    # Resolve under a read view first: a command with nothing to change never takes the write
+    # lock. When there is something to remove, resolve again inside the transaction (authoritative).
+    watch_id, reference, reason = _remove_target(store.conn, args)
+    removal = watches.Removal(held=False, watch_ended=False, prs_dropped=0)
+    view = None
+    if watch_id is not None and watches.holds(store.conn, watch_id, args.owner):
+        with store.transaction() as conn:
+            watch_id, reference, reason = _remove_target(conn, args)
+            if watch_id is not None:
+                removal = watches.remove_owner(conn, watch_id, args.owner)
+            if removal.held and not removal.watch_ended and watch_id is not None:
+                view = watches.watch_view(conn, watch_id)
+    result = {
+        "watch": view,
+        "owner": args.owner,
+        "changed": removal.held,
+        "reason": None if removal.held else reason,
+        "watch_ended": removal.watch_ended,
+        "prs_dropped": removal.prs_dropped,
+        "reference": reference,
+    }
+    # The warning is not an informational line: --quiet silences the result only (Global flags).
+    if not removal.held and reason == "pr_unknown":
+        _stderr_line(f"{PROG}: warning: no stored PR matches {reference}\n")
+    if removal.watch_ended:
+        human = f"removed {args.owner} from {reference}; the watch ended"
+    elif removal.held:
+        human = f"removed {args.owner} from {reference}"
+    else:
+        human = f"{args.owner} held no reference to {reference}"
+    ctx.emit(result, human=human)
+    return 0
+
+
+def _label_watch(conn: Any, args: argparse.Namespace) -> str | None:
+    """The watch a label command names (by id, or by a per-PR watch's reference), or None."""
+    if args.watch is not None:
+        return args.watch if watches.watch_exists(conn, args.watch) else None
+    found = watches.resolve_stored_pr(conn, args.pr)
+    return None if found is None else watches.pr_watch_id(conn, found[0])
+
+
+def _label_add_checked(conn: Any, args: argparse.Namespace) -> str:
+    """The watch to label, after the checks that refuse (no watch, owner not held)."""
+    watch_id = _label_watch(conn, args)
+    if watch_id is None:
+        raise CliError("not_found", "no watch to label", details={"kind": "no_watch"})
+    if not watches.holds(conn, watch_id, args.owner):
+        raise CliError(
+            "not_found",
+            "the owner holds no reference to the watch",
+            details={"kind": "owner_not_held"},
+        )
+    return watch_id
+
+
+def _label_add(ctx: Context, args: argparse.Namespace) -> int:
+    store = _store(ctx)
+    _label_add_checked(store.conn, args)  # refusals need no write lock
+    with store.transaction() as conn:
+        watch_id = _label_add_checked(conn, args)
+        count = watches.label_count_after(conn, watch_id, args.labels)
+        if count > watches.MAX_LABELS_PER_WATCH:  # counted here, before anything is written
+            raise UsageError(
+                f"a watch carries at most {watches.MAX_LABELS_PER_WATCH} labels",
+                kind="too_many_labels",
+                details={"limit": watches.MAX_LABELS_PER_WATCH, "count": count},
+            )
+        changed = watches.add_labels(conn, watch_id, args.owner, args.labels)
+        view = watches.watch_view(conn, watch_id)
+    ctx.emit(
+        {"watch": view, "owner": args.owner, "changed": changed},
+        human=f"labels added to {watch_id}" if changed else f"{watch_id} already has the labels",
+    )
+    return 0
+
+
+def _label_remove_reason(conn: Any, args: argparse.Namespace) -> tuple[str | None, str | None]:
+    """`(watch id, reason)` of a `label remove`: the reason is set when there is nothing to do
+    (`no_watch`, `not_held`); the watch id is None only for `no_watch`."""
+    watch_id = _label_watch(conn, args)
+    if watch_id is None:
+        return None, "no_watch"
+    if not watches.holds(conn, watch_id, args.owner):
+        return watch_id, "not_held"
+    return watch_id, None
+
+
+def _label_remove(ctx: Context, args: argparse.Namespace) -> int:
+    store = _store(ctx)
+    changed = False
+    view = None
+    watch_id, reason = _label_remove_reason(store.conn, args)
+    if reason is None and watch_id is not None:
+        own = set(watches.labels_of(store.conn, watch_id, args.owner))
+        if own & {watches.label_text(label) for label in args.labels}:
+            with store.transaction() as conn:  # something to remove: re-resolve under the lock
+                watch_id, reason = _label_remove_reason(conn, args)
+                if reason is None and watch_id is not None:
+                    changed = watches.remove_labels(conn, watch_id, args.owner, args.labels)
+                    view = watches.watch_view(conn, watch_id)
+        else:
+            view = watches.watch_view(store.conn, watch_id)
+    if reason == "no_watch":
+        human = "no watch matches the PR"
+    elif reason == "not_held":
+        human = f"{args.owner} holds no reference to {watch_id}"
+    elif changed:
+        human = f"removed the labels from {watch_id}"
+    else:
+        human = f"{args.owner} has none of the labels on {watch_id}"
+    ctx.emit(
+        {"watch": view, "owner": args.owner, "changed": changed, "reason": reason}, human=human
+    )
+    return 0
 
 
 # --- parser ----------------------------------------------------------------------------------
@@ -269,7 +432,7 @@ def _global_flags(*, suppress: bool) -> argparse.ArgumentParser:
         "--quiet",
         action="store_true",
         default=argparse.SUPPRESS if suppress else False,
-        help="no human output on success",
+        help="no human result output on success (warnings still print)",
     )
     return parent
 
@@ -620,11 +783,22 @@ def _execute(argv: Sequence[str]) -> int:
             )
         except RefError as exc:
             raise ref_error_to_cli(exc, leaf.format_usage()) from None
+    read_only = args.command in READ_ONLY_COMMANDS
     try:
-        state = open_state_dir()
+        # Read-only commands create nothing: a missing state directory or state.db is an empty
+        # store (`ctx.state` / `ctx.store` None); an existing one is checked as usual.
+        state = open_existing_state_dir() if read_only else open_state_dir()
     except StateDirError as exc:
         raise CliError("state_unsafe", str(exc)) from None
+    store: Store | None = None
     try:
+        if args.command not in NO_STORE_COMMANDS and state is not None:
+            try:
+                store = open_existing_store(state) if read_only else open_store(state)
+            except StateDirError as exc:
+                raise CliError("state_unsafe", str(exc)) from None
+            except StoreError as exc:
+                raise store_error_to_cli(exc) from None
         log = Log(
             state, on_error=None if args.quiet else lambda line: _stderr_line(f"{PROG}: {line}\n")
         )
@@ -636,11 +810,15 @@ def _execute(argv: Sequence[str]) -> int:
             verbose=args.verbose,
             loaded=loaded,
             state=state,
+            store=store,
             log=log,
         )
         return HANDLERS[args.command](ctx, args)
     finally:
-        state.close()
+        if store is not None:
+            store.close()
+        if state is not None:
+            state.close()
 
 
 def main(argv: Sequence[str] | None = None) -> int:

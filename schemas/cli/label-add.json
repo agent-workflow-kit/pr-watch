@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "pr-watch/cli/label-add.json",
   "title": "label add --json",
-  "description": "watch.labels is the set after the change; changed is false when nothing was added.",
+  "description": "watch.labels is the set after the change; changed is false when nothing was added. A watch carries at most 64 labels (the union over its owners): an add that would pass it is refused with exit 2 (usage, details.kind too_many_labels), not this document.",
   "type": "object",
   "properties": {
     "watch": {

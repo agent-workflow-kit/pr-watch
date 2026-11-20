@@ -569,13 +569,12 @@ def test_handler_oserror_is_still_an_internal_error(
 # --- unimplemented commands --------------------------------------------------------------------
 
 OWNERS = {
-    "watch add": 18, "watch remove": 17, "label add": 17, "label remove": 17, "list": 19,
-    "prune": 20, "poll": 25, "events": 27, "show": 27, "export": 27, "cron install": 29,
-    "cron uninstall": 29,
+    "watch add": 18, "list": 19, "prune": 20, "poll": 25, "events": 27, "show": 27, "export": 27,
+    "cron install": 29, "cron uninstall": 29,
 }  # fmt: skip
 
 
-@pytest.mark.parametrize("name", sorted(VALID))
+@pytest.mark.parametrize("name", sorted(OWNERS))
 def test_unimplemented_command_is_an_internal_error_naming_its_issue(
     name: str, capsys: pytest.CaptureFixture[str]
 ) -> None:

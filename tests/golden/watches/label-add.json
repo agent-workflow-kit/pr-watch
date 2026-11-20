@@ -1,0 +1,21 @@
+{
+  "changed": true,
+  "owner": "human:a",
+  "watch": {
+    "created_at": "TS",
+    "enumerated_at": null,
+    "id": "w-GOLDEN",
+    "key": "P1",
+    "kind": "pr",
+    "labels": [
+      "k=v",
+      "x=y"
+    ],
+    "members": null,
+    "owners": [
+      "human:a"
+    ],
+    "pending_baseline": null,
+    "pr": "github.com/o/r#1"
+  }
+}
