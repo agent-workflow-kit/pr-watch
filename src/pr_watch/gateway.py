@@ -34,6 +34,9 @@ Contract of `run`:
 - `signal_live` is safe from a signal handler on a thread that is inside `run`: it never blocks on
   a lock that thread may hold. A child whose lock cannot be taken gets the signal queued, and its
   owning `run` loop delivers it at its next tick (never to a reaped group).
+- `signal_live(refuse_new=True)` (the poll's shutdown) also makes every later launch fail with
+  `LaunchError` and signals a child that was started but not yet tracked when the signal came, so
+  nothing launched after the shutdown outlives it; `allow_launches` ends that state.
 
 Out of scope here, by design: classifying results into error kinds (the poller), the fake
 forgectl and gh binaries (tests/fakebin) and hook specifics; this module only runs one argv.
@@ -317,6 +320,7 @@ class _Child:
 
 _LIVE: dict[int, _Child] = {}
 _LIVE_LOCK = threading.RLock()  # re-entrant: a signal handler may interrupt register/unregister
+_SHUTDOWN = threading.Event()  # set by `signal_live(refuse_new=True)`: no child may start
 
 
 def _register(child: _Child) -> None:
@@ -335,7 +339,12 @@ def live_pids() -> list[int]:
         return sorted(_LIVE)
 
 
-def signal_live(sig: int = signal.SIGTERM) -> int:
+def allow_launches() -> None:
+    """End a shutdown begun by `signal_live(refuse_new=True)` (the poll does, on exit)."""
+    _SHUTDOWN.clear()
+
+
+def signal_live(sig: int = signal.SIGTERM, *, refuse_new: bool = False) -> int:
     """Send `sig` to the group of every live child (leader unreaped); returns how many.
 
     For a SIGTERM/SIGINT/SIGHUP shutdown of the poll process; safe to call from a signal handler,
@@ -343,7 +352,14 @@ def signal_live(sig: int = signal.SIGTERM) -> int:
     is counted as signalled: its signal is queued and delivered by its `run` loop at the next tick,
     unless the leader was reaped meanwhile. Each `run` then sees its child exit and returns
     normally; the caller recognises an interrupted call by its returncode.
+
+    With `refuse_new` the shutdown flag is set first: a launch that starts later fails with
+    `LaunchError`, and one that is between `Popen` and its registration is signalled by `_launch`
+    itself (it registers, then checks the flag; this function sets the flag, then reads the
+    registry, so one of the two always sees the other).
     """
+    if refuse_new:
+        _SHUTDOWN.set()
     with _LIVE_LOCK:
         children = list(_LIVE.values())
     return sum(1 for child in children if child.signal_group(sig, blocking=False))
@@ -359,6 +375,8 @@ def _absolute(path: str) -> str:
 
 def _launch(request: Request, started: list[_Child] | None = None) -> _Child:
     """Start the child. `started` receives it the moment it exists, for cleanup on interruption."""
+    if _SHUTDOWN.is_set():
+        raise LaunchError(f"{request.argv[0]}: not started: shutting down")
     program = request.argv[0]
     if os.sep not in program:
         found = shutil.which(program)  # the caller's PATH, resolved once
@@ -396,6 +414,8 @@ def _launch(request: Request, started: list[_Child] | None = None) -> _Child:
                     stream.close()
         raise
     _register(child)
+    if _SHUTDOWN.is_set():  # the shutdown began while the child was being started
+        child.signal_group(signal.SIGTERM, blocking=False)
     return child
 
 

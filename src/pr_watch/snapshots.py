@@ -30,6 +30,10 @@
   leases are released and `interrupted` is set; PRs in flight keep their persisted triggers.
   `out_of_time` (the `poll.max_duration` budget, `pacing.time_budget`) only stops starting: the
   rest is `deferred` and `truncated` is set. The per-host cap is applied by `selection.py`.
+- **Host end.** `on_host_done(host, out)` is called from the calling thread when a host's queue
+  and in-flight entries have all ended (every result committed or failed), so the poll writes
+  that host's state (pause, low water, pass) before the other hosts' long phases; never after a
+  signal or a tool failure halted the pool.
 
 Judgment calls where the interface is silent (kept conservative):
 
@@ -199,9 +203,19 @@ def _local(decision: table.Decision) -> _Job:
 
 
 def _work(
-    client: ForgectlClient, task: Task, start: RowStart, now: datetime, forced_for: ForcedFor | None
+    client: ForgectlClient,
+    task: Task,
+    start: RowStart,
+    now: datetime,
+    forced_for: ForcedFor | None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> _Job:
-    """One snapshot call and its plan. Never raises: a failure is a decision."""
+    """One snapshot call and its plan. Never raises: a failure is a decision. After a signal no
+    follow-up call (`show`, `compare`) is started: the pool discards the result anyway."""
+
+    def stopped() -> bool:
+        return should_stop is not None and should_stop()
+
     try:
         outcome = client.snapshot(parse_pr(start.state.pr))
     except ToolError as exc:
@@ -209,6 +223,8 @@ def _work(
     except Exception:
         return _local(table.decide_code("internal", None, "pr"))
     decision = table.decide(outcome, "pr")
+    if stopped():
+        return _local(table.decision_for("interrupted", "pr"))
     if decision.effect.fallback_show:
         return _fallback(client, start, now, decision)
     if not decision.effect.commit or outcome.result is None:
@@ -218,7 +234,7 @@ def _work(
         updated = parse_stamp(snap.get("updated_at"))
         if updated is None:
             return _Job(outcome, table.decision_for("contract", "pr"))
-        forced = forced_for(start) if forced_for is not None else None
+        forced = forced_for(start) if forced_for is not None and not stopped() else None
         plan = plan_snapshot(
             start.state,
             snap,
@@ -351,7 +367,10 @@ class _Pool:
         should_stop: Callable[[], bool] | None,
         out_of_time: Callable[[], bool] | None,
         forced_for: ForcedFor | None,
+        on_host_done: Callable[[str, PoolResult], None] | None = None,
     ) -> None:
+        self.on_host_done = on_host_done
+        self.done: set[str] = set()
         self.store, self.client, self.config, self.res = store, client, config, res
         self.log, self.leases, self.clock = log, leases, clock
         self.should_stop, self.out_of_time = should_stop, out_of_time
@@ -384,6 +403,7 @@ class _Pool:
                     self._drain(host)
                     if self.halt:
                         break
+                self._notify_done()
                 if all(not h.queue and not h.entries for h in self.hosts.values()):
                     break
                 pending = [e.future for h in self.hosts.values() for e in h.entries]
@@ -394,6 +414,16 @@ class _Pool:
             self._release_all()
             executor.shutdown(wait=True)
         return self.out
+
+    def _notify_done(self) -> None:
+        """Tell the caller each host whose queue and entries have ended (State transaction 4 is
+        written per host as it ends). Never after a halt: that host's cycle was cut off."""
+        if self.on_host_done is None or self.halt:
+            return
+        for host in self.hosts.values():
+            if host.name not in self.done and not host.queue and not host.entries:
+                self.done.add(host.name)
+                self.on_host_done(host.name, self.out)
 
     def _release_all(self) -> None:
         for host in self.hosts.values():
@@ -454,8 +484,9 @@ class _Pool:
                     self._release_lease(lease)
                     continue
                 future = executor.submit(
-                    _work, self.client, task, start, self.clock(), self.forced_for
-                )
+                    _work, self.client, task, start, self.clock(), self.forced_for,
+                    self.should_stop,
+                )  # fmt: skip
             except BaseException:
                 self._release_lease(lease)  # not in `host.entries` yet: `_release_all` misses it
                 raise
@@ -530,7 +561,11 @@ class _Pool:
             self.halt = True
             return
         if job.outcome is not None and job.outcome.result is not None:
-            note_rate(self.res.facts(host.name), job.outcome.result)
+            facts = self.res.facts(host.name)
+            note_rate(facts, job.outcome.result)
+            backend = job.outcome.result.get("backend")
+            if backend in ("github", "gitlab"):
+                facts.backend = backend  # a host that only has per-PR watches learns it here
         if job.prepared is not None:
             self._commit(host, entry, job.prepared)
         else:
@@ -688,6 +723,7 @@ def run_snapshots(
     should_stop: Callable[[], bool] | None = None,
     out_of_time: Callable[[], bool] | None = None,
     forced_for: ForcedFor | None = None,
+    on_host_done: Callable[[str, PoolResult], None] | None = None,
 ) -> PoolResult:
     """Run the chosen snapshots (see the module docstring). Failures and host facts are added to
     `res`; the counters and the committed events are returned."""
@@ -695,4 +731,5 @@ def run_snapshots(
         store, client, config, selection, res,
         log=log, leases=leases, clock=clock or (lambda: datetime.now(UTC)),
         should_stop=should_stop, out_of_time=out_of_time, forced_for=forced_for,
+        on_host_done=on_host_done,
     ).run()  # fmt: skip

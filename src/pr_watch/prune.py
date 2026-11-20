@@ -11,7 +11,9 @@ Two transactions kinds, so a concurrent `poll` commit is never starved for long:
    `detected_at` is older than the cutoff, so nothing newer is touched, and a clock stepped back
    (a cutoff in the past) deletes less, never more.
 
-Finally `last_prune_at` is stamped and the WAL checkpointed (`TRUNCATE`).
+Finally `last_prune_at` is stamped and the WAL checkpointed (`TRUNCATE`). `should_stop` (the
+poll's signal flag) is checked before each phase and between event batches: a stopped run returns
+what it did so far and stamps nothing, so the next poll prunes again.
 
 `prune --dry-run` is read-only end to end: the CLI opens the store `mode=ro` (or finds none) and
 `plan` reads inside one `BEGIN ... ROLLBACK`; it computes the same counts the real run returns.
@@ -32,7 +34,8 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
@@ -169,16 +172,35 @@ def _checkpoint(store: Store) -> None:
         conn.execute(f"PRAGMA busy_timeout = {previous}")
 
 
-def prune(store: Store, now: datetime, retention: str, after_terminal: str) -> PruneResult:
-    """Apply retention, expiry and lease cleanup. Also the housekeeping `poll` runs once a day."""
+def prune(
+    store: Store,
+    now: datetime,
+    retention: str,
+    after_terminal: str,
+    should_stop: Callable[[], bool] | None = None,
+) -> PruneResult:
+    """Apply retention, expiry and lease cleanup. Also the housekeeping `poll` runs once a day.
+
+    With `should_stop` a true answer ends the run between phases and event batches without
+    stamping `last_prune_at` (the result counts what was done)."""
+
+    def stopped() -> bool:
+        return should_stop is not None and should_stop()
+
     events_cutoff, expiry_cutoff = _cutoffs(now, retention, after_terminal)
+    if stopped():
+        return PruneResult()
     cleaned = _expire_and_clean(store, now, expiry_cutoff)
     deleted = 0
     while True:
+        if stopped():
+            return replace(cleaned, events_deleted=deleted)
         batch = _delete_event_batch(store, events_cutoff)
         deleted += batch
         if batch < EVENT_BATCH:
             break
+    if stopped():
+        return replace(cleaned, events_deleted=deleted)
     with store.transaction() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_prune_at', ?)",

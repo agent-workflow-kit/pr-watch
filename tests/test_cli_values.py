@@ -93,11 +93,12 @@ def test_handlers_receive_validated_values(
     run(capsys, "label", "add", "--watch", "w-abcdefg234", "k=v", *OWNER)
     assert (seen[-1].watch, seen[-1].pr) == ("w-abcdefg234", None)
 
-    run(capsys, "poll", "--pr", "https://github.com/o/r/pull/3", "--repo", "H.test/x/y",
-        "--hook", "post-poll=echo hi")  # fmt: skip
+    run(capsys, "poll", "--pr", "https://github.com/o/r/pull/3", "--hook", "post-poll=echo hi")
     args = seen[-1]
     assert args.pr == PrRef("github.com", "o/r", 3)
-    assert (args.repo, args.hook) == ("h.test/x/y", [("post-poll", "echo hi")])
+    assert (args.repo, args.hook) == (None, [("post-poll", "echo hi")])
+    run(capsys, "poll", "--repo", "H.test/x/y")
+    assert (seen[-1].repo, seen[-1].pr) == ("h.test/x/y", None)
 
     run(capsys, "export", "--since", "1d")
     assert seen[-1].since == "1d"

@@ -13,9 +13,12 @@ The poll command (#25) calls, in this order:
    plan). `HostPlan.concurrency` is the one source of the pool size (`Selection.concurrency`).
 3. `selection.choose_snapshots` and
    `snapshots.run_snapshots(out_of_time=time_budget(config, started=started))`.
-4. `finish_hosts(store, config, res, pool, pacing, now=...)`: host state (transaction 4) is written
-   after the host's cycle, each host in its own `BEGIN IMMEDIATE` that re-reads the row, so two
-   polls updating one host merge instead of overwriting.
+4. `finish_host(store, config, res, pool, pacing, host, now=...)` as each host's cycle ends: right
+   after enumeration for a host that runs no snapshot, and from the pool's `on_host_done` for the
+   others (host state, transaction 4, each host in its own `BEGIN IMMEDIATE` that re-reads the row,
+   so two polls updating one host merge instead of overwriting). A host is written once per poll;
+   `finish_hosts` writes the ones still open and returns every outcome. A rate limit of the whole
+   `whoami` call is `pause_hosts` (persisted at once, for every host the poll names).
 5. `finish_poll(...)` writes `meta.last_poll_finished_at` (transaction 5) when the rules allow.
 
 Judgment calls where the interface is silent (kept conservative):
@@ -35,7 +38,10 @@ Judgment calls where the interface is silent (kept conservative):
 - A successful contact resets `pause_step` and clears an expired pause; a pause another poll set
   in the meantime (still in the future) is kept, and the later of two pauses wins.
 - Host without a known backend (no `whoami` this cycle and none stored): `github.com` is GitHub,
-  any other host gets the GitLab defaults (fewer workers).
+  any other host gets the GitLab defaults (fewer workers). A snapshot carries its backend, so a
+  host that only has per-PR watches (never asked by `whoami`) learns it from its first committed
+  snapshot and persists it in `hosts.backend`; it is used from the next cycle's plan (this
+  cycle's report and `requests_estimate` use it).
 - `--pr` ignores low water (one explicit PR); a host pause still blocks it. A restricted poll
   never runs (e) or (f) work and never counts or ends a pass; it still persists a pause and a
   low-water reading, which are observations.
@@ -49,7 +55,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Final
@@ -152,16 +158,21 @@ def paused_hosts(conn: sqlite3.Connection, now: datetime) -> dict[str, datetime]
 
 
 def backend_of(host: str, res: EnumerationResult, state: HostState | None) -> str:
-    for entry in res.host_list.hosts:
-        if entry.host == host and entry.backend is not None:
-            return entry.backend
+    known = _known_backend(host, res)
+    if known is not None:
+        return known
     if state is not None and state.backend is not None:
         return state.backend
     return "github" if host == "github.com" else "gitlab"
 
 
 def _known_backend(host: str, res: EnumerationResult) -> str | None:
-    return next((e.backend for e in res.host_list.hosts if e.host == host and e.backend), None)
+    """The backend `whoami` named, else the one a snapshot of the host carried this cycle."""
+    listed = next((e.backend for e in res.host_list.hosts if e.host == host and e.backend), None)
+    if listed is not None:
+        return listed
+    facts = res.hosts.get(host)
+    return None if facts is None else facts.backend
 
 
 @dataclass(frozen=True)
@@ -183,10 +194,12 @@ class Pacing:
     plans: dict[str, HostPlan] = field(default_factory=dict)
     hosts: dict[str, HostPlanning] = field(default_factory=dict)
     paused: dict[str, datetime] = field(default_factory=dict)
+    # hosts already written by `finish_host` (so `finish_hosts` never counts a cycle twice)
+    outcomes: dict[str, HostOutcome] = field(default_factory=dict)
 
 
 def _listed(facts: HostFacts | None) -> bool:
-    return facts is not None and (facts.queried or facts.listings > 0)
+    return facts is not None and facts.listings > 0  # a failed listing is not a listing
 
 
 def _blocked(facts: HostFacts | None, res: EnumerationResult, host: str) -> bool:
@@ -320,6 +333,7 @@ def _write_host(
     pool: PoolResult | None,
     pacing: Pacing,
     now: datetime,
+    count_pass: bool = True,
 ) -> HostOutcome:
     plan = pacing.hosts[host]
     facts = res.hosts.get(host)
@@ -357,7 +371,7 @@ def _write_host(
         )
         started = None if started is None else min(started, now)
         full_pass = ended = False
-        if not pacing.mode.restricted:
+        if not pacing.mode.restricted and count_pass:
             count += 1 if plan.counted else 0
             if started is None and (pacing.mode.full or count >= plan.full_every):
                 started, count = pacing.now, 0
@@ -387,6 +401,49 @@ def _write_host(
     )
 
 
+def finish_host(
+    store: Store,
+    config: Config,
+    res: EnumerationResult,
+    pool: PoolResult | None,
+    pacing: Pacing,
+    host: str,
+    *,
+    now: datetime,
+    count_pass: bool = True,
+) -> HostOutcome:
+    """Persist one host's pause, backoff step, low water, pass counter and pass state (State,
+    transaction 4) as soon as its cycle ends, so a poll killed later, or one overlapping, never
+    loses a pause. Written once per poll: a second call returns the first outcome. A host paused
+    at cycle start is left as it was and reported with its stored pause. A host that has no
+    planning entry (seen only in `res` or `pool`) gets one of its own. `count_pass=False` (an
+    interrupted poll) writes the pause and low water but leaves the pass counter and pass state
+    alone."""
+    done = pacing.outcomes.get(host)
+    if done is not None:
+        return done
+    if host in pacing.paused:
+        state = read_states(store.conn).get(host)
+        out = HostOutcome(
+            host,
+            pacing.paused[host],
+            None if state is None else state.last_full_at,
+            False,
+            False,
+            False,
+        )
+    else:
+        if host not in pacing.hosts:
+            backend = backend_of(host, res, read_states(store.conn).get(host))
+            settings = config.host_settings(host, "gitlab" if backend == "gitlab" else "github")
+            pacing.hosts[host] = HostPlanning(
+                host, backend, settings.full_every, False, False, None
+            )
+        out = _write_host(store, config, host, res, pool, pacing, now, count_pass)
+    pacing.outcomes[host] = out
+    return out
+
+
 def finish_hosts(
     store: Store,
     config: Config,
@@ -396,33 +453,43 @@ def finish_hosts(
     *,
     now: datetime,
 ) -> dict[str, HostOutcome]:
-    """Persist each host's pause, backoff step, low water, pass counter and pass state after its
-    cycle, and return what the report needs per host. `now` is the time at the end of the cycle
-    (a pause starts then). A host paused at cycle start is left as it was; it is reported
-    with its stored pause. A host seen only in `res` or `pool` (not planned) gets a planning
-    entry of its own, so a pause or a reading is never lost.
-
-    todo(#25): this writes all hosts after the whole pool ran; the interface says after each
-    host's cycle, so a poll killed mid-pool loses its pauses. The poll command persists as soon
-    as each host's queue ends (call this per host), and at least persists rate-limit pauses
-    before any long phase."""
-    out: dict[str, HostOutcome] = {}
+    """`finish_host` for every host not finished yet, and the outcome of every host the report
+    needs. `now` is the time at the end of the cycle (a pause starts then)."""
     hosts = set(pacing.hosts) | set(res.hosts) | (set(pool.hosts) if pool is not None else set())
-    hosts -= set(pacing.paused)
-    for host in sorted(hosts):
-        if host not in pacing.hosts:
-            backend = backend_of(host, res, read_states(store.conn).get(host))
-            settings = config.host_settings(host, "gitlab" if backend == "gitlab" else "github")
-            pacing.hosts[host] = HostPlanning(
-                host, backend, settings.full_every, False, False, None
+    hosts |= set(pacing.paused)
+    return {
+        host: finish_host(store, config, res, pool, pacing, host, now=now) for host in sorted(hosts)
+    }
+
+
+def pause_hosts(
+    store: Store, hosts: Iterable[str], retry_after: float | None, *, now: datetime
+) -> dict[str, datetime]:
+    """Pause every host in `hosts` after a rate limit that named none (a whole `whoami` call):
+    clamped like any pause, the later of a stored pause and the new one wins, `pause_step`
+    advances as for a rate limit without `retry_after`. Persisted at once; returns the pause
+    (`paused_until`) of each host."""
+    out: dict[str, datetime] = {}
+    for host in sorted(set(hosts)):
+        with store.transaction() as conn:
+            conn.execute("INSERT OR IGNORE INTO hosts (host) VALUES (?)", (host,))
+            row = _state(
+                tuple(
+                    conn.execute(f"SELECT {_COLUMNS} FROM hosts WHERE host = ?", (host,)).fetchone()  # noqa: S608
+                )
             )
-        out[host] = _write_host(store, config, host, res, pool, pacing, now)
-    states = read_states(store.conn)
-    for host, until in sorted(pacing.paused.items()):
-        state = states.get(host)
-        out[host] = HostOutcome(
-            host, until, None if state is None else state.last_full_at, False, False, False
-        )
+            try:
+                seconds, step = table.host_pause(retry_after, row.pause_step)
+            except ValueError:
+                seconds, step = table.host_pause(None, row.pause_step)
+            new = now + timedelta(seconds=seconds)
+            current = concurrent_pause(row.paused_until, now)
+            until = new if current is None else max(new, current)
+            conn.execute(
+                "UPDATE hosts SET paused_until = ?, pause_step = ? WHERE host = ?",
+                (format_ts(until), step, host),
+            )
+        out[host] = until
     return out
 
 

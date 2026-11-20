@@ -801,13 +801,24 @@ def test_full_starts_a_pass_regardless_of_counter_and_overrides_stored_start(
     assert pacing.plans[HOST].pass_started_at == later
 
 
-def test_query_only_listing_counts(store: Store) -> None:
+def test_a_successful_query_listing_counts(store: Store) -> None:
     add_pr(store, 1)
     res = empty()
-    facts(res, listings=0, queried=True)
+    facts(res, listings=1, queried=True)
     _, finish = run(store, res)
     finish()
     assert row(store)["poll_count_since_full"] == 1
+
+
+def test_a_failed_listing_does_not_count_as_a_cycle(store: Store) -> None:
+    """`queried` is set before the call: only a listing that succeeded (`listings`) counts."""
+    add_pr(store, 1)
+    res = empty()
+    facts(res, listings=0, queried=True)
+    pacing, finish = run(store, res)
+    finish()
+    assert not pacing.hosts[HOST].counted
+    assert row(store)["poll_count_since_full"] == 0
 
 
 def test_unknown_backend_defaults(store: Store) -> None:
@@ -843,3 +854,66 @@ def test_blocked_hosts_get_no_plan(store: Store, why: str) -> None:
         setattr(f, why, True)
     pacing = pc.plan_hosts(store.conn, Config(), res, {}, now=NOW, mode=pc.PollMode())
     assert HOST not in pacing.plans and HOST in pacing.hosts
+
+
+# --- per host persistence (#25) ---
+
+
+def test_finish_host_writes_one_host_and_finish_hosts_does_not_write_it_again(
+    store: Store,
+) -> None:
+    add_pr(store, 1)
+    add_pr(store, 2, GL)
+    res = empty()
+    facts(res, listings=1)
+    facts(res, GL, listings=1)
+    pacing, _ = run(store, res)
+    out = pc.finish_host(store, Config(), res, None, pacing, HOST, now=NOW)
+    assert row(store)["poll_count_since_full"] == 1 and row(store, GL) == {}
+    assert out.host == HOST
+    done = pc.finish_hosts(store, Config(), res, None, pacing, now=NOW)
+    assert row(store)["poll_count_since_full"] == 1  # not counted twice
+    assert row(store, GL)["poll_count_since_full"] == 1
+    assert set(done) == {HOST, GL}
+
+
+def test_a_rate_limit_is_persisted_when_the_host_is_finished(store: Store) -> None:
+    add_pr(store, 1)
+    res = empty()
+    facts(res, rate_limited=True, retry_after=120.0, cancelled=True)
+    pacing, _ = run(store, res)
+    pc.finish_host(store, Config(), res, None, pacing, HOST, now=NOW)
+    assert row(store)["paused_until"] == format_ts(NOW + timedelta(seconds=120))
+
+
+def test_finish_host_without_pass_count_pauses_but_leaves_the_counter(store: Store) -> None:
+    add_pr(store, 1)
+    res = empty()
+    facts(res, listings=2, rate_limited=True, retry_after=120.0)
+    pacing, _ = run(store, res)
+    pc.finish_host(store, Config(), res, None, pacing, HOST, now=NOW, count_pass=False)
+    r = row(store)
+    assert r["paused_until"] == format_ts(NOW + timedelta(seconds=120))
+    assert r["poll_count_since_full"] == 0 and r["full_pass_started_at"] is None
+
+
+def test_pause_hosts_pauses_each_host_clamped_and_keeps_a_later_pause(store: Store) -> None:
+    store.conn.execute(
+        "INSERT INTO hosts (host, paused_until) VALUES (?, ?)",
+        (GL, format_ts(NOW + timedelta(minutes=50))),
+    )
+    store.conn.commit()
+    until = pc.pause_hosts(store, [HOST, GL], 99999.0, now=NOW)
+    assert until[HOST] == NOW + timedelta(hours=1)  # clamped like any pause
+    assert until[GL] == NOW + timedelta(hours=1)
+    assert row(store)["paused_until"] == format_ts(NOW + timedelta(hours=1))
+    assert pc.paused_hosts(store.conn, NOW).keys() == {HOST, GL}  # the next process honours it
+
+
+def test_pause_hosts_without_retry_after_backs_off_and_doubles(store: Store) -> None:
+    pc.pause_hosts(store, [HOST], None, now=NOW)
+    assert row(store)["paused_until"] == format_ts(NOW + timedelta(seconds=60))
+    assert row(store)["pause_step"] == 60
+    later = NOW + timedelta(minutes=2)
+    pc.pause_hosts(store, [HOST], None, now=later)
+    assert row(store)["paused_until"] == format_ts(later + timedelta(seconds=120))

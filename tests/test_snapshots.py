@@ -848,3 +848,43 @@ def test_two_concurrent_pools_store_each_event_once(
 
 def test_lease_ttl_is_three_times_the_forgectl_timeout(store: Store) -> None:
     assert sn.make_leases(store, Config()).ttl == timedelta(minutes=6)
+
+
+# --- host end callback (#25) ---
+
+
+def test_on_host_done_runs_once_per_host_as_its_queue_ends(
+    store: Store, fake: FakeForgectl
+) -> None:
+    fake.host("gitlab.example.net", me="user-1")
+    a = pr(1)
+    b = new_pr("gitlab.example.net", "example-org/widgets", 2, updated_at="2026-10-02T10:30:00Z")
+    fake.add(a)
+    fake.add(b)
+    seed(store, a)
+    seed(store, b)
+    done: list[tuple[str, int]] = []
+    plans = {
+        HOST: sel.HostPlan(HOST, concurrency=2),
+        "gitlab.example.net": sel.HostPlan("gitlab.example.net", concurrency=2),
+    }
+    chosen = sel.choose_snapshots(
+        store.conn, plans, now=datetime.now(UTC), pending_max_age_ms=6 * 3600 * 1000
+    )
+    res = en.EnumerationResult(en.HostList((), frozenset(), True))
+    sn.run_snapshots(
+        store, make_client(), Config(), chosen, res, leases=leases(store),
+        on_host_done=lambda host, out: done.append((host, out.host(host).snapshots)),
+    )  # fmt: skip
+    assert sorted(done) == [(HOST, 1), ("gitlab.example.net", 1)]  # committed before the call
+
+
+def test_on_host_done_is_not_called_for_a_host_cut_off_by_a_signal(
+    store: Store, fake: FakeForgectl
+) -> None:
+    snap = pr(1)
+    fake.add(snap)
+    seed(store, snap)
+    done: list[str] = []
+    out, _ = cycle(store, should_stop=lambda: True, on_host_done=lambda host, o: done.append(host))
+    assert out.interrupted and done == []

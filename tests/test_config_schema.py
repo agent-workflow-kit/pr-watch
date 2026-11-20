@@ -135,7 +135,7 @@ def _exception(path: tuple[Any, ...], value: Any, want: bool, got: bool) -> bool
         return True  # JSON Schema integers include 5.0
     if path == ("poll", "interval_hint") and _non_dividing(value):
         return True
-    if path == ("forgectl", "timeout") and _zero_duration(value):
+    if path in (("forgectl", "timeout"), ("poll", "max_duration")) and _zero_duration(value):
         return True
     return path in DURATION_PATHS and _duration_too_large(value)
 
@@ -173,6 +173,12 @@ def test_exception_zero_forgectl_timeout_is_accepted_by_the_schema_only() -> Non
     doc = nest(("forgectl", "timeout"), "0")
     assert CHECK.is_valid(doc) and not model_accepts(doc)
     assert model_accepts(nest(("forgectl", "timeout"), "1ms"))
+
+
+def test_exception_zero_max_duration_is_accepted_by_the_schema_only() -> None:
+    doc = nest(("poll", "max_duration"), "0")
+    assert CHECK.is_valid(doc) and not model_accepts(doc)
+    assert model_accepts(nest(("poll", "max_duration"), "1ms"))
 
 
 def test_the_schema_has_the_expected_leaves() -> None:

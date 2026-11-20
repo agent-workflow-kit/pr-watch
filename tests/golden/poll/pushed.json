@@ -1,0 +1,46 @@
+{
+  "already_running": false,
+  "started_at": "TS",
+  "duration_ms": 0,
+  "hosts": {
+    "github.com": {
+      "queried": true,
+      "snapshots": 1,
+      "requests_estimate": 7,
+      "paused_until": null,
+      "skipped": null,
+      "incomplete_listing": false,
+      "errors": [],
+      "last_full_at": null
+    }
+  },
+  "prs": {
+    "snapshotted": 1,
+    "unchanged": 0,
+    "skipped_locked": 0,
+    "skipped_conflict": 0,
+    "unreachable": 0,
+    "incomplete": 0
+  },
+  "events": {
+    "pushed": 1,
+    "comment": 0,
+    "review_comment": 0,
+    "review": 0,
+    "approved": 0,
+    "changes_requested": 0,
+    "ci": 0,
+    "ready": 0,
+    "merged": 0,
+    "closed": 0
+  },
+  "hooks": {
+    "run": 0,
+    "skipped": 0,
+    "failed": 0
+  },
+  "failed": [],
+  "full_pass": false,
+  "truncated": false,
+  "deferred": 0
+}

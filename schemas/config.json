@@ -59,7 +59,8 @@
         "max_duration": {
           "type": "string",
           "pattern": "^(?:0|[0-9]{1,9}(?:ms|s|m|h|d))$",
-          "default": "15m"
+          "default": "15m",
+          "description": "The cycle stops starting snapshots after this. The loader refuses a zero value (config_invalid)."
         },
         "max_snapshots": {
           "type": "integer",

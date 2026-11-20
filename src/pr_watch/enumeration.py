@@ -36,7 +36,11 @@ Judgment calls where the interface is silent (kept conservative):
   failing host is asked again next cycle; its `errors[]` entries are failed hosts.
 - A `whoami` failure that names no host (the call as a whole) is a `Failure` with `ref` None; the
   report stage chooses how to show it. With a stale cache the cache is reused, the failure is
-  `EnumerationResult.stale_whoami` (not in `failures`) and a warning is logged.
+  `EnumerationResult.stale_whoami` (not in `failures`) and a warning is logged; when the failure
+  ends the poll (forgectl's `config_invalid`) it is in `failures` so `failed[]` explains the exit.
+  A rate limit of the whole call cancels every host's listing that cycle (cached or not).
+- A forgectl call that ended 128+N while pr-watch itself was signalled is no failure
+  (`EnumerationResult.signalled`): nothing is recorded or counted for it.
 - A `--repo` poll also lists its host's open PRs (host list and query listing for that host only).
   That listing writes `listed_updated_at` for every listed row, and joins members, resets
   `left_count` and reactivates only for items of the restricted repo; it counts no absence and
@@ -47,8 +51,7 @@ Judgment calls where the interface is silent (kept conservative):
   overlap, as the watermark, so the scope exists from then on.
 
 Snapshot selection and the pool are `selection.py` and `snapshots.py` (#22).
-TODO(#23): pause and low water from `HostFacts`;
-TODO(#25): the report, `meta`, housekeeping.
+Pause, low water and the report are `pacing.py` and `poller.py`.
 """
 
 from __future__ import annotations
@@ -115,6 +118,7 @@ class HostFacts:
     lowest_remaining: int | None = None  # lowest numeric rate_limit.remaining of its listings
     reset_at: str | None = None  # the reset_at of that reading
     listings: int = 0  # successful or partial listing calls
+    backend: str | None = None  # `github` or `gitlab`, learned from a snapshot of the host
 
 
 @dataclass(frozen=True)
@@ -151,13 +155,23 @@ class EnumerationResult:
     failures: list[Failure] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     stale_whoami: Failure | None = None
-    whoami_retry_after: float | None = None  # whoami was rate limited
+    whoami_retry_after: float | None = None  # `retry_after` of a rate limited whoami, if given
+    whoami_rate_limited: bool = False  # the whole whoami call was rate limited (pause all hosts)
     listed: dict[str, Listed] = field(default_factory=dict)  # newest listing per pr_id
     new_members: list[str] = field(default_factory=list)
     reactivated: list[str] = field(default_factory=list)
     candidates: set[str] = field(default_factory=set)  # listed PRs that have a stored row
     scopes_listed: list[str] = field(default_factory=list)  # repos listed successfully
     interrupted: bool = False
+    stop_poll: bool = False  # forgectl's own config_invalid on a host call: the poll ends (exit 12)
+    should_stop: Callable[[], bool] | None = field(default=None, repr=False)  # a signal flag
+
+    def signalled(self) -> bool:
+        """True once pr-watch itself was signalled (then `interrupted` is set): a forgectl call
+        that ended 128+N meanwhile is not a failure of the host."""
+        if self.should_stop is not None and self.should_stop():
+            self.interrupted = True
+        return self.interrupted
 
     def facts(self, host: str) -> HostFacts:
         found = self.hosts.get(host)
@@ -365,17 +379,32 @@ def load_host_list(
         host_list = _from_whoami(store, outcome, decision, now, res, restrict_host)
         res.host_list = host_list
         return host_list, res
+    if decision.code == "interrupted" and res.signalled():  # our own signal ended the call
+        res.host_list = HostList(
+            cached[1] if cached is not None else (), frozenset(), cached is not None,
+            stale=cached is not None,
+        )  # fmt: skip
+        return res.host_list, res
     code = decision.code or "internal"
     failure = Failure("host", None, code, effect.poll_exit)
+    if effect.stop_poll:
+        res.stop_poll = True
     if effect.pause != "none":
+        res.whoami_rate_limited = True
         res.whoami_retry_after = decision.retry_after
     if cached is not None:
-        res.warnings.append(f"whoami failed ({code}); the cached host list is reused")
-        res.stale_whoami = failure
+        if effect.stop_poll:
+            res.warnings.append(f"whoami failed ({code}); the poll ends")
+            res.failures.append(failure)  # failed[] explains the exit 12
+        else:
+            res.warnings.append(f"whoami failed ({code}); the cached host list is reused")
+            res.stale_whoami = failure
         for entry in cached[1][:MAX_STALE_WARNINGS]:
             if log is not None:
-                log.write("host_failed", "warn", host=entry.host, code=code,
-                          message="whoami failed; the cached host list is reused")  # fmt: skip
+                message = "whoami failed; the cached host list is reused"
+                if effect.stop_poll:
+                    message = "whoami failed; the poll ends"
+                log.write("host_failed", "warn", host=entry.host, code=code, message=message)
         res.host_list = HostList(cached[1], frozenset(), True, stale=True)
         return res.host_list, res
     res.warnings.append(f"whoami failed ({code}) and there is no cached host list")
@@ -709,6 +738,10 @@ def record_failure(
     host or query failure is named by the host."""
     effect = decision.effect
     code = decision.code or "internal"
+    if code == "interrupted" and res.signalled():
+        return  # pr-watch's own signal ended the call: not a failure of the host
+    if effect.stop_poll:
+        res.stop_poll = True
     if effect.failed_kind is not None:
         ref = kind_ref if effect.failed_kind in ("repo", "pr") else facts.host
         res.failures.append(Failure(effect.failed_kind, ref, code, effect.poll_exit))
@@ -725,9 +758,10 @@ def record_failure(
 
 
 def _stopped(res: EnumerationResult, should_stop: Callable[[], bool] | None) -> bool:
+    """A signal, or a failure that ends the whole poll (`stop_poll`): no further call is made."""
     if should_stop is not None and should_stop():
         res.interrupted = True
-    return res.interrupted
+    return res.interrupted or res.stop_poll
 
 
 def enumerate_scopes(
@@ -748,7 +782,7 @@ def enumerate_scopes(
     query watches that cover that host; see `apply_query_listing`). A host whose
     listing is rate limited or fails as a whole gets no further listing this cycle.
     `should_stop` is polled before every forgectl call (a signal stops the stage)."""
-    res = EnumerationResult(HostList((), frozenset(), False))
+    res = EnumerationResult(HostList((), frozenset(), False), should_stop=should_stop)
     ttl = duration_ms(config.poll.hosts_ttl)
     queries = read_query_watches(store.conn)
     restrict_host = None if restrict_repo is None else restrict_repo.partition("/")[0].lower()
@@ -776,10 +810,10 @@ def enumerate_scopes(
         if _stopped(res, should_stop):
             break
         facts = res.facts(host)
-        if host in paused_hosts:
-            facts.cancelled = True
+        if host in paused_hosts or res.whoami_rate_limited:
+            facts.cancelled = True  # a whole-`whoami` rate limit: no host is listed this cycle
             continue
-        if host in hosts_to_query and host not in res.host_list.failed:
+        if host in hosts_to_query and host not in res.host_list.failed and not facts.cancelled:
             _list_query(store, client, res, facts, queries, now, log, restrict_repo)
         for repo, since, start in by_host.get(host, []):
             if facts.cancelled or _stopped(res, should_stop):
