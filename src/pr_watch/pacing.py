@@ -3,12 +3,16 @@
 
 The poll command (#25) calls, in this order:
 
+0. At poll start (before enumeration) capture `started = time.monotonic()`: `poll.max_duration` is
+   measured from the cycle's start, not from step 3.
 1. `paused_hosts(conn, now)` before enumeration; pass it to `enumerate_scopes(paused_hosts=...)`.
-2. `plan_hosts(conn, config, res, paused, now=..., mode=...)` after enumeration: one `HostPlan` per
-   host that may snapshot (`Pacing.plans`), to hand to `selection.choose_snapshots`
-   (`force=mode.full`; a `--pr` poll builds `selection.forced_pr_task` instead).
-   `HostPlan.concurrency` is the one source of the pool size (`Selection.concurrency`).
-3. `selection.choose_snapshots` and `snapshots.run_snapshots(out_of_time=time_budget(config))`.
+2. `plan_hosts(conn, config, res, paused, now=..., mode=..., pr_hosts=...)` after enumeration: one
+   `HostPlan` per host that may snapshot (`Pacing.plans`), to hand to `selection.choose_snapshots`
+   (`force=mode.full`; a `--pr` poll builds `selection.forced_pr_task` instead and passes the
+   hosts of its targets as `pr_hosts`, so a host whose only row is terminal-closed still gets a
+   plan). `HostPlan.concurrency` is the one source of the pool size (`Selection.concurrency`).
+3. `selection.choose_snapshots` and
+   `snapshots.run_snapshots(out_of_time=time_budget(config, started=started))`.
 4. `finish_hosts(store, config, res, pool, pacing, now=...)`: host state (transaction 4) is written
    after the host's cycle, each host in its own `BEGIN IMMEDIATE` that re-reads the row, so two
    polls updating one host merge instead of overwriting.
@@ -16,13 +20,18 @@ The poll command (#25) calls, in this order:
 
 Judgment calls where the interface is silent (kept conservative):
 
-- A stored `paused_until` or `low_water_until` more than an hour past `now` is read as `now` plus
-  an hour (a clock stepped back, a corrupt value): the interface never pauses longer than that.
+- A stored `paused_until` more than an hour past `now` is invalid (a clock stepped back, a corrupt
+  value; the interface never pauses longer than that): it reads as expired, the host is probed
+  again and `finish_hosts` clears it. A stored `low_water_until` more than an hour ahead is read
+  as `now` plus an hour (the host is called again and the reading is rewritten).
   A `full_pass_started_at` after `now` is read as `now` (a pass cannot start in the future, and
   would otherwise stay open until the clock catches up). An unparseable value reads as unset.
 - A low reading with no (or an unreadable) `reset_at` limits the host for 15 minutes.
-- No call to a host this cycle: its low water is left as it was (nothing was observed). A call
-  with every `remaining` null clears it (a host that reports no limit is never limited).
+- No result from a host this cycle: its low water is left as it was (nothing was observed). A
+  result with every `remaining` null clears it (a host that reports no limit is never limited).
+  "Result" means contact: a successful listing, or a snapshot that committed or was discarded
+  on a conflict (the signals of `observed`). A failed call, a rate-limited one included, is not
+  contact: it changes neither the low water nor `pause_step`.
 - A successful contact resets `pause_step` and clears an expired pause; a pause another poll set
   in the meantime (still in the future) is kept, and the later of two pauses wins.
 - Host without a known backend (no `whoami` this cycle and none stored): `github.com` is GitHub,
@@ -30,6 +39,8 @@ Judgment calls where the interface is silent (kept conservative):
 - `--pr` ignores low water (one explicit PR); a host pause still blocks it. A restricted poll
   never runs (e) or (f) work and never counts or ends a pass; it still persists a pause and a
   low-water reading, which are observations.
+- `poll_count_since_full` keeps counting while a pass is open (it is reset only when a pass
+  starts), so a pass that lasts `full_every` cycles or more is followed at once by the next one.
 - A host that is paused, cancelled this cycle (rate limit, auth, wrong host), skipped
   (`no_credential`, `not_in_scope`) or whose `whoami` failed gets no `HostPlan`.
 """
@@ -38,7 +49,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Final
@@ -106,17 +117,26 @@ def read_states(conn: sqlite3.Connection) -> dict[str, HostState]:
 
 
 def active_until(until: datetime | None, now: datetime) -> datetime | None:
-    """`until` while it is in the future, never more than an hour ahead; else None."""
+    """A low-water `until` while it is in the future, read as at most an hour ahead; else None."""
     if until is None or until <= now:
         return None
     return min(until, now + MAX_PAUSE)
+
+
+def active_pause(until: datetime | None, now: datetime) -> datetime | None:
+    """A stored pause while it is in the future and at most an hour ahead. A pause further ahead
+    is invalid (a clock stepped back, a corrupt row): it reads as expired, so the host is probed
+    again and `finish_hosts` clears it."""
+    if until is None or until <= now or until > now + MAX_PAUSE:
+        return None
+    return until
 
 
 def paused_hosts(conn: sqlite3.Connection, now: datetime) -> dict[str, datetime]:
     """Hosts paused at `now` and until when (persisted, so a later process honours it)."""
     out = {}
     for host, state in read_states(conn).items():
-        until = active_until(state.paused_until, now)
+        until = active_pause(state.paused_until, now)
         if until is not None:
             out[host] = until
     return out
@@ -176,10 +196,12 @@ def plan_hosts(
     *,
     now: datetime,
     mode: PollMode,
+    pr_hosts: Collection[str] = (),
 ) -> Pacing:
     """Decide, per host, the plan of this cycle from the config, the stored host state and the
     enumeration facts. Writes nothing (`finish_hosts` does)."""
     states = read_states(conn)
+    targets = set(pr_hosts) if mode.restricted else set()
     with_rows = {
         str(r[0])
         for r in conn.execute(
@@ -187,7 +209,7 @@ def plan_hosts(
         )
     }
     out = Pacing(now, mode, paused=dict(paused))
-    for host in sorted(with_rows | set(res.hosts)):
+    for host in sorted(with_rows | set(res.hosts) | targets):
         if host in paused:
             continue
         facts = res.hosts.get(host)
@@ -204,7 +226,7 @@ def plan_hosts(
         out.hosts[host] = HostPlanning(
             host, backend, settings.full_every, counted, start, None if mode.restricted else started
         )
-        if _blocked(facts, res, host) or host not in with_rows:
+        if _blocked(facts, res, host) or host not in with_rows | targets:
             continue
         limited = (
             not mode.full
@@ -222,12 +244,17 @@ def plan_hosts(
 
 
 def time_budget(
-    config: Config, *, monotonic: Callable[[], float] = time.monotonic
+    config: Config,
+    *,
+    started: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> Callable[[], bool]:
-    """The `out_of_time` callable of the pool: true once `poll.max_duration` has passed since this
-    call (the monotonic clock, so a stepped wall clock changes nothing)."""
+    """The `out_of_time` callable of the pool: true once `poll.max_duration` has passed since
+    `started` (a `time.monotonic()` reading, so a stepped wall clock changes nothing). The
+    duration is measured from the start of the poll cycle: the caller captures `started` at poll
+    start, before enumeration; it defaults to this call."""
     limit = duration_ms(config.poll.max_duration) / 1000
-    start = monotonic()
+    start = monotonic() if started is None else started
     return lambda: monotonic() - start >= limit
 
 
@@ -251,9 +278,16 @@ class HostOutcome:
 
 
 def _contacted(host: str, res: EnumerationResult, pool: PoolResult | None) -> bool:
+    """The host gave a result this cycle: a successful listing, or a snapshot that committed or
+    was discarded on a conflict (the signals of `observed`). A failed call is not contact, and
+    a rate-limited result is a failure."""
     facts = res.hosts.get(host)
+    if facts is not None and facts.rate_limited:
+        return False
     ran = pool.hosts.get(host) if pool is not None else None
-    return (facts is not None and facts.listings > 0) or (ran is not None and ran.calls > 0)
+    return (facts is not None and facts.listings > 0) or (
+        ran is not None and (ran.snapshots > 0 or ran.skipped_conflict > 0)
+    )
 
 
 def _pass_done(conn: sqlite3.Connection, host: str, started: datetime) -> bool:
@@ -294,10 +328,11 @@ def _write_host(
             except ValueError:
                 seconds, step = table.host_pause(None, step)
             new = now + timedelta(seconds=seconds)
-            current = active_until(paused_until, now)
+            current = active_pause(paused_until, now)
             paused_until = new if current is None else max(new, current)
-        elif contacted and active_until(paused_until, now) is None:
-            paused_until, step = None, 0  # a success resets the backoff
+        elif active_pause(paused_until, now) is None:
+            paused_until = None  # expired or invalid
+            step = 0 if contacted else step  # a success resets the backoff
         low = row.low_water_until
         if contacted:
             lowest = facts.lowest_remaining if facts is not None else None
@@ -339,7 +374,7 @@ def _write_host(
         )
     limited = pacing.plans[host].limited if host in pacing.plans else False
     return HostOutcome(
-        host, active_until(paused_until, now), last_full, full_pass, ended, limited, backend
+        host, active_pause(paused_until, now), last_full, full_pass, ended, limited, backend
     )
 
 
@@ -355,9 +390,23 @@ def finish_hosts(
     """Persist each host's pause, backoff step, low water, pass counter and pass state after its
     cycle, and return what the report needs per host. `now` is the time at the end of the cycle
     (a pause starts then). A host paused at cycle start is left as it was; it is reported
-    with its stored pause."""
+    with its stored pause. A host seen only in `res` or `pool` (not planned) gets a planning
+    entry of its own, so a pause or a reading is never lost.
+
+    todo(#25): this writes all hosts after the whole pool ran; the interface says after each
+    host's cycle, so a poll killed mid-pool loses its pauses. The poll command persists as soon
+    as each host's queue ends (call this per host), and at least persists rate-limit pauses
+    before any long phase."""
     out: dict[str, HostOutcome] = {}
-    for host in sorted(pacing.hosts):
+    hosts = set(pacing.hosts) | set(res.hosts) | (set(pool.hosts) if pool is not None else set())
+    hosts -= set(pacing.paused)
+    for host in sorted(hosts):
+        if host not in pacing.hosts:
+            backend = backend_of(host, res, read_states(store.conn).get(host))
+            settings = config.host_settings(host, "gitlab" if backend == "gitlab" else "github")
+            pacing.hosts[host] = HostPlanning(
+                host, backend, settings.full_every, False, False, None
+            )
         out[host] = _write_host(store, config, host, res, pool, pacing, now)
     states = read_states(store.conn)
     for host, until in sorted(pacing.paused.items()):
