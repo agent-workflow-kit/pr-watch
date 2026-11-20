@@ -156,7 +156,10 @@ def test_c_stuck_boundary_is_at_least_the_age(store: Store) -> None:
     "digest",
     [
         {**OPEN, "ci": {"state": "success", "hold": 2}},
+        {**OPEN, "blocked_by": [{"code": "mergeability_unknown"}]},
+        {**OPEN, "blocked_by": [{"code": "draft"}, {"code": "mergeability_unknown"}]},
         {**OPEN, "blocked_by": ["mergeability_unknown"]},
+        {**OPEN, "ci": {"state": "pending", "hold": 0}},
     ],
 )
 def test_c_hold_and_mergeability_unknown_are_unsettled(
@@ -349,3 +352,55 @@ def test_selection_reads_persisted_triggers_after_a_reopen(store: Store) -> None
     # a reactivated row: status active, terminal_at cleared, rebaseline set
     r = add(store, rebaseline=1, terminal_at=None, terminal_kind=None)
     assert ids(choose(store)) == [r]
+
+
+def test_c_a_real_stored_digest_with_mergeability_unknown_is_chosen(store: Store) -> None:
+    from pr_watch.digest import build_digest, digest_to_json
+    from tests.forgectl_support import new_pr
+
+    snap = new_pr(HOST, "example-org/widgets", 1, blocked_by=[{"code": "mergeability_unknown"}])
+    c = add(
+        store, digest=digest_to_json(build_digest(snap)), unsettled_since=ts(-timedelta(hours=1))
+    )
+    assert ids(choose(store)) == [c]
+
+
+def test_the_prefilter_parses_only_digests_that_can_be_unsettled(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parsed: list[str] = []
+    real = sel.digest_from_json
+
+    def spy(text: str | None) -> Any:
+        parsed.append(str(text))
+        return real(text)
+
+    monkeypatch.setattr(sel, "digest_from_json", spy)
+    for _ in range(5):
+        add(store)  # settled: ci.hold is present in every digest, but 0
+    assert ids(choose(store)) == [] and parsed == []
+    shapes = [
+        PENDING,
+        {**OPEN, "ci": {"state": "success", "hold": 3}},
+        {**OPEN, "blocked_by": [{"code": "mergeability_unknown"}]},
+    ]
+    want = [
+        add(store, digest=json.dumps(d), unsettled_since=ts(-timedelta(hours=1))) for d in shapes
+    ]
+    assert sorted(ids(choose(store))) == sorted(want) and len(parsed) == 3
+
+
+def test_still_due_rereads_the_trigger_and_never_drops_a_forced_task(store: Store) -> None:
+    b = add(store, listed_updated_at=ts(-timedelta(hours=1)))
+    task = choose(store).tasks[HOST][0]
+    assert task.pr_id == b
+
+    def due(t: sel.Task) -> bool:
+        return sel.still_due(store.conn, t, now=NOW, pending_max_age_ms=6 * HOUR)
+
+    assert due(task) is True
+    store.conn.execute("UPDATE prs SET snap_updated_at = listed_updated_at")
+    assert due(task) is False
+    assert due(sel.Task(task.pr_id, task.pr, task.host, task.group, forced=True)) is True
+    store.conn.execute("UPDATE prs SET status = 'terminal'")
+    assert due(task) is False

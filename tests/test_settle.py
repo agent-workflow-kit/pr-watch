@@ -8,6 +8,8 @@ from typing import Any
 import pytest
 
 from pr_watch import settle
+from pr_watch.digest import build_digest, digest_from_json, digest_to_json
+from tests.forgectl_support import new_pr
 
 NOW = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 SHA1, SHA2 = "a" * 40, "b" * 40
@@ -28,8 +30,12 @@ def digest(ci: str | None = "success", head: str = SHA1, **extra: Any) -> dict[s
         (digest("success"), False),
         (digest("failure"), False),
         (digest(None), False),
+        (digest("success", blocked_by=[{"code": "mergeability_unknown"}]), True),
         (digest("success", blocked_by=["mergeability_unknown"]), True),
+        (digest("success", blocked_by=[{"code": "draft"}, {"code": "mergeability_unknown"}]), True),
+        (digest("success", blocked_by=[{"code": "draft"}]), False),
         (digest("success", blocked_by=["draft"]), False),
+        (digest("success", blocked_by=[{"detail": "mergeability_unknown"}, 3, None]), False),
         ({**digest("success"), "ci": {"state": "success", "hold": 2}}, True),
         ({**digest("success"), "ci": {"state": "success", "hold": 0}}, False),
         ({**digest("success"), "ci": {"state": "success", "hold": True}}, False),
@@ -42,6 +48,16 @@ def digest(ci: str | None = "success", head: str = SHA1, **extra: Any) -> dict[s
 )
 def test_is_unsettled(d: dict[str, Any] | None, expected: bool) -> None:
     assert settle.is_unsettled(d) is expected
+
+
+def test_a_stored_digest_with_mergeability_unknown_is_unsettled() -> None:
+    # the real shape: build_digest stores blocked_by as [{"code": ...}]
+    snap = new_pr(
+        "github.com", "example-org/widgets", 1, blocked_by=[{"code": "mergeability_unknown"}]
+    )
+    built = digest_from_json(digest_to_json(build_digest(snap)))
+    assert built is not None and built["blocked_by"] == [{"code": "mergeability_unknown"}]
+    assert settle.is_unsettled(built) is True
 
 
 def test_stuck_needs_age_at_least_the_limit() -> None:
@@ -134,3 +150,22 @@ def test_unreadable_listed_time_loses() -> None:
 
 def test_unreadable_snapshot_time_writes_no_snap_updated_at() -> None:
     assert "snap_updated_at" not in cols(digest(), listed=None, updated="junk")
+
+
+PAST = "2026-10-02T08:00:00.000000Z"
+
+
+@pytest.mark.parametrize(
+    "since", ["garbage", "2026-10-02T11:00:00", "", "2026-10-02T13:00:00.000000Z"]
+)
+def test_an_unreadable_or_future_start_is_rewritten_with_now(since: str) -> None:
+    out = cols(digest("pending"), old=digest("pending"), since=since)
+    assert out["unsettled_since"] == STAMP
+
+
+def test_a_readable_past_start_is_kept() -> None:
+    assert "unsettled_since" not in cols(digest("pending"), old=digest("pending"), since=PAST)
+
+
+def test_a_start_equal_to_now_is_kept() -> None:
+    assert "unsettled_since" not in cols(digest("pending"), old=digest("pending"), since=STAMP)

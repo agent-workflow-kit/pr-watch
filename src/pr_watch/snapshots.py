@@ -9,19 +9,23 @@
   bounded by a small multiple of it); hosts run in parallel.
 - **Lease per PR**, taken when the snapshot starts and released at its commit or failure, renewed
   when the forgectl call returned. A PR whose lease a live other poll holds is `skipped_locked`.
+  With the lease held the row is read again and the trigger checked on it (`selection.still_due`):
+  a PR another poll committed in between is not snapshotted twice; a forced task is never skipped.
 - **Commit order.** Results of one host are committed in the order the PRs were started, so the
   event stream is deterministic for a given selection. A result waits for the ones started
   before it (at most `2 x concurrency` are started ahead of the oldest uncommitted one).
-- **Commit** is `commit.commit_snapshot` (compare-and-set). Inside its transaction the membership
-  rule removes the query sources that left (the snapshot shows `open`, `left_count` 2), then each
-  event's labels and watches are read. A label union over the store's 256 is cut to the first
-  256 in sorted order and logged (`commit_skipped`, reason `labels_capped`); diff drops are logged
-  the same way (reason `dropped_<code>`), because `schemas/log.json` has no record of their own.
+- **Commit** is `commit.commit_snapshot` (compare-and-set). Inside its transaction each event's
+  labels and watches are read first, then the membership rule removes the query sources that left
+  (the snapshot shows `open`, `left_count` 2), so the events of a PR that loses its last source
+  still name that source. A label union over the store's 256 is cut to the first 256 in sorted
+  order and, when the snapshot has events, logged as `labels_capped`; diff drops are logged as
+  one `events_dropped` record per snapshot.
 - **Failures** (`failures.decide`): counted failures are written in their own transaction
   (`failure_count`, `last_failure_code`, `last_attempt_at`, `status` unreachable at the threshold)
   and never produce an event; a rate limit or whole-host failure cancels the host's queue and
-  changes no PR; a tool failure stops the cycle. An exception in a worker is an `internal`
-  counted failure of that PR only.
+  changes no PR, and is recognised as soon as its call returns, not when its turn to commit comes
+  (a call that is already running still finishes); a tool failure stops the cycle. An exception
+  in a worker is an `internal` counted failure of that PR only.
 - **Stopping.** `should_stop` (a signal) ends the loop at once: nothing more is committed, the
   leases are released and `interrupted` is set; PRs in flight keep their persisted triggers.
   `out_of_time` (the `poll.max_duration` budget, #23) only stops starting: the rest is
@@ -63,7 +67,7 @@ from .forgectl_client import ForgectlClient, Outcome, ToolError
 from .leases import Lease, Leases
 from .log import Log
 from .refs import duration_ms, parse_pr
-from .selection import Selection, Task
+from .selection import Selection, Task, still_due
 from .store import MAX_LABELS, EventError, NewEvent, Store, StoredEvent, StoreError, format_ts
 from .watches import event_context
 
@@ -149,6 +153,7 @@ class _Entry:
     lease: Lease
     future: Future[_Job]
     renewed: bool = False
+    classified: bool = False
 
 
 @dataclass
@@ -267,6 +272,7 @@ class _Pool:
                 if self.should_stop is not None and self.should_stop():
                     self.out.interrupted = True
                     break
+                self._classify()
                 for host in self.hosts.values():
                     self._fill(executor, host)
                 self._renew()
@@ -292,10 +298,32 @@ class _Pool:
             host.entries.clear()
 
     def _release(self, entry: _Entry) -> None:
+        self._release_lease(entry.lease)
+
+    def _release_lease(self, lease: Lease) -> None:
         try:
-            self.leases.release(entry.lease)
+            self.leases.release(lease)
         except StoreError:
             pass  # a lease that cannot be released expires; nothing else to do
+
+    def _classify(self) -> None:
+        """Stop a host at once when a finished call shows a whole-host failure (rate limit, auth):
+        results are committed in order, but the failure must not wait for its turn while the pool
+        keeps calling the host. The failure itself is recorded when the entry is finished."""
+        for host in self.hosts.values():
+            if host.cancelled:
+                continue
+            for entry in host.entries:
+                if not entry.future.done() or entry.classified:
+                    continue
+                entry.classified = True
+                decision = entry.future.result().decision
+                if decision is None or decision.effect.stop_poll:
+                    continue
+                if decision.effect.pause != "none" or decision.effect.cancel_host:
+                    host.cancelled = True
+                    host.queue.clear()
+                    break
 
     # -- starting --
 
@@ -316,15 +344,27 @@ class _Pool:
             if lease is None:
                 run.skipped_locked += 1
                 continue
-            start = self._load(task)
-            if start is None:
-                self.leases.release(lease)
-                continue
-            now = self.clock()
-            future = executor.submit(_work, self.client, task, start, now, self.forced_for)
+            try:
+                start = self._load(task)
+                if start is None or not self._due(task):
+                    self._release_lease(lease)
+                    continue
+                future = executor.submit(
+                    _work, self.client, task, start, self.clock(), self.forced_for
+                )
+            except BaseException:
+                self._release_lease(lease)  # not in `host.entries` yet: `_release_all` misses it
+                raise
             host.entries.append(_Entry(task, start, lease, future))
         if host.cancelled:
             host.queue.clear()
+
+    def _due(self, task: Task) -> bool:
+        """The task's trigger on the row as it is now, with the lease held."""
+        return still_due(
+            self.store.conn, task, now=self.clock(),
+            pending_max_age_ms=duration_ms(self.config.ci.pending_max_age),
+        )  # fmt: skip
 
     def _load(self, task: Task) -> RowStart | None:
         """The row as the snapshot starts, or None when it is gone or no longer eligible."""
@@ -394,19 +434,20 @@ class _Pool:
             self._fail(host, entry, job.decision)
 
     def _commit(self, host: _Host, entry: _Entry, p: _Prepared) -> None:
-        capped = False
+        capped: tuple[int, int] | None = None  # (kept, total)
 
         def prepare(conn: sqlite3.Connection) -> Sequence[NewEvent]:
             nonlocal capped
+            # read before the membership rule below removes a source (the last one included)
+            labels, ids = event_context(conn, entry.task.pr_id)
             if p.plan.digest.get("state") == "open":
                 conn.execute(
                     "DELETE FROM sources WHERE pr_id = ? AND left_count >= 2 AND watch_id IN "
                     "(SELECT id FROM watches WHERE kind = 'query')",
                     (entry.task.pr_id,),
                 )
-            labels, ids = event_context(conn, entry.task.pr_id)
-            if len(labels) > MAX_LABELS:
-                capped, labels = True, labels[:MAX_LABELS]
+            if p.plan.events and len(labels) > MAX_LABELS:
+                capped, labels = (MAX_LABELS, len(labels)), labels[:MAX_LABELS]
             return [e.to_new_event(labels, ids) for e in p.plan.events]
 
         try:
@@ -429,7 +470,13 @@ class _Pool:
         self._committed(host, entry, p, result, pr, capped)
 
     def _committed(
-        self, host: _Host, entry: _Entry, p: _Prepared, result: CommitResult, pr: str, capped: bool
+        self,
+        host: _Host,
+        entry: _Entry,
+        p: _Prepared,
+        result: CommitResult,
+        pr: str,
+        capped: tuple[int, int] | None,
     ) -> None:
         run = self.out.host(host.name)
         run.snapshots += 1
@@ -440,10 +487,13 @@ class _Pool:
         for part in p.plan.persistent:
             self._log("part_incomplete", pr_id=pr_id, pr=pr, part=part,
                       snapshots=p.plan.incomplete[part])  # fmt: skip
-        for drop in p.plan.events.dropped:
-            self._log("commit_skipped", "warn", pr_id=pr_id, reason=f"dropped_{drop.reason}")
-        if capped:
-            self._log("commit_skipped", "warn", pr_id=pr_id, reason="labels_capped")
+        drops = p.plan.events.dropped
+        if drops:
+            self._log("events_dropped", "warn", pr=pr, pr_id=pr_id, count=len(drops),
+                      reasons=sorted({d.reason for d in drops}))  # fmt: skip
+        if capped is not None:
+            self._log("labels_capped", "warn", pr=pr, pr_id=pr_id, kept=capped[0],
+                      total=capped[1])  # fmt: skip
         before, after = entry.start.state.status, p.fields.get("status", entry.start.state.status)
         if before != after:
             self._log("pr_status", pr=pr, pr_id=pr_id, **{"from": before, "to": after})
@@ -531,7 +581,7 @@ def run_snapshots(
     should_stop: Callable[[], bool] | None = None,
     out_of_time: Callable[[], bool] | None = None,
     forced_for: ForcedFor | None = None,
-) -> PoolResult:
+) -> PoolResult:  # TODO(#23): make HostPlan.concurrency the single source (drop `concurrency`)
     """Run the chosen snapshots (see the module docstring). Failures and host facts are added to
     `res`; the counters and the committed events are returned."""
     return _Pool(

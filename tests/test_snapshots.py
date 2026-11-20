@@ -16,9 +16,11 @@ from typing import Any
 import pytest
 
 from pr_watch import enumeration as en
+from pr_watch import log as log_module
 from pr_watch import selection as sel
 from pr_watch import snapshots as sn
 from pr_watch.config import Config
+from pr_watch.diff import Drop
 from pr_watch.forgectl_client import ForgectlClient, Outcome, resolve_executable
 from pr_watch.leases import Leases, ProcFs
 from pr_watch.log import Log
@@ -27,6 +29,7 @@ from pr_watch.state_dir import open_state_dir
 from pr_watch.store import Store, format_ts, open_store
 from pr_watch.watches import new_watch_id
 from tests.forgectl_support import FakeForgectl, new_pr, sha
+from tests.harness import assert_valid
 
 NOW = datetime.now(UTC)
 HOST = "github.com"
@@ -42,6 +45,9 @@ class Rec(Log):
         self.records: list[tuple[str, str, dict[str, Any]]] = []
 
     def write(self, event: str, level: str = "info", **fields: Any) -> bool:
+        # every record the pool writes must be one schemas/log.json accepts
+        line = log_module._build(event, level, fields, time.time())
+        assert_valid("log", json.loads(line))
         self.records.append((event, level, fields))
         return True
 
@@ -71,11 +77,7 @@ def make_client() -> ForgectlClient:
 
 def pr(n: int, **ch: Any) -> dict[str, Any]:
     ch.setdefault("updated_at", "2026-10-02T10:30:00Z")
-    return (
-        new_pr(HOST, "example-org", n, **ch)
-        if False
-        else new_pr(HOST, "example-org/widgets", n, **ch)
-    )
+    return new_pr(HOST, "example-org/widgets", n, **ch)
 
 
 def seed(store: Store, snap: dict[str, Any], **cols: Any) -> str:
@@ -109,6 +111,7 @@ def cycle(
     plan: sel.HostPlan | None = None,
     log: Rec | None = None,
     res: en.EnumerationResult | None = None,
+    lease: Leases | None = None,
     **kw: Any,
 ) -> tuple[sn.PoolResult, en.EnumerationResult]:
     cfg = config or Config()
@@ -119,7 +122,7 @@ def cycle(
     res = res or en.EnumerationResult(en.HostList((), frozenset(), True))
     out = sn.run_snapshots(
         store, client or make_client(), cfg, chosen, res,
-        concurrency={plan.host: plan.concurrency}, leases=leases(store),
+        concurrency={plan.host: plan.concurrency}, leases=lease or leases(store),
         log=log, **kw,
     )  # fmt: skip
     return out, res
@@ -248,6 +251,28 @@ def test_membership_rule_drops_the_row_when_the_left_query_was_its_last_source(
     assert col(store, pr_id, "pr") is None  # last source gone: the row is dropped
 
 
+def test_events_of_a_commit_that_drops_the_last_source_keep_their_watches_and_labels(
+    store: Store, fake: FakeForgectl
+) -> None:
+    snap = pr(1)
+    pr_id = baseline(store, fake, snap)
+    store.conn.execute(
+        "INSERT INTO watches VALUES ('w-qqqqqqqqqq', 'query', 'mine+open', ?)", (CREATED,)
+    )
+    store.conn.execute("INSERT INTO owners VALUES ('w-qqqqqqqqqq', 'me')")
+    store.conn.execute("INSERT INTO labels VALUES ('w-qqqqqqqqqq', 'me', 'team=core')")
+    store.conn.execute("INSERT INTO sources VALUES (?, 'w-qqqqqqqqqq', 2)", (pr_id,))
+    store.conn.execute("DELETE FROM sources WHERE watch_id != 'w-qqqqqqqqqq'")  # query-only now
+    fake.update(snap["pr"], head={"sha": sha(5)}, updated_at="2026-10-02T11:00:00Z")
+    store.conn.execute("UPDATE prs SET listed_updated_at = '2026-10-02T11:00:00.000000Z'")
+    store.conn.commit()
+    out, _ = cycle(store)
+    assert out.host(HOST).events == 1 and col(store, pr_id, "pr") is None  # row dropped
+    labels, payload = store.conn.execute("SELECT labels, payload FROM events").fetchone()
+    assert json.loads(payload)["watches"] == ["w-qqqqqqqqqq"]
+    assert json.loads(labels) == ["team=core"]
+
+
 def test_membership_rule_removes_only_the_left_query_source(
     store: Store, fake: FakeForgectl
 ) -> None:
@@ -306,7 +331,74 @@ def test_a_label_union_over_the_cap_is_cut_sorted_and_logged(
     cycle(store, log=log)
     labels = json.loads(store.conn.execute("SELECT labels FROM events").fetchone()[0])
     assert len(labels) == 256 and labels == sorted(labels)
-    assert log.of("commit_skipped")[0]["reason"] == "labels_capped"
+    (capped,) = log.of("labels_capped")
+    assert capped == {"pr": snap["pr"], "pr_id": pr_id, "kept": 256, "total": 320}
+    assert log.of("commit_skipped") == []
+
+
+def test_a_label_union_over_the_cap_is_not_logged_when_the_snapshot_has_no_event(
+    store: Store, fake: FakeForgectl
+) -> None:
+    snap = pr(1)
+    pr_id = baseline(store, fake, snap)
+    for w in range(5):
+        wid = new_watch_id()
+        store.conn.execute(
+            "INSERT INTO watches VALUES (?, 'pr', ?, '2026-01-01T00:00:00.000000Z')", (wid, f"k{w}")
+        )
+        store.conn.execute("INSERT INTO owners VALUES (?, 'o')", (wid,))
+        store.conn.execute("INSERT INTO sources (pr_id, watch_id) VALUES (?, ?)", (pr_id, wid))
+        for i in range(64):
+            store.conn.execute("INSERT INTO labels VALUES (?, 'o', ?)", (wid, f"team=l{w}-{i:03d}"))
+    fake.update(snap["pr"], updated_at="2026-10-02T11:00:00Z")  # nothing an event is made of
+    store.conn.execute("UPDATE prs SET listed_updated_at = '2026-10-02T11:00:00.000000Z'")
+    store.conn.commit()
+    log = Rec()
+    out, _ = cycle(store, log=log)
+    assert out.host(HOST).snapshots == 1 and out.host(HOST).events == 0
+    assert log.of("labels_capped") == [] and log.of("commit_skipped") == []
+
+
+def test_dropped_events_are_logged_as_events_dropped_not_commit_skipped(
+    store: Store, fake: FakeForgectl, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snap = pr(1)
+    fake.add(snap)
+    pr_id = seed(store, snap)
+    real = sn.plan_snapshot
+
+    def with_drops(*args: Any, **kw: Any) -> Any:
+        plan = real(*args, **kw)
+        plan.events.dropped = (
+            Drop("review", "invalid_review_id"),
+            Drop("review", "invalid_review_id"),
+            Drop("ci", "invalid_head_sha"),
+        )
+        return plan
+
+    monkeypatch.setattr(sn, "plan_snapshot", with_drops)
+    log = Rec()
+    cycle(store, log=log)
+    (dropped,) = log.of("events_dropped")
+    assert dropped == {
+        "pr": snap["pr"],
+        "pr_id": pr_id,
+        "count": 3,
+        "reasons": ["invalid_head_sha", "invalid_review_id"],
+    }
+    assert [lvl for e, lvl, _ in log.records if e == "events_dropped"] == ["warn"]
+    assert log.of("commit_skipped") == []
+
+
+def test_a_snapshot_without_drops_writes_no_events_dropped(
+    store: Store, fake: FakeForgectl
+) -> None:
+    snap = pr(1)
+    fake.add(snap)
+    seed(store, snap)
+    log = Rec()
+    cycle(store, log=log)
+    assert log.of("events_dropped") == []
 
 
 def test_a_stale_revision_is_a_conflict_and_the_other_commit_stays(
@@ -456,6 +548,21 @@ def test_rate_limited_pauses_the_host_without_counting_and_cancels_the_queue(
     assert event_types(store) == [] and lease_count(store) == 0
 
 
+def test_a_host_wide_failure_stops_new_calls_without_waiting_for_the_oldest_result(
+    store: Store, fake: FakeForgectl
+) -> None:
+    for n in range(1, 31):
+        s = pr(n)
+        fake.add(s)
+        seed(store, s, last_polled_at=f"2026-09-{n:02d}T00:00:00.000000Z")
+    fake.slow("snapshot", 1.5, pr=pr(1)["pr"])  # the head of the queue answers late
+    fake.rate_limited("snapshot", retry_after=30)
+    out, res = cycle(store, plan=sel.HostPlan(HOST, 4))
+    assert res.facts(HOST).rate_limited and res.facts(HOST).cancelled
+    assert len(fake.calls("snapshot")) <= 4  # no refill after the first limited answer
+    assert lease_count(store) == 0 and event_types(store) == []
+
+
 def test_auth_required_fails_the_host_once_for_all_its_queued_prs(
     store: Store, fake: FakeForgectl
 ) -> None:
@@ -511,6 +618,80 @@ def test_a_snapshot_with_an_unreadable_updated_at_is_a_counted_contract_failure(
     assert (
         col(store, pr_id, "last_failure_code") == "contract" and col(store, pr_id, "digest") is None
     )
+
+
+def _due_pr(store: Store, fake: FakeForgectl) -> tuple[dict[str, Any], str]:
+    snap = pr(1)
+    pr_id = baseline(store, fake, snap)
+    store.conn.execute("UPDATE prs SET listed_updated_at = '2026-10-02T11:00:00.000000Z'")
+    store.conn.commit()
+    return snap, pr_id
+
+
+class _Racy(Leases):
+    """Another poll commits this PR between the choice and the lease."""
+
+    def __init__(self, store: Store) -> None:
+        super().__init__(store, TTL)
+        self._store = store
+
+    def acquire(self, pr_id: str) -> Any:
+        self._store.conn.execute("UPDATE prs SET snap_updated_at = listed_updated_at")
+        self._store.conn.commit()
+        return super().acquire(pr_id)
+
+
+def _choose(store: Store) -> sel.Selection:
+    return sel.choose_snapshots(
+        store.conn, {HOST: sel.HostPlan(HOST, 4)}, now=datetime.now(UTC), pending_max_age_ms=10**9
+    )
+
+
+def test_a_task_whose_trigger_a_concurrent_poll_cleared_is_skipped(
+    store: Store, fake: FakeForgectl
+) -> None:
+    _, pr_id = _due_pr(store, fake)
+    before = len(fake.calls("snapshot"))
+    chosen = _choose(store)
+    assert chosen.total == 1
+    res = en.EnumerationResult(en.HostList((), frozenset(), True))
+    out = sn.run_snapshots(
+        store, make_client(), Config(), chosen, res, concurrency={HOST: 4}, leases=_Racy(store)
+    )
+    assert out.host(HOST).snapshots == 0 and out.host(HOST).calls == 0
+    assert len(fake.calls("snapshot")) == before and lease_count(store) == 0
+    assert col(store, pr_id, "rev") == 1
+
+
+def test_a_forced_task_is_never_skipped_by_the_recheck(store: Store, fake: FakeForgectl) -> None:
+    _, pr_id = _due_pr(store, fake)
+    chosen = _choose(store)
+    chosen.tasks[HOST] = [dataclasses.replace(t, forced=True) for t in chosen.tasks[HOST]]
+    res = en.EnumerationResult(en.HostList((), frozenset(), True))
+    out = sn.run_snapshots(
+        store, make_client(), Config(), chosen, res, concurrency={HOST: 4}, leases=_Racy(store)
+    )
+    assert out.host(HOST).snapshots == 1 and col(store, pr_id, "rev") == 2
+
+
+@pytest.mark.parametrize("boom", ["load", "submit"])
+def test_a_lease_is_released_when_starting_the_snapshot_raises(
+    store: Store, fake: FakeForgectl, monkeypatch: pytest.MonkeyPatch, boom: str
+) -> None:
+    s = pr(1)
+    fake.add(s)
+    seed(store, s)
+
+    def raising(*args: Any, **kw: Any) -> Any:
+        raise RuntimeError("boom")
+
+    if boom == "load":
+        monkeypatch.setattr(sn._Pool, "_load", raising)
+    else:
+        monkeypatch.setattr(sn.ThreadPoolExecutor, "submit", raising)
+    with pytest.raises(RuntimeError, match="boom"):
+        cycle(store)
+    assert lease_count(store) == 0
 
 
 # --- leases ---

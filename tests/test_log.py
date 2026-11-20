@@ -48,6 +48,13 @@ SAMPLES: dict[str, dict[str, Any]] = {
     "host_failed": {"host": HOST, "code": "auth_required"},
     "part_incomplete": {"pr_id": PR_ID, "pr": PR, "part": "ci", "snapshots": 3},
     "commit_skipped": {"pr_id": PR_ID, "reason": "lost_source"},
+    "events_dropped": {
+        "pr_id": PR_ID,
+        "pr": PR,
+        "count": 3,
+        "reasons": ["invalid_head_sha", "invalid_review_id"],
+    },
+    "labels_capped": {"pr_id": PR_ID, "pr": PR, "kept": 256, "total": 320},
     "host_summary": {
         "host": HOST,
         "snapshots": 1,
@@ -235,6 +242,14 @@ HOSTILE: list[tuple[str, dict[str, Any]]] = [
     ("host_failed", _with("host_failed", code="bad code")),
     ("host_summary", _with("host_summary", paused_until="tomorrow")),
     ("commit_skipped", _with("commit_skipped", reason="x" * 65)),
+    ("events_dropped", _with("events_dropped", reasons=[])),  # at least one reason
+    ("events_dropped", _with("events_dropped", reasons="invalid_head_sha")),  # not a list
+    ("events_dropped", _with("events_dropped", reasons=["Bad Code"])),
+    ("events_dropped", _with("events_dropped", reasons=["a", "a"])),  # unique
+    ("events_dropped", _with("events_dropped", reasons=[None])),
+    ("events_dropped", _with("events_dropped", count=0)),
+    ("labels_capped", _with("labels_capped", kept=-1)),
+    ("labels_capped", _with("labels_capped", total=True)),
 ]
 
 
