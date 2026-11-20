@@ -113,11 +113,15 @@ class Filters:
             out += f" AND type IN ({', '.join('?' * len(self.types))})"
             params += self.types
         for label in self.labels:
-            # malformed labels pass the filter so that stored_event reports the row, not SQLite
+            # labels that are not a JSON array of strings (invalid JSON, a non-array, or an array
+            # holding a non-string) pass the filter so that stored_event reports the row, not SQLite
             out += (
-                " AND CASE WHEN json_valid(events.labels)"
-                " THEN EXISTS (SELECT 1 FROM json_each(events.labels) WHERE value = ?)"
-                " ELSE 1 END"
+                " AND CASE"
+                " WHEN NOT json_valid(events.labels) THEN 1"
+                " WHEN json_type(events.labels) != 'array' THEN 1"
+                " WHEN EXISTS (SELECT 1 FROM json_each(events.labels) WHERE type != 'text') THEN 1"
+                " ELSE EXISTS (SELECT 1 FROM json_each(events.labels) WHERE value = ?)"
+                " END"
             )
             params.append(label)
         return out, params

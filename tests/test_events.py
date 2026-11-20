@@ -898,3 +898,25 @@ def test_label_filter_over_malformed_labels_reports_the_row_error_not_sqlite(
     ):
         code, err = error_of(capsys, *argv)
         assert code == 1 and err["code"] == "internal" and err["message"] == MALFORMED
+
+
+@pytest.mark.parametrize("value", ["[1, 2]", '{"a": 1}', '"x"'])
+def test_label_filter_surfaces_non_list_labels(
+    store: Store, capsys: pytest.CaptureFixture[str], value: str
+) -> None:
+    add_many(store, 3, labels=("a=b",))
+    corrupt(store, "labels", value)
+    for argv in (
+        ["events", "--since", cur(store, 0), "--label", "a=b"],
+        ["export", "--label", "a=b"],
+    ):
+        code, err = error_of(capsys, *argv)
+        assert code == 1 and err["code"] == "internal" and err["message"] == MALFORMED
+
+
+def test_label_filter_still_filters_valid_rows(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    add_event(store, labels=("a=b",))
+    add_event(store, labels=("c=d",))
+    assert seqs(events(capsys, "--since", cur(store, 0), "--label", "a=b")) == [1]
