@@ -149,13 +149,22 @@ def _expired(status: object, terminal_at: object, cutoff: str) -> bool:
     )
 
 
-def _precheck_labels(conn: sqlite3.Connection, ref: PrRef, args: argparse.Namespace) -> None:
-    """The label cap against the stored watch (or none), before any host call."""
+def _precheck_labels(
+    conn: sqlite3.Connection, ref: PrRef, args: argparse.Namespace, cutoff: str
+) -> None:
+    """The label cap against the stored watch (an expired row counts as absent), before any
+    host call."""
     try:
         found = watches.resolve_stored_pr(conn, ref)
     except RefError:
         found = None
-    watch_id = None if found is None else watches.pr_watch_id(conn, found[0])
+    watch_id = None
+    if found is not None:
+        row = conn.execute(
+            "SELECT status, terminal_at FROM prs WHERE pr_id = ?", (found[0],)
+        ).fetchone()
+        if row is not None and not _expired(row[0], row[1], cutoff):
+            watch_id = watches.pr_watch_id(conn, found[0])
     _check_label_cap(conn, watch_id or "", args)
 
 
@@ -186,6 +195,7 @@ def _write_pr(
     *,
     snap: dict[str, Any] | None,
     stored_pr_id: str | None,
+    planned_names: dict[str, tuple[str, str]],
 ) -> _Outcome:
     store = _store(ctx)
     cfg = ctx.loaded.config
@@ -269,12 +279,14 @@ def _write_pr(
             baselined, emitted = result.committed, len(result.events)
         renamed = False
         if snap is not None and not baselined and not created_row:
-            if (snap["pr"], snap["repo"]) != (row[0], row[1]):
-                conn.execute(
-                    "UPDATE prs SET pr = ?, repo = ? WHERE pr_id = ?",
-                    (snap["pr"], snap["repo"], pr_id),
+            planned = planned_names.get(pr_id)
+            if planned is not None and (snap["pr"], snap["repo"]) != (row[0], row[1]):
+                # Only over the name the plan saw: a newer rename committed since is kept.
+                cur = conn.execute(
+                    "UPDATE prs SET pr = ?, repo = ? WHERE pr_id = ? AND pr = ? AND repo = ?",
+                    (snap["pr"], snap["repo"], pr_id, planned[0], planned[1]),
                 )
-                renamed = True
+                renamed = cur.rowcount > 0
         view = watches.watch_view(conn, watch_id)
         prrow = pr_row(conn, pr_id, now=now, pending_max_age_ms=pending_ms)
     assert view is not None
@@ -290,10 +302,21 @@ def _add_pr(ctx: Context, args: argparse.Namespace) -> _Outcome:
     assert isinstance(ref, PrRef)
     client: ForgectlClient | None = None
     snap: dict[str, Any] | None = None
-    _precheck_labels(store.conn, ref, args)
+    _precheck_labels(
+        store.conn,
+        ref,
+        args,
+        watches.expiry_cutoff(datetime.now(UTC), ctx.loaded.config.expiry.after_terminal),
+    )
     for _ in range(MAX_ATTEMPTS):
         now = datetime.now(UTC)
         cutoff = watches.expiry_cutoff(now, ctx.loaded.config.expiry.after_terminal)
+        planned_names = {
+            str(r[0]): (str(r[1]), str(r[2]))
+            for r in store.conn.execute(
+                "SELECT pr_id, pr, repo FROM prs WHERE lower(pr) = ?", (ref.key,)
+            )
+        }
         stored = _needs_snapshot(store.conn, ref, cutoff, args.no_baseline)
         if stored is None and snap is None:
             try:
@@ -302,7 +325,7 @@ def _add_pr(ctx: Context, args: argparse.Namespace) -> _Outcome:
                 raise to_cli_error(decide_tool(exc)) from None
             snap = _snapshot_of(client, ref, args.no_baseline)
         try:
-            return _write_pr(ctx, args, snap=snap, stored_pr_id=stored)
+            return _write_pr(ctx, args, snap=snap, stored_pr_id=stored, planned_names=planned_names)
         except _NeedSnapshot:
             continue
     raise CliError("host_failed", "the PR changed while it was being added; retry")

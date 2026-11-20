@@ -17,7 +17,7 @@ from pr_watch import forgectl_client as fc
 from pr_watch import watch_add as wa
 from pr_watch import watches as w
 from pr_watch.cli import main
-from pr_watch.refs import PrRef, parse_pr
+from pr_watch.refs import PrRef, parse_label, parse_pr
 from pr_watch.state_dir import open_state_dir
 from pr_watch.store import Store, format_ts, open_store
 from tests.forgectl_support import FakeForgectl, new_pr, sha
@@ -806,6 +806,49 @@ def test_a_rename_seen_by_a_discarded_snapshot_updates_the_stored_row(
     assert doc["pr"]["pr"] == f"{renamed}#7"
     assert (row(store, pr_id)["pr"], row(store, pr_id)["repo"]) == (f"{renamed}#7", renamed)
     assert row(store, pr_id)["rev"] == 0
+
+
+def test_an_expired_row_with_a_full_label_set_does_not_block_a_re_add(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake.update(PR, state="merged", merged_at="2026-01-01T00:00:00Z", merge_commit_sha=sha(3))
+    old = seed_row(store, pr_id_of(fake), status="terminal", terminal_at=LONG_AGO)
+    with store.transaction() as c:
+        w.add_labels(c, old, A, [parse_label(f"k=v{i}") for i in range(w.MAX_LABELS_PER_WATCH)])
+    doc = ok(capsys, PR, "--label", "new=1")
+    assert doc["created"] is True and doc["watch"]["labels"] == ["new=1"]
+
+
+def test_a_newer_rename_committed_between_plan_and_write_is_kept(
+    fake: FakeForgectl,
+    store: Store,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pr_id = pr_id_of(fake)
+    seed_row(store, pr_id, digest="{}", owners=(A,))
+    seed_row(store, "OTHER", digest="{}", owners=(A,))  # same name: the reference is ambiguous
+    with store.transaction() as c:
+        c.execute("UPDATE prs SET pr = ? WHERE pr_id = 'OTHER'", (PR,))
+    stale = "github.com/example-org/stale"
+    newer = "github.com/example-org/newer"
+    snap = new_pr(number=7)
+    snap.update(pr=f"{stale}#7", repo=stale)
+    fake.scenario["prs"][PR]["snapshot"] = snap
+    fake._write()
+    real = wa._snapshot_of
+
+    def racing(*a: Any) -> dict[str, Any]:
+        got = real(*a)
+        with store.transaction() as c:
+            c.execute(
+                "UPDATE prs SET pr = ?, repo = ? WHERE pr_id = ?", (f"{newer}#7", newer, pr_id)
+            )
+        return got
+
+    monkeypatch.setattr(wa, "_snapshot_of", racing)
+    ok(capsys, PR, owner=B)
+    assert (row(store, pr_id)["pr"], row(store, pr_id)["repo"]) == (f"{newer}#7", newer)
 
 
 # --- goldens -----
