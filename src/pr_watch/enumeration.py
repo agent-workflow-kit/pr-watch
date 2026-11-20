@@ -25,8 +25,8 @@ Rules owned here:
   item) is used for the PRs it lists and never to conclude that a member left. An incomplete repo
   listing marks every `active` per-PR row of that repo as changed, so trigger (b) snapshots it.
 - An item is accepted only when its `pr` and `repo` are well-formed and agree, its host is the host
-  asked, `pr_id` is a short printable string and `updated_at` is a timestamp with a zone; anything
-  else is ignored and makes the listing incomplete.
+  asked, `pr_id` matches the store's `PR_ID_RE` and `updated_at` is a timestamp with a zone, in
+  1970 or later; anything else is ignored and makes the listing incomplete.
 
 Judgment calls where the interface is silent (kept conservative):
 
@@ -37,6 +37,10 @@ Judgment calls where the interface is silent (kept conservative):
 - A `whoami` failure that names no host (the call as a whole) is a `Failure` with `ref` None; the
   report stage chooses how to show it. With a stale cache the cache is reused, the failure is
   `EnumerationResult.stale_whoami` (not in `failures`) and a warning is logged.
+- A `--repo` poll also lists its host's open PRs (host list and query listing for that host only).
+  That listing writes `listed_updated_at` for every listed row, and joins members, resets
+  `left_count` and reactivates only for items of the restricted repo; it counts no absence and
+  does not set `last_enumerated_at`.
 - Items of a query listing are matched to a watch by the watch's filters only: a member that is
   still listed but no longer matches the `--repo` filter counts as absent for that watch.
 - An empty first listing of a repo with no `scopes` row stores the start it used, without the
@@ -49,7 +53,6 @@ TODO(#22): choose snapshots from the persisted triggers; TODO(#23): pause and lo
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
@@ -61,18 +64,17 @@ from .config import Config
 from .forgectl_client import ForgectlClient, Outcome
 from .log import Log
 from .refs import RefError, duration_ms, parse_host
-from .store import PR_RE, REPO_RE, Store, format_ts
+from .store import PR_ID_RE, PR_RE, REPO_RE, Store, format_ts
 from .watches import QUERY_KIND, watch_exists
 
 LISTING_LIMIT: Final = 1000
-MAX_PR_ID_CHARS: Final = 256
 MAX_REF_CHARS: Final = 256
 MAX_LEFT: Final = 2
 MAX_STALE_WARNINGS: Final = 20
 CACHE_KEY: Final = "hosts_cache"
 _MICRO: Final = timedelta(microseconds=1)
 _BACKENDS: Final = frozenset({"github", "gitlab"})
-_PRINTABLE: Final = re.compile(r"[\x21-\x7e]+", re.ASCII)
+_MIN_YEAR: Final = 1970  # an earlier updated_at is not a real PR time (and would store unpadded)
 
 
 # --- results ---
@@ -171,7 +173,7 @@ def parse_stamp(text: object) -> datetime | None:
     if not isinstance(text, str) or len(text) > 64:
         return None
     try:
-        moment = datetime.fromisoformat(text)
+        moment = datetime.fromisoformat(text.upper())  # forgectl's `ts` allows t and z
     except ValueError:
         return None
     if moment.tzinfo is None or moment.utcoffset() is None:
@@ -246,7 +248,7 @@ def _item(raw: object, host: str) -> Listed | None:
         return None
     if pr.rpartition("#")[0].lower() != repo.lower() or pr.partition("/")[0] != host:
         return None
-    if len(pr_id) > MAX_PR_ID_CHARS or not _PRINTABLE.fullmatch(pr_id):
+    if not PR_ID_RE.match(pr_id) or updated.year < _MIN_YEAR:
         return None
     return Listed(pr_id, pr, repo, host, format_ts(updated), state)
 
@@ -423,13 +425,13 @@ def _upsert_listed(conn: sqlite3.Connection, item: Listed) -> bool:
     """Record the listing on a stored row: `listed_updated_at` (the larger), `pr` and `repo`.
     Returns whether the row exists."""
     row = conn.execute(
-        "SELECT listed_updated_at FROM prs WHERE pr_id = ?", (item.pr_id,)
+        "SELECT listed_updated_at FROM prs WHERE pr_id = ? AND host = ?", (item.pr_id, item.host)
     ).fetchone()
     if row is None:
         return False
     conn.execute(
-        "UPDATE prs SET listed_updated_at = ?, pr = ?, repo = ? WHERE pr_id = ?",
-        (_later(row[0], item.updated_at), item.pr, item.repo, item.pr_id),
+        "UPDATE prs SET listed_updated_at = ?, pr = ?, repo = ? WHERE pr_id = ? AND host = ?",
+        (_later(row[0], item.updated_at), item.pr, item.repo, item.pr_id, item.host),
     )
     return True
 
@@ -440,8 +442,9 @@ def _reactivate(conn: sqlite3.Connection, item: Listed) -> bool:
         return False
     cur = conn.execute(
         "UPDATE prs SET status = 'active', terminal_at = NULL, terminal_kind = NULL, "
-        "rebaseline = 1 WHERE pr_id = ? AND status = 'terminal' AND terminal_kind = 'closed'",
-        (item.pr_id,),
+        "rebaseline = 1 WHERE pr_id = ? AND host = ? AND status = 'terminal' "
+        "AND terminal_kind = 'closed'",
+        (item.pr_id, item.host),
     )
     return cur.rowcount > 0
 
@@ -468,13 +471,23 @@ def apply_query_listing(
     *,
     complete: bool,
     now: datetime,
+    restrict: str | None = None,
 ) -> _Applied:
-    """State transaction 1 for one host's open listing."""
+    """State transaction 1 for one host's open listing.
+
+    With `restrict` (a `--repo` poll) every listed row gets `listed_updated_at`, but only items
+    of that repo (case-insensitive) become members, reset `left_count`, are reactivated or are
+    candidates; no absence is counted and `hosts.last_enumerated_at` is not written."""
     out = _Applied()
-    open_items = [i for i in items if i.state == "open"]
+    wanted = None if restrict is None else restrict.casefold()
+
+    def inside(item: Listed) -> bool:
+        return wanted is None or item.repo.casefold() == wanted
+
+    open_items = [i for i in items if i.state == "open" and inside(i)]
     with store.transaction() as conn:
         for item in items:
-            if _upsert_listed(conn, item):
+            if _upsert_listed(conn, item) and inside(item):
                 out.candidates.add(item.pr_id)
                 if _reactivate(conn, item):
                     out.reactivated.append((item.pr, item.pr_id))
@@ -485,18 +498,28 @@ def apply_query_listing(
             for item in open_items:
                 if not watch.matches(item):
                     continue
+                if _foreign(conn, item):
+                    continue
                 present.add(item.pr_id)
                 if _join(conn, watch.id, item):
                     out.new_members.append(item.pr_id)
                 out.candidates.add(item.pr_id)
-            if complete:
+            if complete and restrict is None:
                 _count_absent(conn, watch.id, host, present)
+        if restrict is not None:
+            return out
         conn.execute(
             "INSERT INTO hosts (host, last_enumerated_at) VALUES (?, ?) "
             "ON CONFLICT(host) DO UPDATE SET last_enumerated_at = excluded.last_enumerated_at",
             (host, format_ts(now)),
         )
     return out
+
+
+def _foreign(conn: sqlite3.Connection, item: Listed) -> bool:
+    """Whether the stored row of this `pr_id` belongs to another host (not this PR)."""
+    row = conn.execute("SELECT host FROM prs WHERE pr_id = ?", (item.pr_id,)).fetchone()
+    return row is not None and row[0] != item.host
 
 
 def _join(conn: sqlite3.Connection, watch_id: str, item: Listed) -> bool:
@@ -541,10 +564,13 @@ def apply_repo_listing(
     *,
     complete: bool,
     start: str | None,
+    now: datetime,
 ) -> _Applied:
     """State transaction 1 for one repo's windowed listing: the listed facts, reactivations,
-    the new watermark (the largest listed `updated_at`, else the old one or `start`) and, for an
-    incomplete listing, the changed mark of every `active` per-PR row of the repo."""
+    the new watermark (the largest listed `updated_at`, never later than `now`, else the old one
+    or `start`) and, for an incomplete listing, the changed mark of every `active` per-PR row of
+    the repo. Items match stored rows by `pr_id` and host, so a renamed repo's rows are refreshed;
+    a repo listing never creates a row."""
     out = _Applied()
     with store.transaction() as conn:
         for item in items:
@@ -553,7 +579,7 @@ def apply_repo_listing(
                 if _reactivate(conn, item):
                     out.reactivated.append((item.pr, item.pr_id))
         if items:
-            mark = max(items, key=lambda i: i.updated_at).updated_at
+            mark = min(max(i.updated_at for i in items), format_ts(now))  # ts sorts as text
         else:
             old = conn.execute("SELECT watermark FROM scopes WHERE repo = ?", (repo,)).fetchone()
             mark = old[0] if old is not None and old[0] is not None else start
@@ -579,7 +605,10 @@ def _mark_changed(conn: sqlite3.Connection, repo: str, out: _Applied) -> None:
         snapped = parse_stamp(snap)
         if snapped is None:
             continue  # unreadable: left to the full pass
-        target = format_ts(snapped + _MICRO)
+        try:
+            target = format_ts(snapped + _MICRO)
+        except OverflowError:
+            continue  # unreadable: left to the full pass
         conn.execute(
             "UPDATE prs SET listed_updated_at = ? WHERE pr_id = ?", (_later(listed, target), pr_id)
         )
@@ -601,7 +630,8 @@ def plan_repo_scopes(
 ) -> list[tuple[str, datetime, str | None]]:
     """The repos to list: `(repo, updated_since, fallback start)`. Also deletes the `scopes`
     rows that no per-PR row (active, or closed inside the expiry) refers to, in the same
-    transaction. `fallback start` is the stored watermark's replacement for a first listing."""
+    transaction (also in a `--repo` poll, which filters the plan afterwards). `fallback start` is
+    the stored watermark's replacement for a first listing."""
     cutoff = format_ts(now - timedelta(milliseconds=after_terminal_ms))
     overlap = timedelta(milliseconds=overlap_ms)
     plan: list[tuple[str, datetime, str | None]] = []
@@ -620,8 +650,11 @@ def plan_repo_scopes(
         for repo in repos:
             mark = parse_stamp(marks.get(repo))
             if mark is not None:
-                plan.append((repo, mark - overlap, None))
-                continue
+                try:
+                    plan.append((repo, mark - overlap, None))
+                    continue
+                except OverflowError:
+                    pass  # unreadable watermark: as if there were none
             stamps = [
                 s
                 for (raw,) in conn.execute(
@@ -633,7 +666,10 @@ def plan_repo_scopes(
             ]
             if stamps:  # a repo whose rows have no digest is not listed (trigger (a) covers it)
                 first = min(stamps)
-                plan.append((repo, first - overlap, format_ts(first)))
+                try:
+                    plan.append((repo, first - overlap, format_ts(first)))
+                except OverflowError:
+                    continue  # unreadable: left to the full pass
     return plan
 
 
@@ -661,11 +697,13 @@ def _record_failure(
     kind_ref: str,
     log: Log | None,
 ) -> None:
-    """Act on one failed (or per-entry) decision of a listing call."""
+    """Act on one failed (or per-entry) decision of a listing call. `kind_ref` is the repo id; a
+    host or query failure is named by the host."""
     effect = decision.effect
     code = decision.code or "internal"
     if effect.failed_kind is not None:
-        res.failures.append(Failure(effect.failed_kind, kind_ref, code, effect.poll_exit))
+        ref = kind_ref if effect.failed_kind in ("repo", "pr") else facts.host
+        res.failures.append(Failure(effect.failed_kind, ref, code, effect.poll_exit))
         if effect.failed_kind in ("host", "query") and log is not None:
             log.write("host_failed", "error" if effect.log_error else "warn",
                       host=facts.host, code=code, **({"message": effect.log_error}
@@ -673,7 +711,7 @@ def _record_failure(
     if effect.pause != "none":
         facts.rate_limited = True
         facts.retry_after = decision.retry_after
-    if effect.pause != "none" or effect.failed_kind in ("host", "query") or effect.cancel_host:
+    if effect.pause != "none" or effect.cancel_host:
         facts.cancelled = True
     facts.errors.append(HostError(code, decision.retry_after))
 
@@ -698,12 +736,16 @@ def enumerate_scopes(
     """Steps 1 to 3 of the poll cycle for the whole store.
 
     `paused_hosts` are skipped (their `paused_until` is the report's, #23); `restrict_repo` runs
-    the `--repo` poll: that repo's scope only, no query listing and no host list. A host whose
+    the `--repo` poll: that repo's scope plus the open listing of its host (the host list and the
+    query watches that cover that host; see `apply_query_listing`). A host whose
     listing is rate limited or fails as a whole gets no further listing this cycle.
     `should_stop` is polled before every forgectl call (a signal stops the stage)."""
     res = EnumerationResult(HostList((), frozenset(), False))
     ttl = duration_ms(config.poll.hosts_ttl)
-    queries = [] if restrict_repo is not None else read_query_watches(store.conn)
+    queries = read_query_watches(store.conn)
+    restrict_host = None if restrict_repo is None else restrict_repo.partition("/")[0].lower()
+    if restrict_host is not None:
+        queries = [q for q in queries if q.covers(restrict_host)]
     if queries and not _stopped(res, should_stop):
         load_host_list(store, client, now=now, ttl_ms=ttl, result=res, log=log)
     plan = plan_repo_scopes(
@@ -713,11 +755,13 @@ def enumerate_scopes(
         overlap_ms=duration_ms(config.poll.overlap),
     )
     if restrict_repo is not None:
-        plan = [p for p in plan if p[0] == restrict_repo.lower() or p[0] == restrict_repo]
+        plan = [p for p in plan if p[0].casefold() == restrict_repo.casefold()]
     by_host: dict[str, list[tuple[str, datetime, str | None]]] = {}
     for entry in plan:
         by_host.setdefault(entry[0].partition("/")[0], []).append(entry)
     hosts_to_query = _query_hosts(res, queries)
+    if restrict_host is not None:
+        hosts_to_query &= {restrict_host}
     for host in sorted({*hosts_to_query, *by_host}):
         if _stopped(res, should_stop):
             break
@@ -726,11 +770,11 @@ def enumerate_scopes(
             facts.cancelled = True
             continue
         if host in hosts_to_query and host not in res.host_list.failed:
-            _list_query(store, client, res, facts, queries, now, log, should_stop)
+            _list_query(store, client, res, facts, queries, now, log, restrict_repo)
         for repo, since, start in by_host.get(host, []):
             if facts.cancelled or _stopped(res, should_stop):
                 break
-            _list_repo(store, client, res, facts, repo, since, start, log)
+            _list_repo(store, client, res, facts, repo, since, start, now, log)
     return res
 
 
@@ -747,6 +791,8 @@ def _query_hosts(res: EnumerationResult, queries: list[QueryWatch]) -> set[str]:
             wanted.update(h for h, e in known.items() if e.in_scope)
     wanted.update(h for h in named if h in known and known[h].in_scope)
     for host in named:
+        if host in res.host_list.failed:
+            continue  # a failed host is reported failed, not skipped
         entry = known.get(host)
         if entry is None:
             res.facts(host).skipped = "not_in_scope"
@@ -763,7 +809,7 @@ def _list_query(
     queries: list[QueryWatch],
     now: datetime,
     log: Log | None,
-    should_stop: Callable[[], bool] | None,
+    restrict: str | None,
 ) -> None:
     host = facts.host
     applicable = [q for q in queries if q.covers(host)]
@@ -782,7 +828,11 @@ def _list_query(
         _partial_entries(res, facts, outcome.result, "query", host, log)
     if not complete:
         facts.incomplete_listing = True
-    applied = apply_query_listing(store, host, items, applicable, complete=complete, now=now)
+    applied = apply_query_listing(
+        store, host, items, applicable, complete=complete, now=now, restrict=restrict
+    )
+    if restrict is not None:
+        items = [i for i in items if i.repo.casefold() == restrict.casefold()]
     _absorb(res, applied, items, log)
 
 
@@ -811,6 +861,7 @@ def _list_repo(
     repo: str,
     since: datetime,
     start: str | None,
+    now: datetime,
     log: Log | None,
 ) -> None:
     outcome = client.prs(repo=repo, state="all", updated_since=since, limit=LISTING_LIMIT)
@@ -822,11 +873,10 @@ def _list_repo(
     facts.listings += 1
     _note_rate(facts, outcome.result)
     items, clean = _items(outcome.result, facts.host)
-    items = [i for i in items if i.repo.lower() == repo.lower()]
     complete = _is_complete(outcome.result, clean) and effect.commit
     if effect.use_result:
         _partial_entries(res, facts, outcome.result, "repo", repo, log)
-    applied = apply_repo_listing(store, repo, items, complete=complete, start=start)
+    applied = apply_repo_listing(store, repo, items, complete=complete, start=start, now=now)
     res.scopes_listed.append(repo)
     _absorb(res, applied, items, log)
 

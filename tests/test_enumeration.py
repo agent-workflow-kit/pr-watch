@@ -200,8 +200,6 @@ def test_incomplete_listing_never_counts_a_member_as_left(store: Store, fake: Fa
     run(store)
     fake.remove(s["pr"])
     fake.add(pr(2))
-    # a listing cut by the limit is `complete: false`; fake limit comes from the call, so script
-    fake.script("prs", {"kind": "drop", "fields": []})  # no-op safeguard
     store.conn.execute("UPDATE sources SET left_count = 1")
     store.conn.commit()
     res = _force_incomplete(store, fake)
@@ -241,13 +239,11 @@ def test_member_that_stops_matching_repo_filter_counts_as_absent(
     fake.add(b)
     run(store)
     assert source(store, a) is not None and source(store, b) is None
-    # the PR moves repo: still listed open, no longer matching
-    store.conn.execute("UPDATE sources SET left_count = 0")
+    # the same PR (same pr_id) is now listed open under another repo: still listed, no match
     fake.remove(a["pr"])
-    fake.add(pr(1, repo="example-org/other", pr_id=None) if False else a)
-    fake.update(a["pr"], updated_at="2026-10-02T11:00:00Z")
+    fake.add(pr(1, repo="example-org/other", pr_id=a["pr_id"]))
     run(store)
-    assert source(store, a)[0] == 0
+    assert source(store, a)[0] == 1
 
 
 def test_host_filter_and_other_hosts_untouched(store: Store, fake: FakeForgectl) -> None:
@@ -463,7 +459,8 @@ def test_hostile_item_is_rejected_by_the_stage_itself() -> None:
         "pr": "github.com/o/r#1", "repo": "github.com/o/r", "pr_id": "PR_1", "state": "open",
         "updated_at": "2026-10-02T10:30:00+02:00",
     }  # fmt: skip
-    assert en._item(good, HOST).updated_at == "2026-10-02T08:30:00.000000Z"  # type: ignore[union-attr]
+    accepted = en._item(good, HOST)
+    assert accepted is not None and accepted.updated_at == "2026-10-02T08:30:00.000000Z"
     for change in (
         {"pr_id": "x" * 300}, {"pr_id": "a\u202eb"}, {"updated_at": "nope"},
         {"updated_at": "2026-10-02T10:00:00"}, {"repo": "github.com/o/other"}, {"pr": None},
@@ -792,15 +789,71 @@ def test_orphan_scope_rows_are_deleted_and_a_rename_starts_a_new_scope(
     assert repos == [renamed]
 
 
-def test_repo_restriction_lists_only_that_repo_without_queries(
+def test_repo_restriction_lists_that_repo_and_its_host_query(
     store: Store, fake: FakeForgectl
 ) -> None:
     add_query(store)
     per_pr(store, 1)
     per_pr(store, 2, repo="example-org/other")
     run(store, restrict_repo=REPO)
-    assert fake.calls("whoami") == []
-    assert [a for a in fake.argvs("prs") if f"--repo={REPO}" in a] and len(fake.argvs("prs")) == 1
+    assert len(fake.calls("whoami")) == 1
+    argvs = fake.argvs("prs")
+    assert len(argvs) == 2
+    assert any("--host=github.com" in a for a in argvs)
+    assert [a for a in argvs if f"--repo={REPO}" in a]
+
+
+def test_restricted_poll_joins_only_the_repo_but_records_every_listed_row(
+    store: Store, fake: FakeForgectl
+) -> None:
+    add_query(store)
+    inside, outside, other = pr(1), pr(2, repo="example-org/other"), pr(3, repo="example-org/o3")
+    for s in (inside, outside, other):
+        fake.add(s)
+    add_pr_watch(store, other)  # a stored row of another repo, listed by the host listing
+    gone = pr(4)  # a member the listing no longer shows
+    add_pr_watch(store, gone)
+    store.conn.execute("INSERT INTO sources VALUES (?, ?, 1)", (gone["pr_id"], WATCH))
+    store.conn.commit()
+    res = run(store, restrict_repo=REPO.upper().replace("GITHUB.COM", "github.com"))
+    assert res.new_members == [inside["pr_id"]]
+    assert source(store, outside) is None and col(store, outside, "pr_id") is None
+    assert col(store, other, "listed_updated_at") == "2026-10-02T10:30:00.000000Z"
+    assert source(store, gone)[0] == 1  # no absence counting in a restricted poll
+    assert store.conn.execute("SELECT count(*) FROM hosts").fetchone()[0] == 0
+
+
+def test_restricted_poll_resets_left_count_of_the_repo_only(
+    store: Store, fake: FakeForgectl
+) -> None:
+    add_query(store)
+    a, b = pr(1), pr(2, repo="example-org/other")
+    fake.add(a)
+    fake.add(b)
+    run(store)
+    store.conn.execute("UPDATE sources SET left_count = 1")
+    store.conn.commit()
+    run(store, restrict_repo=REPO)
+    assert source(store, a)[0] == 0 and source(store, b)[0] == 1
+
+
+def test_restricted_poll_ignores_query_watches_of_other_hosts(
+    store: Store, fake: FakeForgectl
+) -> None:
+    fake.host("gitlab.com", me="user-1")
+    add_query(store, "mine+open;host=gitlab.com")
+    run(store, restrict_repo=REPO)
+    assert fake.calls("prs") == []
+
+
+def test_restricted_poll_matches_the_stored_repo_case_insensitively(
+    store: Store, fake: FakeForgectl
+) -> None:
+    s = pr(1, repo="example-org/Widgets")
+    add_pr_watch(store, s, digest="{}", snap_updated_at="2026-10-02T10:00:00.000000Z")
+    fake.add(s)
+    run(store, restrict_repo=REPO)
+    assert len(fake.calls("prs")) == 1 and scope(store)
 
 
 def test_paused_host_is_not_called(store: Store, fake: FakeForgectl) -> None:
@@ -820,3 +873,118 @@ def test_rate_reading_is_kept_per_host(store: Store, fake: FakeForgectl) -> None
     add_query(store)
     res = run(store)
     assert res.hosts[HOST].lowest_remaining == 4000
+
+
+# --- review round 1 ---
+
+
+def test_a_host_failure_of_a_repo_listing_is_named_by_the_host(
+    store: Store, fake: FakeForgectl
+) -> None:
+    per_pr(store)
+    fake.fail("prs", "auth_required", repo=REPO)
+    res = run(store)
+    assert [(f.kind, f.ref, f.code) for f in res.failures] == [("host", HOST, "auth_required")]
+
+
+def test_a_transient_query_failure_does_not_cancel_the_repo_listings(
+    store: Store, fake: FakeForgectl
+) -> None:
+    add_query(store)
+    per_pr(store)
+    fake.fail("prs", "network_error", argv_has=["--author=me"])
+    res = run(store)
+    assert not res.hosts[HOST].cancelled
+    assert len(fake.calls("prs")) == 2 and res.scopes_listed == [REPO]
+
+
+def test_a_failed_whoami_host_is_failed_not_skipped(store: Store, fake: FakeForgectl) -> None:
+    fake.host("gitlab.com", me="user-1")
+    add_query(store, "mine+open;host=gitlab.com")
+    fake.fail("whoami", "network_error", host="gitlab.com")
+    res = run(store)
+    assert "gitlab.com" in res.host_list.failed
+    assert res.facts("gitlab.com").skipped is None
+
+
+def test_a_renamed_repo_is_refreshed_by_its_old_scope_listing(
+    store: Store, fake: FakeForgectl
+) -> None:
+    s = per_pr(store)
+    new = "github.com/example-org/gadgets"
+    fake.add(s, listing={"repo": new, "pr": f"{new}#1", "updated_at": "2026-10-02T11:00:00Z"})
+    res = run(store)
+    assert col(store, s, "repo") == new and col(store, s, "pr") == f"{new}#1"
+    assert col(store, s, "listed_updated_at") == "2026-10-02T11:00:00.000000Z"
+    assert scope(store) == [(REPO, "2026-10-02T11:00:00.000000Z")]
+    assert s["pr_id"] in res.candidates and res.new_members == []
+
+
+@pytest.mark.parametrize("pr_id", ["--evil", ".x", "x" * 129, "a..b", "a b", ""])
+def test_pr_id_outside_the_store_pattern_is_malformed(pr_id: str) -> None:
+    good = {
+        "pr": "github.com/o/r#1", "repo": "github.com/o/r", "pr_id": pr_id, "state": "open",
+        "updated_at": "2026-10-02T10:30:00Z",
+    }  # fmt: skip
+    assert en._item(good, HOST) is None
+
+
+def test_a_stored_row_of_another_host_is_not_touched_by_the_same_pr_id(
+    store: Store, fake: FakeForgectl
+) -> None:
+    fake.host("gitlab.com", me="user-1")
+    add_query(store, "mine+open;host=gitlab.com")
+    mine = pr(1)
+    add_pr_watch(store, mine)
+    fake.add(pr(1, host="gitlab.com", pr_id=mine["pr_id"]))
+    res = run(store)
+    assert col(store, mine, "pr") == mine["pr"] and col(store, mine, "listed_updated_at") is None
+    assert source(store, mine, WATCH) is None and res.new_members == []
+    assert res.candidates == set()
+
+
+def test_a_future_updated_at_does_not_become_the_watermark(
+    store: Store, fake: FakeForgectl
+) -> None:
+    s = per_pr(store)
+    fake.add(pr(1, updated_at="2099-01-01T00:00:00Z"))
+    run(store)
+    assert scope(store) == [(REPO, format_ts(NOW))]
+    assert col(store, s, "listed_updated_at") == "2099-01-01T00:00:00.000000Z"
+
+
+@pytest.mark.parametrize("stamp", ["2026-10-02t10:30:00z", "2026-10-02T10:30:00z"])
+def test_lowercase_t_and_z_are_accepted(stamp: str) -> None:
+    got = en.parse_stamp(stamp)
+    assert got == datetime(2026, 10, 2, 10, 30, tzinfo=UTC)
+
+
+def test_updated_at_before_1970_is_malformed() -> None:
+    good = {
+        "pr": "github.com/o/r#1", "repo": "github.com/o/r", "pr_id": "PR_1", "state": "open",
+        "updated_at": "0001-01-01T00:00:00Z",
+    }  # fmt: skip
+    assert en._item(good, HOST) is None
+    assert en._item({**good, "updated_at": "1970-01-01T00:00:00Z"}, HOST) is not None
+
+
+def test_extreme_snap_time_in_an_incomplete_listing_does_not_raise(
+    store: Store, fake: FakeForgectl
+) -> None:
+    a = per_pr(store, 1, "9999-12-31T23:59:59.999999Z")
+    fake.script("prs", {"kind": "raw", "stdout": json.dumps({
+        "items": [], "complete": False, "errors": [], "hosts_queried": [HOST],
+        "rate_limit": {"host": HOST, "remaining": 5, "reset_at": None},
+    }), "exit": 0}, repo=REPO)  # fmt: skip
+    run(store)
+    assert col(store, a, "listed_updated_at") is None
+
+
+def test_extreme_watermark_is_treated_as_no_watermark(store: Store, fake: FakeForgectl) -> None:
+    per_pr(store)
+    store.conn.execute(
+        "INSERT INTO scopes (repo, watermark) VALUES (?, '0001-01-01T00:00:00.000000Z')", (REPO,)
+    )
+    store.conn.commit()
+    run(store)
+    assert "--updated-since=2026-10-02T09:59:00Z" in fake.argvs("prs")[0]
