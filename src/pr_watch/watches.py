@@ -33,6 +33,10 @@ _ALPHABET: Final = "abcdefghijklmnopqrstuvwxyz234567"
 PR_KIND: Final = "pr"
 QUERY_KIND: Final = "query"
 
+# The most labels a watch carries: the union over its owners (docs/interface.md, Labels). Keeps a
+# watch's labels, copied onto every event it detects, well inside the store's per-event cap.
+MAX_LABELS_PER_WATCH: Final = 64
+
 
 def new_watch_id() -> str:
     """`w-` plus 10 lowercase base32 characters, drawn once when a watch is created."""
@@ -107,6 +111,14 @@ def add_owner(conn: sqlite3.Connection, watch_id: str, owner: str) -> bool:
         "INSERT OR IGNORE INTO owners (watch_id, owner) VALUES (?, ?)", (watch_id, owner)
     )
     return cur.rowcount > 0
+
+
+def label_count_after(conn: sqlite3.Connection, watch_id: str, labels: Iterable[Label]) -> int:
+    """How many distinct labels the watch would carry after `labels` are added (any owner's label
+    already present does not count twice)."""
+    union = set(labels_of(conn, watch_id))
+    union.update(label_text(label) for label in labels)
+    return len(union)
 
 
 def add_labels(
@@ -214,7 +226,7 @@ def labels_of(conn: sqlite3.Connection, watch_id: str, owner: str | None = None)
     return sorted(str(row[0]) for row in rows)
 
 
-def _query_hosts(conn: sqlite3.Connection, key: str) -> list[str]:
+def _query_hosts(key: str) -> list[str]:
     hosts: list[str] = []
     repos: list[str] = []
     for part in key.split(";")[1:]:
@@ -227,7 +239,7 @@ def _enumerated_at(conn: sqlite3.Connection, key: str, created_at: str) -> str |
     """The oldest `hosts.last_enumerated_at` over the hosts the query lists; None while any is
     null or older than the watch, or when no host is known (an unfiltered query lists every host
     in scope, which is known only after the first poll)."""
-    hosts = _query_hosts(conn, key)
+    hosts = _query_hosts(key)
     if not hosts:
         return None
     stamps: list[str] = []

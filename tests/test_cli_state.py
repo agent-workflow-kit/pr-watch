@@ -96,7 +96,7 @@ def test_read_only_commands_write_no_log(
     monkeypatch.setenv("PR_WATCH_BOGUS_KEY", "1")
     code, _, _ = run(capsys, *argv)
     assert code == 0
-    assert state_dir.is_dir() and not (state_dir / "log.jsonl").exists()
+    assert not (state_dir / "log.jsonl").exists()
 
 
 def test_no_warnings_means_no_log_file(
@@ -256,5 +256,5 @@ def test_a_command_creates_hooks_cwd(
     state_dir: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert run(capsys, "list")[0] == 0
+    assert run(capsys, "prune")[0] == 0  # a read-only command creates nothing (Files)
     assert stat.S_IMODE((state_dir / "hooks-cwd").stat().st_mode) == 0o700

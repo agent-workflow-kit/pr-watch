@@ -229,3 +229,34 @@ def test_a_commit_in_flight_is_discarded_after_the_last_owner_left(store: Store)
     )
     assert not result.committed and result.reason is DiscardReason.SOURCE_REMOVED
     assert count(store.conn, "prs") == 0
+
+
+def test_union_of_disjoint_labels_is_visible_before_any_removal(store: Store) -> None:
+    with store.transaction() as c:
+        wid = pr_watch(c, "P1", "h/o/r#1", A, B)
+        w.add_labels(c, wid, A, [L1])
+        w.add_labels(c, wid, B, [L2, Label("z", "1")])
+        assert w.labels_of(c, wid) == ["k=v", "x=y", "z=1"]
+        assert w.labels_of(c, wid, A) == ["k=v"]
+        assert w.labels_of(c, wid, B) == ["x=y", "z=1"]
+
+
+def test_watch_view_lists_only_its_own_owners_and_labels(store: Store) -> None:
+    with store.transaction() as c:
+        w1 = pr_watch(c, "P1", "h/o/r#1", A)
+        w2 = pr_watch(c, "P2", "h/o/r#2", B)
+        w.add_labels(c, w1, A, [L1])
+        w.add_labels(c, w2, B, [L2])
+        v1, v2 = w.watch_view(c, w1), w.watch_view(c, w2)
+    assert v1 is not None and v2 is not None
+    assert (v1["owners"], v1["labels"]) == ([A], ["k=v"])
+    assert (v2["owners"], v2["labels"]) == ([B], ["x=y"])
+
+
+def test_add_source_reports_whether_it_created_the_row(store: Store) -> None:
+    with store.transaction() as c:
+        wid = pr_watch(c, "P1", "h/o/r#1", A)
+        q, _ = w.ensure_watch(c, "query", "mine+open", NOW)
+        assert w.add_source(c, "P1", q) is True
+        assert w.add_source(c, "P1", q) is False
+        assert w.add_source(c, "P1", wid) is False  # pr_watch already added it

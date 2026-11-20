@@ -1,0 +1,9 @@
+{
+  "changed": false,
+  "owner": "agent:b",
+  "prs_dropped": 0,
+  "reason": "not_held",
+  "reference": "github.com/o/r#1",
+  "watch": null,
+  "watch_ended": false
+}

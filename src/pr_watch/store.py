@@ -267,10 +267,13 @@ def format_ts(moment: datetime) -> str:
 # --- opening ---------------------------------------------------------------------------------
 
 
-def _prepare_files(state: StateDir) -> os.stat_result:
-    """Check (creating `state.db` 0600 when missing) and return the database's `lstat`. Nothing
-    here keeps a descriptor on a database file open, nor opens an existing one."""
+def _prepare_files(state: StateDir, *, create: bool = True) -> os.stat_result | None:
+    """Check (creating `state.db` 0600 when missing) and return the database's `lstat`; None when
+    it is missing and `create` is False. Nothing here keeps a descriptor on a database file open,
+    nor opens an existing one."""
     info = verify_path_at(state.fd, DB_NAME)
+    if info is None and not create:
+        return None
     for _ in range(3):  # a concurrent creator can win the O_EXCL race; check its file next
         if info is not None:
             break
@@ -430,9 +433,30 @@ def open_store(
     12 `store_too_new`), `StoreCorruptError` or `StoreBusyError` (both `internal`).
     `migrations` is a test seam; production callers use the default.
     """
+    store = _open(state, busy_timeout_ms, migrations, create=True)
+    assert store is not None
+    return store
+
+
+def open_existing_store(
+    state: StateDir,
+    *,
+    busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+    migrations: Sequence[Migration] = MIGRATIONS,
+) -> Store | None:
+    """Like `open_store`, but a missing `state.db` returns None and nothing is created (read-only
+    commands treat it as an empty store). An existing file gets every check of `open_store`."""
+    return _open(state, busy_timeout_ms, migrations, create=False)
+
+
+def _open(
+    state: StateDir, busy_timeout_ms: int, migrations: Sequence[Migration], *, create: bool
+) -> Store | None:
     if not 0 <= busy_timeout_ms <= 600_000:
         raise ValueError("busy_timeout_ms out of range")
-    checked = _prepare_files(state)
+    checked = _prepare_files(state, create=create)
+    if checked is None:
+        return None
     path = state.path_for(DB_NAME)
     _peek(path, busy_timeout_ms, len(migrations))
     conn = _connect(path, busy_timeout_ms)

@@ -15,6 +15,7 @@ from pr_watch import watches as w
 from pr_watch.cli import HANDLERS, main
 from pr_watch.state_dir import open_state_dir
 from pr_watch.store import Store, open_store
+from pr_watch.watches import MAX_LABELS_PER_WATCH
 from tests.harness import assert_valid
 
 GOLDEN = Path(__file__).parent / "golden" / "watches"
@@ -64,9 +65,9 @@ def doc(out: str, schema: str) -> dict[str, Any]:
 
 def golden(name: str, d: dict[str, Any]) -> None:
     """Compare with the golden file, with ids and timestamps normalized."""
-    text = json.dumps(d, sort_keys=True)
-    norm = json.loads(text.replace(d.get("watch", {}) and d["watch"]["id"] or "-", "w-GOLDEN"))
+    norm = json.loads(json.dumps(d, sort_keys=True))
     if isinstance(norm.get("watch"), dict):
+        norm["watch"]["id"] = "w-GOLDEN"
         norm["watch"]["created_at"] = "TS"
     path = GOLDEN / f"{name}.json"
     assert norm == json.loads(path.read_text())
@@ -149,11 +150,12 @@ def test_remove_unknown_pr_id_reports_the_id(
     assert code == 0 and d["reason"] == "pr_unknown" and d["reference"] == "Nope1"
 
 
-def test_remove_quiet_suppresses_the_warning(
+def test_remove_quiet_silences_the_result_but_not_the_pr_unknown_warning(
     store: Store, capsys: pytest.CaptureFixture[str]
 ) -> None:
     code, out, err = run(capsys, "watch", "remove", PR, "--owner", A, "--quiet")
-    assert (code, out, err) == (0, "", "")
+    assert (code, out) == (0, "")
+    assert err == f"pr-watch: warning: no stored PR matches {PR}\n"
 
 
 def test_remove_human_output(store: Store, capsys: pytest.CaptureFixture[str]) -> None:
@@ -387,3 +389,280 @@ def test_store_error_exit_codes_are_stable() -> None:
     assert store_error_to_cli(StoreTooNewError(9, 1)).exit_code == 12
     assert store_error_to_cli(StoreCorruptError("x")).exit_code == 1
     assert store_error_to_cli(StoreBusyError("x")).exit_code == 1
+
+
+# --- review round 1 -------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("argv", [["list"], ["show", PR], ["events"], ["export"]])
+def test_read_only_commands_create_nothing_on_a_missing_state_dir(
+    argv: list[str],
+    state_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[object, object]] = []
+
+    def probe(ctx: Any, args: Any) -> int:
+        seen.append((ctx.state, ctx.store))
+        return 0
+
+    monkeypatch.setitem(HANDLERS, argv[0], probe)
+    assert run(capsys, *argv)[0] == 0
+    assert seen == [(None, None)]
+    assert not state_dir.exists()
+
+
+def test_read_only_commands_create_nothing_in_an_existing_dir_without_a_store(
+    state_dir: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_dir.mkdir(mode=0o700, parents=True)
+    seen: list[object] = []
+    monkeypatch.setitem(HANDLERS, "list", lambda ctx, args: seen.append(ctx.store) or 0)
+    assert run(capsys, "list")[0] == 0
+    assert seen == [None] and list(state_dir.iterdir()) == []
+
+
+def test_read_only_commands_still_open_and_check_an_existing_store(
+    state_dir: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with open_state_dir(state_dir) as state, open_store(state):
+        pass
+    seen: list[object] = []
+    monkeypatch.setitem(HANDLERS, "list", lambda ctx, args: seen.append(ctx.store) or 0)
+    assert run(capsys, "list")[0] == 0 and seen[0] is not None
+    db = sqlite3.connect(state_dir / "state.db")
+    db.execute("PRAGMA journal_mode = DELETE")
+    db.execute("UPDATE meta SET value = '99' WHERE key = 'schema_version'")
+    db.execute("PRAGMA user_version = 99")
+    db.commit()
+    db.close()
+    code, out, _ = run(capsys, "list", "--json")
+    assert code == 12 and json.loads(out)["error"]["code"] == "store_too_new"
+
+
+def test_mutating_commands_create_the_store(
+    state_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run(capsys, "watch", "remove", PR, "--owner", A, "--quiet")[0] == 0
+    assert (state_dir / "state.db").exists()
+
+
+def expire(store: Store, pr_id: str = "P1") -> None:
+    with store.transaction() as c:
+        c.execute(
+            "UPDATE prs SET status = 'terminal', terminal_at = '2020-01-01T00:00:00.000Z' "
+            "WHERE pr_id = ?",
+            (pr_id,),
+        )
+
+
+def test_remove_acts_on_an_expired_but_unpruned_row(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed(store)
+    expire(store)
+    code, out, _ = run(capsys, "watch", "remove", PR, "--owner", A, "--json")
+    d = doc(out, "cli/watch-remove")
+    assert code == 0 and (d["changed"], d["reason"], d["watch_ended"]) == (True, None, True)
+    assert set(counts(store).values()) == {0}
+
+
+def test_label_add_acts_on_an_expired_but_unpruned_row(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed(store)
+    expire(store)
+    code, out, _ = run(capsys, "label", "add", PR, "k=v", "--owner", A, "--json")
+    d = doc(out, "cli/label-add")
+    assert code == 0 and d["changed"] and d["watch"]["labels"] == ["k=v"]
+
+
+def test_no_op_commands_do_not_wait_for_the_write_lock(
+    store: Store, state_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wid = seed(store)
+    run(capsys, "label", "add", PR, "k=v", "--owner", A)
+    other = sqlite3.connect(state_dir / "state.db", isolation_level=None)
+    other.execute("BEGIN IMMEDIATE")
+    try:
+        for argv in (
+            ["watch", "remove", PR, "--owner", B],  # not_held
+            ["watch", "remove", "github.com/o/r#9", "--owner", A],  # pr_unknown
+            ["label", "remove", PR, "k=v", "--owner", B],  # not_held
+            ["label", "remove", "github.com/o/r#9", "k=v", "--owner", A],  # no_watch
+            ["label", "remove", "--watch", wid, "x=y", "--owner", A],  # no such label
+        ):
+            code, out, _ = run(capsys, *argv, "--json")
+            assert code == 0 and json.loads(out)["changed"] is False, argv
+    finally:
+        other.execute("ROLLBACK")
+        other.close()
+
+
+def test_remove_resolves_a_mixed_case_stored_pr_by_any_case(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed(store, (A, B), pr="github.com/Own/Repo#1")
+    code, out, _ = run(
+        capsys, "label", "add", "GITHUB.com/OWN/repo#1", "k=v", "--owner", A, "--json"
+    )
+    assert code == 0 and doc(out, "cli/label-add")["watch"]["pr"] == "github.com/Own/Repo#1"
+    code, out, _ = run(
+        capsys, "watch", "remove", "https://github.com/own/REPO/pull/1", "--owner", A, "--json"
+    )
+    d = doc(out, "cli/watch-remove")
+    assert code == 0 and d["changed"] and d["reference"] == "github.com/Own/Repo#1"
+
+
+def test_remove_unknown_uppercase_url_reports_the_canonical_reference_and_warns(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = run(
+        capsys, "watch", "remove", "https://GitHub.com/O/R/pull/9", "--owner", A, "--json"
+    )
+    d = doc(out, "cli/watch-remove")
+    assert code == 0 and d["reference"] == "github.com/O/R#9"
+    assert err == "pr-watch: warning: no stored PR matches github.com/O/R#9\n"
+
+
+def test_remove_reference_can_exceed_256_characters(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    long_pr = "github.com/o/" + "a" * 300 + "#1"
+    seed(store, (A, B), pr=long_pr)
+    code, out, _ = run(capsys, "watch", "remove", "P1", "--owner", B, "--json")
+    d = doc(out, "cli/watch-remove")
+    assert code == 0 and d["reference"] == long_pr and len(long_pr) > 256
+    key = "mine+open;host=" + ",".join(f"h{i:03d}.example.com" for i in range(40))
+    assert len(key) > 256
+    seed_query(store, key)
+    host_flags = [a for i in range(40) for a in ("--host", f"h{i:03d}.example.com")]
+    code, out, _ = run(
+        capsys, "watch", "remove", "--mine", "--open", *host_flags, "--owner", A, "--json"
+    )
+    d = doc(out, "cli/watch-remove")
+    assert code == 0 and d["reference"] == key and d["changed"]
+
+
+def test_label_remove_by_one_owner_keeps_the_other_owners_label(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed(store, (A, B))
+    run(capsys, "label", "add", PR, "k=v", "--owner", A)
+    run(capsys, "label", "add", PR, "k=v", "--owner", B)
+    code, out, _ = run(capsys, "label", "remove", PR, "k=v", "--owner", A, "--json")
+    d = doc(out, "cli/label-remove")
+    assert code == 0 and d["changed"] and d["watch"]["labels"] == ["k=v"]
+
+
+@pytest.mark.parametrize("verb", ["add", "remove"])
+def test_label_commands_refuse_an_ambiguous_pr_name(
+    verb: str, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed(store, pr_id="P1")
+    seed(store, pr_id="P2")
+    before = counts(store)
+    code, out, _ = run(capsys, "label", verb, PR, "k=v", "--owner", A, "--json")
+    err = json.loads(out)["error"]
+    assert code == 2 and err["details"]["kind"] == "ambiguous_reference"
+    assert_valid("cli/error", json.loads(out))
+    assert counts(store) == before
+
+
+@pytest.mark.parametrize("verb", ["add", "remove"])
+def test_label_commands_refuse_a_malformed_watch_id(
+    verb: str, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, _ = run(capsys, "label", verb, "--watch", "nope", "k=v", "--owner", A, "--json")
+    assert code == 2 and json.loads(out)["error"]["details"]["kind"] == "bad_watch_id"
+
+
+def test_label_remove_no_op_goldens(store: Store, capsys: pytest.CaptureFixture[str]) -> None:
+    seed(store)
+    code, out, _ = run(capsys, "label", "remove", PR, "k=v", "--owner", B, "--json")
+    d = doc(out, "cli/label-remove")
+    assert code == 0
+    golden("label-remove-not_held", d)
+    code, out, _ = run(capsys, "label", "remove", "github.com/o/r#9", "k=v", "--owner", A, "--json")
+    d = doc(out, "cli/label-remove")
+    assert code == 0
+    golden("label-remove-no_watch", d)
+
+
+def test_watch_remove_not_held_golden(store: Store, capsys: pytest.CaptureFixture[str]) -> None:
+    seed(store)
+    code, out, _ = run(capsys, "watch", "remove", PR, "--owner", B, "--json")
+    assert code == 0
+    golden("watch-remove-not_held", doc(out, "cli/watch-remove"))
+
+
+def test_label_remove_human_output_is_a_sentence(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wid = seed(store)
+    run(capsys, "label", "add", PR, "k=v", "--owner", A)
+    cases = [
+        (["label", "remove", PR, "k=v", "--owner", A], f"removed the labels from {wid}"),
+        (["label", "remove", PR, "k=v", "--owner", A], f"{A} has none of the labels on {wid}"),
+        (["label", "remove", PR, "k=v", "--owner", B], f"{B} holds no reference to {wid}"),
+        (["label", "remove", "github.com/o/r#9", "k=v", "--owner", A], "no watch matches the PR"),
+    ]
+    for argv, text in cases:
+        code, out, _ = run(capsys, *argv)
+        assert code == 0 and out.strip() == text, argv
+
+
+# --- the label cap -----------------------------------------------------------------------------
+
+
+def label_args(start: int, n: int) -> list[str]:
+    return [f"k={i}" for i in range(start, start + n)]
+
+
+def test_label_cap_allows_exactly_the_limit_and_refuses_one_more(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed(store)
+    code, out, _ = run(
+        capsys, "label", "add", PR, *label_args(0, MAX_LABELS_PER_WATCH), "--owner", A, "--json"
+    )
+    assert code == 0 and len(doc(out, "cli/label-add")["watch"]["labels"]) == 64
+    before = counts(store)
+    code, out, _ = run(capsys, "label", "add", PR, "extra=1", "--owner", A, "--json")
+    err = json.loads(out)["error"]
+    assert code == 2 and err["code"] == "usage" and err["details"]["kind"] == "too_many_labels"
+    assert err["details"]["limit"] == 64 and err["details"]["count"] == 65
+    assert_valid("cli/error", json.loads(out))
+    assert counts(store) == before
+
+
+def test_label_cap_writes_nothing_when_a_batch_would_cross_it(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed(store)
+    run(capsys, "label", "add", PR, *label_args(0, 60), "--owner", A)
+    before = counts(store)
+    code, _, _ = run(capsys, "label", "add", PR, *label_args(100, 5), "--owner", A, "--json")
+    assert code == 2 and counts(store) == before
+
+
+def test_label_cap_ignores_labels_already_present_and_re_adding_at_the_cap(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed(store)
+    run(capsys, "label", "add", PR, *label_args(0, 64), "--owner", A)
+    code, out, _ = run(capsys, "label", "add", PR, "k=0", "k=63", "--owner", A, "--json")
+    d = doc(out, "cli/label-add")
+    assert code == 0 and d["changed"] is False and len(d["watch"]["labels"]) == 64
+
+
+def test_label_cap_counts_the_union_over_owners(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed(store, (A, B))
+    run(capsys, "label", "add", PR, *label_args(0, 64), "--owner", A)
+    code, _, _ = run(capsys, "label", "add", PR, "k=0", "--owner", B, "--json")
+    assert code == 0  # the union does not grow
+    code, out, _ = run(capsys, "label", "add", PR, "extra=1", "--owner", B, "--json")
+    assert code == 2 and json.loads(out)["error"]["details"]["kind"] == "too_many_labels"
