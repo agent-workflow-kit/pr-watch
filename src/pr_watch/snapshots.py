@@ -28,8 +28,8 @@
   in a worker is an `internal` counted failure of that PR only.
 - **Stopping.** `should_stop` (a signal) ends the loop at once: nothing more is committed, the
   leases are released and `interrupted` is set; PRs in flight keep their persisted triggers.
-  `out_of_time` (the `poll.max_duration` budget, #23) only stops starting: the rest is
-  `deferred` and `truncated` is set. The per-host cap is applied by `selection.py`.
+  `out_of_time` (the `poll.max_duration` budget, `pacing.time_budget`) only stops starting: the
+  rest is `deferred` and `truncated` is set. The per-host cap is applied by `selection.py`.
 
 Judgment calls where the interface is silent (kept conservative):
 
@@ -42,7 +42,7 @@ Judgment calls where the interface is silent (kept conservative):
 
 TODO(#24): over-cap fallback (a `too_large` snapshot is a counted failure here) and the
 force-push compare (`forced_for` is the seam; with none, `forced` stays unknown).
-TODO(#23): host pause, low water and `last_full_at` are written by the pacing stage.
+Host pause, low water and `last_full_at` are written by the pacing stage (`pacing.py`).
 """
 
 from __future__ import annotations
@@ -247,14 +247,13 @@ class _Pool:
         should_stop: Callable[[], bool] | None,
         out_of_time: Callable[[], bool] | None,
         forced_for: ForcedFor | None,
-        concurrency: dict[str, int],
     ) -> None:
         self.store, self.client, self.config, self.res = store, client, config, res
         self.log, self.leases, self.clock = log, leases, clock
         self.should_stop, self.out_of_time, self.forced_for = should_stop, out_of_time, forced_for
         self.out = PoolResult(needed=selection.total)
         self.hosts = {
-            host: _Host(host, concurrency.get(host, 1), deque(tasks))
+            host: _Host(host, max(1, selection.concurrency.get(host, 1)), deque(tasks))
             for host, tasks in sorted(selection.tasks.items())
             if tasks
         }
@@ -374,8 +373,8 @@ class _Pool:
             "last_failure_code FROM prs WHERE pr_id = ?",
             (task.pr_id,),
         ).fetchone()
-        if r is None or r[3] == "terminal":
-            return None
+        if r is None or (r[3] == "terminal" and not (task.forced and r[5] != "merged")):
+            return None  # a forced task (`--pr`) may reopen a terminal-closed row
         settings = self.config.repo_settings(str(r[1]))
         state = RowState(
             pr_id=task.pr_id,
@@ -574,19 +573,17 @@ def run_snapshots(
     selection: Selection,
     res: EnumerationResult,
     *,
-    concurrency: dict[str, int],
     leases: Leases,
     log: Log | None = None,
     clock: Callable[[], datetime] | None = None,
     should_stop: Callable[[], bool] | None = None,
     out_of_time: Callable[[], bool] | None = None,
     forced_for: ForcedFor | None = None,
-) -> PoolResult:  # TODO(#23): make HostPlan.concurrency the single source (drop `concurrency`)
+) -> PoolResult:
     """Run the chosen snapshots (see the module docstring). Failures and host facts are added to
     `res`; the counters and the committed events are returned."""
     return _Pool(
         store, client, config, selection, res,
         log=log, leases=leases, clock=clock or (lambda: datetime.now(UTC)),
         should_stop=should_stop, out_of_time=out_of_time, forced_for=forced_for,
-        concurrency=concurrency,
     ).run()  # fmt: skip
