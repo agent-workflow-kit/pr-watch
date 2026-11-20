@@ -276,6 +276,15 @@ def _ensure_hooks_cwd(state_fd: int, *, create: bool = True) -> None:
         os.close(fd)
 
 
+def ensure_hooks_cwd(state: StateDir) -> Path:
+    """The verified `<state dir>/hooks-cwd` for the hook runner: created (0700) when missing and
+    checked like at start. Raises `StateDirError` when it cannot be created or is unsafe."""
+    _ensure_hooks_cwd(state.fd, create=True)
+    if not _exists_at(state.fd, HOOKS_CWD):  # a read-only or denied creation left it missing
+        raise StateDirError(f"{HOOKS_CWD} is missing and cannot be created")
+    return state.path_for(HOOKS_CWD)
+
+
 def _check_cron_lock(state_fd: int) -> None:
     """When `cron.lock` exists it must be a regular file owned by the user, not group- or
     world-writable, and not a symlink (the cron commands lock it, #26). Checked with `lstat`

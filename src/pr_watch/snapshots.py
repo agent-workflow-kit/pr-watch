@@ -368,8 +368,10 @@ class _Pool:
         out_of_time: Callable[[], bool] | None,
         forced_for: ForcedFor | None,
         on_host_done: Callable[[str, PoolResult], None] | None = None,
+        on_events: Callable[[Sequence[StoredEvent]], None] | None = None,
     ) -> None:
         self.on_host_done = on_host_done
+        self.on_events = on_events
         self.done: set[str] = set()
         self.store, self.client, self.config, self.res = store, client, config, res
         self.log, self.leases, self.clock = log, leases, clock
@@ -622,6 +624,8 @@ class _Pool:
         run.events += len(result.events)
         run.unchanged += 0 if result.events else 1
         self.out.events.extend(result.events)
+        if result.events and self.on_events is not None:
+            self.on_events(result.events)  # committed: hooks may be queued (never before)
         pr_id = entry.task.pr_id
         for part in p.plan.persistent:
             self._log("part_incomplete", pr_id=pr_id, pr=pr, part=part,
@@ -724,6 +728,7 @@ def run_snapshots(
     out_of_time: Callable[[], bool] | None = None,
     forced_for: ForcedFor | None = None,
     on_host_done: Callable[[str, PoolResult], None] | None = None,
+    on_events: Callable[[Sequence[StoredEvent]], None] | None = None,
 ) -> PoolResult:
     """Run the chosen snapshots (see the module docstring). Failures and host facts are added to
     `res`; the counters and the committed events are returned."""
@@ -731,5 +736,5 @@ def run_snapshots(
         store, client, config, selection, res,
         log=log, leases=leases, clock=clock or (lambda: datetime.now(UTC)),
         should_stop=should_stop, out_of_time=out_of_time, forced_for=forced_for,
-        on_host_done=on_host_done,
+        on_host_done=on_host_done, on_events=on_events,
     ).run()  # fmt: skip
