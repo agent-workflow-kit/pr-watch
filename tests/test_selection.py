@@ -404,3 +404,11 @@ def test_still_due_rereads_the_trigger_and_never_drops_a_forced_task(store: Stor
     assert due(sel.Task(task.pr_id, task.pr, task.host, task.group, forced=True)) is True
     store.conn.execute("UPDATE prs SET status = 'terminal'")
     assert due(task) is False
+
+
+def test_still_due_c_task_that_goes_stuck_falls_through_to_e_during_a_pass(store: Store) -> None:
+    c = add(store, digest=json.dumps(PENDING), unsettled_since=ts(-timedelta(hours=1)))
+    task = choose(store, plan=passing()).tasks[HOST][0]
+    assert task.pr_id == c and task.group == "c"
+    store.conn.execute("UPDATE prs SET unsettled_since = ?", (ts(-timedelta(hours=9)),))
+    assert sel.still_due(store.conn, task, now=NOW, pending_max_age_ms=6 * HOUR) is True

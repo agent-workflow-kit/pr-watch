@@ -72,8 +72,9 @@ class Task:
     group: str
     # the pool re-checks the trigger once it holds the lease (a concurrent poll may have
     # committed in between); a forced task (`--pr`, `--full`) is never skipped
+    # TODO(#23): --pr and --full callers must build forced Tasks (forced=True)
     forced: bool = False
-    pass_started_at: datetime | None = None  # set for groups (e) and (f)
+    pass_started_at: datetime | None = None  # the pass in progress (not set on a limited host)
 
 
 @dataclass
@@ -164,7 +165,9 @@ def choose_snapshots(
                 room = min(room if room is not None else cap, cap * C_SHARE[0] // C_SHARE[1])
             rows = by_group.get(group, [])
             for _, pr_id, pr in rows if room is None else rows[: max(room, 0)]:
-                started = plan.pass_started_at if group in ("e", "f") else None
+                # every group keeps the pass start (not on a limited host), so the recheck
+                # under the lease can fall through to (e)
+                started = None if plan.limited else plan.pass_started_at
                 tasks.append(Task(pr_id, pr, host, group, pass_started_at=started))
         out.tasks[host] = tasks
         if eligible > len(tasks):
