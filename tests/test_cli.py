@@ -569,7 +569,7 @@ def test_handler_oserror_is_still_an_internal_error(
 # --- unimplemented commands --------------------------------------------------------------------
 
 OWNERS = {
-    "list": 19, "prune": 20, "poll": 25, "events": 27, "show": 27, "export": 27,
+    "prune": 20, "poll": 25, "events": 27, "show": 27, "export": 27,
     "cron install": 29, "cron uninstall": 29,
 }  # fmt: skip
 
