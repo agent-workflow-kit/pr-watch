@@ -6,5 +6,5 @@ Enumeration (poll steps 1 to 3: host list, listings, membership) is `pr_watch.en
 Snapshot selection is `pr_watch.selection`, the pool and the per-PR commit `pr_watch.snapshots`
 (#22); the unsettled columns are `pr_watch.settle`. Pacing, host pause, low water, the full
 pass and the budgets are `pr_watch.pacing` (#23).
-TODO(#24): over-cap fallback and force-push; TODO(#25): the `poll` command and report.
+TODO(#25): the `poll` command and report.
 """

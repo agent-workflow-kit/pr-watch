@@ -606,6 +606,7 @@ def diff(
     rebaseline: bool = False,
     forced: ForcedCheck | None = None,
     settle_polls: int = 1,
+    only: frozenset[str] | None = None,
 ) -> DiffResult:
     """The ordered events of one snapshot, with the drops in `.dropped`.
 
@@ -614,7 +615,8 @@ def diff(
     and returns `forced` for the event (see `forced_from_compare`); an exception it raises is the
     caller's to handle. `settle_polls` is the repo's `ci.settle_polls` (0 means no hold). The
     digest to store is `result.digest`: `new` with the CI hold applied (a copy; inputs are never
-    modified).
+    modified). `only` limits the rules to those event types (the over-cap fallback runs `merged`
+    and `closed` alone; the CI hold is then not planned and `digest["ci"]` is `new`'s).
     """
     snap = _map(snapshot)
     repo, pr, pr_id = snap.get("repo"), snap.get("pr"), snap.get("pr_id")
@@ -644,12 +646,17 @@ def diff(
         settle_polls if isinstance(settle_polls, int) and not isinstance(settle_polls, bool) else 1
     )
     quiet = first or rebaseline or _map(before.get("baselined")).get("ci") is not True
-    plan = plan_ci(before, new, snap, quiet=quiet, settle_polls=max(0, settle))
+    if only is None:
+        plan = plan_ci(before, new, snap, quiet=quiet, settle_polls=max(0, settle))
+    else:
+        plan = CiPlan(_map(new.get("ci")), False)
     result.digest["ci"] = copy.deepcopy(dict(plan.ci))
     ctx = Ctx(before, new, snap, rebaseline, forced, drops, plan)
     found: list[DiffEvent] = []
     for rule in RULES:
         if first and not rule.on_first_sight:
+            continue
+        if only is not None and rule.type not in only:
             continue
         for extra in rule.fire(ctx):
             if not identity_ok:

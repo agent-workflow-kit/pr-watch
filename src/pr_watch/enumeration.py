@@ -47,7 +47,7 @@ Judgment calls where the interface is silent (kept conservative):
   overlap, as the watermark, so the scope exists from then on.
 
 Snapshot selection and the pool are `selection.py` and `snapshots.py` (#22).
-TODO(#23): pause and low water from `HostFacts`; TODO(#24): over-cap fallback;
+TODO(#23): pause and low water from `HostFacts`;
 TODO(#25): the report, `meta`, housekeeping.
 """
 
