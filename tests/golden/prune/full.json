@@ -1,0 +1,8 @@
+{
+  "dry_run": false,
+  "events_deleted": 1,
+  "leases_deleted": 1,
+  "members_dropped": 1,
+  "prs_deleted": 1,
+  "watches_ended": 1
+}

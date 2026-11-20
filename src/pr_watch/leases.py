@@ -233,15 +233,20 @@ class Leases:
             )
             return cur.rowcount == 1
 
+    def stale_pr_ids(self, conn: sqlite3.Connection) -> list[str]:
+        """The PRs whose lease is expired or held by a dead holder, read through `conn` (a
+        transaction of the caller, or a read-only snapshot for `prune --dry-run`)."""
+        now = self.clock()
+        rows = conn.execute(
+            "SELECT pr_id, holder_pid, holder_start, boot_id, expires_at FROM leases"
+        ).fetchall()
+        return [str(r[0]) for r in rows if self._takeable(tuple(r[1:]), now)]
+
     def sweep(self) -> int:
         """Delete every lease that is expired or whose holder is dead (for `prune`); returns the
         number deleted."""
-        now = self.clock()
         with self.store.transaction() as conn:
-            rows = conn.execute(
-                "SELECT pr_id, holder_pid, holder_start, boot_id, expires_at FROM leases"
-            ).fetchall()
-            stale = [r[0] for r in rows if self._takeable(tuple(r[1:]), now)]
+            stale = self.stale_pr_ids(conn)
             for pr_id in stale:
                 conn.execute("DELETE FROM leases WHERE pr_id = ?", (pr_id,))
             return len(stale)

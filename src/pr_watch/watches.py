@@ -315,16 +315,54 @@ def event_context(conn: sqlite3.Connection, pr_id: str) -> tuple[list[str], list
     return labels, ids
 
 
-def drop_expired_pr(conn: sqlite3.Connection, pr_id: str, cutoff: str) -> bool:
+@dataclass(frozen=True)
+class ExpiredDrop:
+    """What `drop_expired_row` removed besides the PR row."""
+
+    watches_ended: int  # the per-PR watch (0 or 1; owners and labels cascade)
+    members_dropped: int  # query watches that lost the PR as a member
+
+
+def expired_pr_ids(conn: sqlite3.Connection, cutoff: str) -> list[str]:
+    """The `pr_id` of every row satisfying the expiry predicate now, in a stable order."""
+    rows = conn.execute(
+        f"SELECT pr_id FROM prs WHERE {EXPIRED_PREDICATE} ORDER BY pr_id",  # noqa: S608  (constant)
+        (cutoff,),
+    )
+    return [str(row[0]) for row in rows]
+
+
+def expiry_effects(conn: sqlite3.Connection, pr_id: str) -> ExpiredDrop:
+    """What deleting the row would end: its per-PR watch and its query-watch memberships."""
+    ended = conn.execute(
+        "SELECT count(*) FROM watches WHERE kind = ? AND key = ?", (PR_KIND, pr_id)
+    ).fetchone()
+    members = conn.execute(
+        "SELECT count(*) FROM sources JOIN watches ON watches.id = sources.watch_id "
+        "WHERE sources.pr_id = ? AND watches.kind = ?",
+        (pr_id, QUERY_KIND),
+    ).fetchone()
+    return ExpiredDrop(watches_ended=int(ended[0]), members_dropped=int(members[0]))
+
+
+def drop_expired_row(conn: sqlite3.Connection, pr_id: str, cutoff: str) -> ExpiredDrop | None:
     """Delete the PR's row when it satisfies the expiry predicate, and end its per-PR watch (owners
-    and labels go with it, as in `prune`; a query watch just loses the member). True when deleted.
-    The predicate is evaluated here, inside the caller's transaction."""
+    and labels go with it; a query watch just loses the member). None when the row does not
+    satisfy the predicate now. The predicate is evaluated here, inside the caller's transaction:
+    the one implementation `prune` and `watch add` share. It leaves `leases` and `scopes` rows
+    (no foreign key); `prune` clears those."""
     hit = conn.execute(
         f"SELECT 1 FROM prs WHERE pr_id = ? AND {EXPIRED_PREDICATE}",  # noqa: S608  (constant)
         (pr_id, cutoff),
     ).fetchone()
     if hit is None:
-        return False
+        return None
+    effects = expiry_effects(conn, pr_id)
     conn.execute("DELETE FROM watches WHERE kind = ? AND key = ?", (PR_KIND, pr_id))
     conn.execute("DELETE FROM prs WHERE pr_id = ?", (pr_id,))
-    return True
+    return effects
+
+
+def drop_expired_pr(conn: sqlite3.Connection, pr_id: str, cutoff: str) -> bool:
+    """`drop_expired_row` for `watch add`: True when the row was deleted."""
+    return drop_expired_row(conn, pr_id, cutoff) is not None
