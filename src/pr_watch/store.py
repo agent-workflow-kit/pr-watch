@@ -446,9 +446,11 @@ def open_existing_store(
 ) -> Store | None:
     """The read-only open of `list`, `show`, `events` and `export`. A missing `state.db`, and a
     file with no tables and `user_version` 0 (empty or 0-byte), return None: an empty store, and
-    nothing is created or written. An existing file gets every check of `open_store`, but is
+    pr-watch creates no file. An existing file gets every check of `open_store`, but is
     opened `mode=ro` with `PRAGMA query_only=ON`: no WAL switch, no migration, no checkpoint on
-    close, no write pragma. A database behind the supported schema is not migrated here: it is
+    close, no write pragma. The database file and an existing WAL are never changed; SQLite itself
+    may create an empty `-wal` and a `-shm` for a read-only reader of a WAL database
+    (docs/interface.md, Files). A database behind the supported schema is not migrated here: it is
     refused with a `StoreError` (`internal`) telling to run a mutating command first."""
     if not 0 <= busy_timeout_ms <= 600_000:
         raise ValueError("busy_timeout_ms out of range")

@@ -1,0 +1,46 @@
+{
+  "cursor": "v1.aaaaaaaa.2",
+  "events": [
+    {
+      "detected_at": "2026-06-01T00:00:00.000000Z",
+      "forced": null,
+      "from_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "id": "ev-aaaaaaaaaaaa",
+      "labels": [
+        "team=x"
+      ],
+      "occurred_at": null,
+      "pr": "github.com/o/r#1",
+      "pr_id": "P1",
+      "repo": "github.com/o/r",
+      "seq": 1,
+      "to_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "type": "pushed",
+      "watches": []
+    },
+    {
+      "author": {
+        "id": "u1",
+        "is_bot": false,
+        "login": "ann"
+      },
+      "comment_id": "gh:ic:1",
+      "detected_at": "2026-06-01T00:00:00.000000Z",
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "id": "ev-aaaaaaaaaaaa",
+      "labels": [],
+      "occurred_at": null,
+      "pr": "github.com/o/r#1",
+      "pr_id": "P1",
+      "repo": "github.com/o/r",
+      "seq": 2,
+      "thread_id": null,
+      "type": "comment",
+      "watches": []
+    }
+  ],
+  "gap": false,
+  "last_poll_finished_at": null,
+  "more": false
+}

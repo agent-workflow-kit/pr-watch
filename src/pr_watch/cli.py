@@ -230,9 +230,9 @@ HANDLERS: dict[str, Handler] = {
     "list": lambda ctx, args: _list(ctx, args),
     "prune": lambda ctx, args: _prune(ctx, args),
     "poll": lambda ctx, args: _poll(ctx, args),
-    "events": _stub(27),  # TODO(#27): events
-    "show": _stub(27),  # TODO(#27): show
-    "export": _stub(27),  # TODO(#27): export
+    "events": lambda ctx, args: _events(ctx, args),
+    "show": lambda ctx, args: _show(ctx, args),
+    "export": lambda ctx, args: _export(ctx, args),
     "cron install": _stub(29),  # TODO(#29): cron install
     "cron uninstall": _stub(29),  # TODO(#29): cron uninstall
 }
@@ -278,6 +278,24 @@ def _list(ctx: Context, args: argparse.Namespace) -> int:
     from .listing import list_command  # lazy: it imports this module
 
     return list_command(ctx, args)
+
+
+def _events(ctx: Context, args: argparse.Namespace) -> int:
+    from .events import events_command  # lazy: it imports this module
+
+    return events_command(ctx, args)
+
+
+def _export(ctx: Context, args: argparse.Namespace) -> int:
+    from .events import export_command  # lazy: it imports this module
+
+    return export_command(ctx, args)
+
+
+def _show(ctx: Context, args: argparse.Namespace) -> int:
+    from .show import show_command  # lazy: it imports this module
+
+    return show_command(ctx, args)
 
 
 def _remove_target(conn: Any, args: argparse.Namespace) -> tuple[str | None, str, str | None]:
