@@ -44,7 +44,10 @@ Judgment calls where the interface is silent (kept conservative):
   `forgectl show` (`_fallback`): a `merged` or `closed` PR commits its one terminal event through
   `baseline.plan_overcap`; an open one is the counted `too_large` failure; a failing `show` is
   classified by `failures.decide` itself (never a second `show`); another `pr_id` is
-  `pr_id_changed`. A `show` with an unreadable `updated_at` is a `contract` failure.
+  `pr_id_changed`, and an open one is `too_large`, even with an unreadable `updated_at`; only a
+  terminal `show` needs it (the commit requires `snapshot_updated_at`), and there an unreadable
+  one is a `contract` failure. The job counts
+  two calls in `calls`.
 - **Force push.** `compare_forced_for(client)` (the default `forced_for`) gives the diff a check
   that calls `forgectl compare --no-diff` (only the status is read) when the repo's
   `detect_force_push` is true, in the worker thread, from the data read at lease time. A sha that
@@ -61,7 +64,7 @@ import sqlite3
 from collections import deque
 from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -162,6 +165,7 @@ class _Job:
     decision: table.Decision | None = None
     prepared: _Prepared | None = None
     tool: ToolError | None = None
+    calls: int = 1  # forgectl calls the job made (a fallback job made two)
 
 
 @dataclass
@@ -248,7 +252,18 @@ def _work(
 def _fallback(
     client: ForgectlClient, start: RowStart, now: datetime, too_large: table.Decision
 ) -> _Job:
-    """The over-cap fallback: one `show` for terminal-state detection only. Never raises."""
+    """The over-cap fallback: one `show` for terminal-state detection only. Never raises. The
+    job counts two calls (the `too_large` snapshot and the `show`)."""
+    return replace(_show_fallback(client, start, now, too_large), calls=2)
+
+
+def _show_fallback(
+    client: ForgectlClient, start: RowStart, now: datetime, too_large: table.Decision
+) -> _Job:
+    """The `show` half of `_fallback`. `plan_overcap` runs first (the `pr_id` check, and open ->
+    None), so another PR is `pr_id_changed` and an open one the `too_large` failure even when
+    `updated_at` is unreadable; only a terminal `show` needs `updated_at` (the commit requires
+    it), and an unreadable one there is a `contract` failure."""
     try:
         outcome = client.show(parse_pr(start.state.pr))
     except ToolError as exc:
@@ -260,12 +275,12 @@ def _fallback(
         return _Job(outcome, decision)
     shown = outcome.result
     try:
-        updated = parse_stamp(shown.get("updated_at"))
-        if updated is None:
-            return _Job(outcome, table.decision_for("contract", "pr"))
         plan = plan_overcap(start.state, shown, now=now)
         if plan is None:
             return _Job(outcome, too_large)  # still open (or unreadable): the counted failure
+        updated = parse_stamp(shown.get("updated_at"))
+        if updated is None:
+            return _Job(outcome, table.decision_for("contract", "pr"))
         fields = {
             **plan.fields,
             **settle.snapshot_columns(
@@ -290,7 +305,8 @@ def _fallback(
 
 def compare_forced_for(client: ForgectlClient) -> ForcedFor:
     """The default `forced_for`: `forced` from `forgectl compare --no-diff` (see the module
-    docstring). It runs in a worker thread and is given the row data only, never the store."""
+    docstring). It runs in a worker thread and is given the row data only, never the store. A
+    failed compare is forced null, a vanished tool included: the next call stops the poll."""
 
     def forced_for(start: RowStart) -> ForcedCheck | None:
         if not start.detect_force_push:
@@ -508,7 +524,7 @@ class _Pool:
     def _finish(self, host: _Host, entry: _Entry) -> None:
         run = self.out.host(host.name)
         job = entry.future.result()
-        run.calls += 1
+        run.calls += job.calls
         if job.tool is not None:
             self.out.tool_error = job.tool
             self.halt = True
@@ -651,8 +667,12 @@ class _Pool:
 
 
 def make_leases(store: Store, config: Config) -> Leases:
-    """The leases of one poll: a ttl of `3 x forgectl.timeout` (6 minutes by default)."""
-    return Leases(store, timedelta(milliseconds=3 * duration_ms(config.forgectl.timeout)))
+    """The leases of one poll: a ttl of `3 x forgectl.timeout` (6 minutes by default), at least
+    two calls of one worker (the over-cap fallback makes two, each up to the timeout plus the
+    10 s deadline slack) and 30 s to spare."""
+    timeout_ms = duration_ms(config.forgectl.timeout)
+    two_calls_ms = 2 * (timeout_ms + 10_000) + 30_000
+    return Leases(store, timedelta(milliseconds=max(3 * timeout_ms, two_calls_ms)))
 
 
 def run_snapshots(

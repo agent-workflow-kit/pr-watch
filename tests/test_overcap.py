@@ -128,6 +128,10 @@ def test_a_show_that_reports_open_is_the_counted_too_large_failure(
     seed(store, snap)
     over_cap(fake, pr=snap["pr"])
     run(store)
+    over_id = snap["pr_id"]
+    assert col(store, over_id, "failure_count") == 1
+    assert col(store, over_id, "last_failure_code") == "too_large"
+    assert col(store, over_id, "status") == "active" and col(store, over_id, "digest") is None
     assert events(store) == [] and col(store, pr_id, "failure_count") == 0
 
 
@@ -215,6 +219,43 @@ def test_a_merged_row_stays_final_when_the_fallback_runs(store: Store, fake: Fak
     assert col(store, pr_id, "digest") == digest and len(events(store)) == 1  # the baseline's own
 
 
+def test_a_stored_malformed_head_does_not_drop_the_terminal_event(
+    store: Store, fake: FakeForgectl
+) -> None:
+    snap = merged_pr(1, head={"sha": sha(3)})
+    fake.add(snap)
+    pr_id = baseline(store, fake, pr(1, head={"sha": sha(5)}))
+    digest = json.loads(col(store, pr_id, "digest"))
+    digest["head_sha"] = "not-a-sha"
+    store.conn.execute(
+        "UPDATE prs SET digest = ?, listed_updated_at = '2026-10-03T10:00:00.000000Z'",
+        (json.dumps(digest),),
+    )
+    store.conn.commit()
+    over_cap(fake)
+    fake.update(snap["pr"], state="merged", merged_at="2026-10-02T10:00:00Z",
+                merged_head_sha=sha(3), merge_commit_sha=sha(4),
+                updated_at="2026-10-03T10:00:00Z")  # fmt: skip
+    run(store, plan=full_pass())
+    (ev,) = events(store)
+    assert ev["type"] == "merged" and ev["head_sha"] == sha(5)  # the head the show reports
+
+
+def test_the_call_count_of_a_fallback_job_is_two(store: Store, fake: FakeForgectl) -> None:
+    snap = merged_pr(1)
+    fake.add(snap)
+    seed(store, snap)
+    over_cap(fake)
+    out, _ = run(store)
+    assert out.host(HOST).calls == 2
+
+
+def test_the_lease_ttl_covers_two_calls_of_one_worker(store: Store) -> None:
+    cfg = Config.model_validate({"forgectl": {"timeout": "5s"}})
+    ttl = sn.make_leases(store, cfg).ttl
+    assert ttl >= timedelta(seconds=2 * (5 + 10))
+
+
 # --- over the cap: the show itself fails ---
 
 
@@ -231,6 +272,47 @@ def test_a_show_with_another_pr_id_is_pr_id_changed_and_stores_nothing(
     assert col(store, "PR_old", "failure_count") == 1 and col(store, "PR_old", "digest") is None
     assert events(store) == [] and [f.code for f in res.failures] == ["pr_id_changed"]
     assert col(store, "PR_old", "status") == "active"
+
+
+def bad_stamp_show(fake: FakeForgectl, snap: dict[str, Any]) -> None:
+    """A `show` whose `updated_at` is unreadable (raw: the schema would reject it)."""
+    fake.raw("show", stdout=json.dumps({**snap, "updated_at": "not a time"}))
+
+
+def test_another_pr_id_with_an_unreadable_updated_at_is_pr_id_changed(
+    store: Store, fake: FakeForgectl
+) -> None:
+    snap = merged_pr(1)
+    fake.add(snap)
+    bad_stamp_show(fake, snap)
+    seed(store, {**snap, "pr_id": "PR_old"})
+    over_cap(fake)
+    run(store)
+    assert col(store, "PR_old", "last_failure_code") == "pr_id_changed"
+
+
+def test_an_open_show_with_an_unreadable_updated_at_is_too_large(
+    store: Store, fake: FakeForgectl
+) -> None:
+    snap = pr(1)
+    fake.add(snap)
+    bad_stamp_show(fake, snap)
+    pr_id = seed(store, snap)
+    over_cap(fake)
+    run(store)
+    assert col(store, pr_id, "last_failure_code") == "too_large"
+
+
+def test_a_terminal_show_with_an_unreadable_updated_at_is_a_contract_failure(
+    store: Store, fake: FakeForgectl
+) -> None:
+    snap = merged_pr(1)
+    fake.add(snap)
+    bad_stamp_show(fake, snap)
+    pr_id = seed(store, snap)
+    over_cap(fake)
+    run(store)
+    assert col(store, pr_id, "last_failure_code") == "contract" and events(store) == []
 
 
 def test_a_failing_show_is_a_counted_failure_of_its_own_code(

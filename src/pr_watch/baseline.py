@@ -49,7 +49,7 @@ from typing import Any, Final
 
 from .diff import DiffResult, ForcedCheck, diff
 from .digest import PARTS, build_digest, digest_from_json, digest_to_json, incomplete_parts
-from .store import PR_RE, REPO_RE, format_ts
+from .store import PR_RE, REPO_RE, SHA_RE, format_ts
 
 MAX_COUNT: Final = 2**31
 _MAX_REF: Final = 256
@@ -221,8 +221,13 @@ def plan_overcap(row: RowState, show: Mapping[str, Any], *, now: datetime) -> Sn
     incomplete counters, `baselined_at` and the settle columns' inputs are not touched. A stored
     `merged` row is final, as in `plan_snapshot`.
 
-    The event's `head_sha` is the stored digest's head (so no `pushed` can come from here), else
-    the head `show` reports. A `show` of another PR raises `PrIdMismatch`, a non-mapping
+    The digest is not "only three fields": it also carries `baselined`, which is all false on a
+    rebaseline row (deliberate: the row is baselined again silently).
+
+    The event's `head_sha` is the stored digest's head when that is a valid sha (so no `pushed`
+    can come from here), else the head `show` reports. With no valid head at all the `merged` or
+    `closed` event is dropped with `events_dropped` (`invalid_head_sha`) and the row still goes
+    terminal. A `show` of another PR raises `PrIdMismatch`, a non-mapping
     `MalformedSnapshot`.
     """
     if not isinstance(show, Mapping):
@@ -259,7 +264,9 @@ def plan_overcap(row: RowState, show: Mapping[str, Any], *, now: datetime) -> Sn
     )
     head = show.get("head")
     shown_head = head.get("sha") if isinstance(head, Mapping) else None
-    seen = {**digest, "head_sha": digest.get("head_sha") or shown_head}
+    stored_head = digest.get("head_sha")
+    use_stored = isinstance(stored_head, str) and SHA_RE.match(stored_head)
+    seen = {**digest, "head_sha": stored_head if use_stored else shown_head}
     events = diff(
         stored, seen, show, rebaseline=row.rebaseline, only=frozenset({"merged", "closed"})
     )
