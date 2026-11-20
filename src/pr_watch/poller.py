@@ -248,10 +248,16 @@ def _persist_listing_pauses(run: _Run, paused: dict[str, datetime]) -> None:
     limited = sorted(h for h, f in run.res.hosts.items() if f.rate_limited)
     if not limited:
         return
-    _plan(run, paused)
-    assert run.pacing is not None
-    for host in limited:
-        pc.finish_host(run.store, run.config, run.res, None, run.pacing, host, now=run.now())
+    try:
+        _plan(run, paused)
+        assert run.pacing is not None
+        for host in limited:
+            pc.finish_host(
+                run.store, run.config, run.res, None, run.pacing, host,
+                now=run.now(), count_pass=False,
+            )  # fmt: skip
+    except (StoreError, sqlite3.Error) as exc:  # the signal's exit code still wins
+        _stderr_line(f"{PROG}: warning: could not persist a rate-limit pause ({exc})\n")
 
 
 def _plan(run: _Run, paused: dict[str, datetime]) -> None:

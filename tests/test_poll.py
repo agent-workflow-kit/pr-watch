@@ -834,6 +834,25 @@ def test_a_signal_in_finish_hosts_exits_143_with_no_report_and_no_finished_stamp
     assert len(ends) == 1 and ends[0]["interrupted"] is True
 
 
+def test_a_store_error_persisting_the_interrupted_pause_still_exits_143_with_a_warning(
+    fake: FakeForgectl,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    add_many(fake, 1)
+    watch_query(capsys)
+    fake.rate_limited("prs", retry_after=300, host=HOST)
+    signal_in_process(monkeypatch, poller, "_enumerate", after=True)
+
+    def boom(*args: Any, **kw: Any) -> Any:
+        raise poller.StoreError("disk full")
+
+    monkeypatch.setattr(poller.pc, "finish_host", boom)
+    code, out, err = run(capsys, "--json", "poll")
+    assert code == 128 + signal.SIGTERM and out == ""
+    assert "warning: could not persist a rate-limit pause" in err and "Traceback" not in err
+
+
 def test_a_signal_in_finish_poll_exits_143_with_no_report(
     fake: FakeForgectl,
     store: Store,

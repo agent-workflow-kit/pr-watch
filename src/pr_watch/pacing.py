@@ -40,7 +40,8 @@ Judgment calls where the interface is silent (kept conservative):
 - Host without a known backend (no `whoami` this cycle and none stored): `github.com` is GitHub,
   any other host gets the GitLab defaults (fewer workers). A snapshot carries its backend, so a
   host that only has per-PR watches (never asked by `whoami`) learns it from its first committed
-  snapshot and persists it; that cycle's plan and later reports use it.
+  snapshot and persists it in `hosts.backend`; it is used from the next cycle's plan (this
+  cycle's report and `requests_estimate` use it).
 - `--pr` ignores low water (one explicit PR); a host pause still blocks it. A restricted poll
   never runs (e) or (f) work and never counts or ends a pass; it still persists a pause and a
   low-water reading, which are observations.
@@ -332,6 +333,7 @@ def _write_host(
     pool: PoolResult | None,
     pacing: Pacing,
     now: datetime,
+    count_pass: bool = True,
 ) -> HostOutcome:
     plan = pacing.hosts[host]
     facts = res.hosts.get(host)
@@ -369,7 +371,7 @@ def _write_host(
         )
         started = None if started is None else min(started, now)
         full_pass = ended = False
-        if not pacing.mode.restricted:
+        if not pacing.mode.restricted and count_pass:
             count += 1 if plan.counted else 0
             if started is None and (pacing.mode.full or count >= plan.full_every):
                 started, count = pacing.now, 0
@@ -408,12 +410,15 @@ def finish_host(
     host: str,
     *,
     now: datetime,
+    count_pass: bool = True,
 ) -> HostOutcome:
     """Persist one host's pause, backoff step, low water, pass counter and pass state (State,
     transaction 4) as soon as its cycle ends, so a poll killed later, or one overlapping, never
     loses a pause. Written once per poll: a second call returns the first outcome. A host paused
     at cycle start is left as it was and reported with its stored pause. A host that has no
-    planning entry (seen only in `res` or `pool`) gets one of its own."""
+    planning entry (seen only in `res` or `pool`) gets one of its own. `count_pass=False` (an
+    interrupted poll) writes the pause and low water but leaves the pass counter and pass state
+    alone."""
     done = pacing.outcomes.get(host)
     if done is not None:
         return done
@@ -434,7 +439,7 @@ def finish_host(
             pacing.hosts[host] = HostPlanning(
                 host, backend, settings.full_every, False, False, None
             )
-        out = _write_host(store, config, host, res, pool, pacing, now)
+        out = _write_host(store, config, host, res, pool, pacing, now, count_pass)
     pacing.outcomes[host] = out
     return out
 

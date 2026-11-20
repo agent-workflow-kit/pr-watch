@@ -886,6 +886,17 @@ def test_a_rate_limit_is_persisted_when_the_host_is_finished(store: Store) -> No
     assert row(store)["paused_until"] == format_ts(NOW + timedelta(seconds=120))
 
 
+def test_finish_host_without_pass_count_pauses_but_leaves_the_counter(store: Store) -> None:
+    add_pr(store, 1)
+    res = empty()
+    facts(res, listings=2, rate_limited=True, retry_after=120.0)
+    pacing, _ = run(store, res)
+    pc.finish_host(store, Config(), res, None, pacing, HOST, now=NOW, count_pass=False)
+    r = row(store)
+    assert r["paused_until"] == format_ts(NOW + timedelta(seconds=120))
+    assert r["poll_count_since_full"] == 0 and r["full_pass_started_at"] is None
+
+
 def test_pause_hosts_pauses_each_host_clamped_and_keeps_a_later_pause(store: Store) -> None:
     store.conn.execute(
         "INSERT INTO hosts (host, paused_until) VALUES (?, ?)",
