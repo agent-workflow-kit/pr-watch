@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -155,6 +156,24 @@ def test_human_output_and_quiet(capsys: pytest.CaptureFixture[str], store: Store
     assert code == 0 and "1 event" in out
     code, out, _ = run(capsys, "--quiet")
     assert code == 0 and out == ""
+
+
+def test_human_output_pluralises_every_noun(
+    capsys: pytest.CaptureFixture[str], store: Store
+) -> None:
+    add_event(store, OLD)
+    add_event(store, OLD)
+    add_pr(store, "P1", members=("q1", "q2"))
+    add_pr(store, "P2")
+    code, out, _ = run(capsys)
+    assert code == 0
+    assert out.strip() == (
+        "deleted: 2 events, 2 PRs (2 watches ended, 2 members dropped), 0 leases"
+    )
+    add_event(store, OLD)
+    add_pr(store, "P3", per_pr_watch=True)
+    code, out, _ = run(capsys)
+    assert out.strip() == "deleted: 1 event, 1 PR (1 watch ended, 0 members dropped), 0 leases"
 
 
 def test_dry_run_human_says_would(capsys: pytest.CaptureFixture[str], store: Store) -> None:
@@ -427,6 +446,64 @@ def populate(store: Store) -> None:
         c.execute("INSERT INTO scopes (repo, watermark) VALUES ('h/gone', ?)", (OLD,))
 
 
+def _shape_terminal_mixed(store: Store) -> None:
+    add_pr(store, "P1", members=("q1", "q2"), repo="h/gone")
+    add_pr(store, "P2", per_pr_watch=False, members=("q1",))
+    add_pr(store, "P3", status="active")
+    add_pr(store, "P4", terminal_at=RECENT)
+
+
+def _shape_null_terminal_and_unreachable(store: Store) -> None:
+    add_pr(store, "P1", status="unreachable", terminal_at=None)
+    add_pr(store, "P2", status="active", terminal_at=OLD)  # active with a stale terminal_at
+    add_pr(store, "P3", terminal_at=None)
+    add_pr(store, "P4", terminal_at=OLD)
+
+
+def _shape_leases(store: Store) -> None:
+    add_pr(store, "P1", status="active")
+    add_pr(store, "P2")  # expires this run: its lease is doomed with it
+    add_lease(store, "P1")  # live
+    add_lease(store, "P2")
+    add_lease(store, "GHOST")  # no row
+    add_lease(store, "P1b", boot="another-boot")  # dead boot, no row
+    add_lease(store, "P3", expires="2030-01-01T00:00:00.000000Z")  # far future
+    with store.transaction() as c:
+        c.execute(
+            "INSERT INTO prs (pr_id, pr, repo, host, status, digest) "
+            "VALUES ('P3', 'h/o/r#3', 'h/o/r', 'h', 'active', '{}')"
+        )
+
+
+def _shape_scopes_and_events(store: Store) -> None:
+    add_pr(store, "P1", repo="h/a")
+    add_pr(store, "P2", status="active", repo="h/b")
+    with store.transaction() as c:
+        for repo in ("h/a", "h/b", "h/c"):
+            c.execute("INSERT INTO scopes (repo, watermark) VALUES (?, ?)", (repo, OLD))
+    add_event(store, OLD, "P1")
+    add_event(store, EV_CUTOFF, "P2")  # exactly at the cutoff: kept
+    add_event(store, RECENT, "P2")
+
+
+SHAPES = {
+    "terminal_mixed": _shape_terminal_mixed,
+    "null_terminal_and_unreachable": _shape_null_terminal_and_unreachable,
+    "leases": _shape_leases,
+    "scopes_and_events": _shape_scopes_and_events,
+}
+
+
+@pytest.mark.parametrize("shape", sorted(SHAPES))
+def test_dry_run_equals_a_real_run_for_every_state_shape(
+    capsys: pytest.CaptureFixture[str], store: Store, shape: str
+) -> None:
+    SHAPES[shape](store)
+    dry = jrun(capsys, "--dry-run")
+    assert dry["dry_run"] is True
+    assert jrun(capsys) == {**dry, "dry_run": False}
+
+
 def test_dry_run_reports_what_a_real_run_deletes(
     capsys: pytest.CaptureFixture[str], store: Store
 ) -> None:
@@ -524,6 +601,27 @@ def test_a_real_run_stamps_last_prune_at_and_checkpoints(store: Store, state_dir
     assert meta(store, "last_prune_at") == format_ts(NOW)
     wal = state_dir / "state.db-wal"
     assert not wal.exists() or wal.stat().st_size == 0
+
+
+def test_a_reader_snapshot_does_not_make_the_checkpoint_block_writers(
+    store: Store, state_dir: Path
+) -> None:
+    add_event(store, OLD)
+    add_event(store, RECENT)
+    reader = sqlite3.connect(state_dir / "state.db", isolation_level=None)
+    try:
+        reader.execute("BEGIN")
+        reader.execute("SELECT count(*) FROM events").fetchone()  # holds a WAL snapshot
+        started = time.monotonic()
+        result = prune_mod.prune(store, NOW, "30d", "7d")
+        elapsed = time.monotonic() - started
+        assert result.events_deleted == 1
+        assert elapsed < 1.0  # the 5 s busy_timeout is not waited out
+        assert int(store.conn.execute("PRAGMA busy_timeout").fetchone()[0]) == 5000  # restored
+        with store.transaction() as c:  # a writer is not held up either
+            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('probe', '1')")
+    finally:
+        reader.close()
 
 
 def test_a_second_run_deletes_nothing(capsys: pytest.CaptureFixture[str], store: Store) -> None:

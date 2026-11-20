@@ -242,15 +242,6 @@ class Leases:
         ).fetchall()
         return [str(r[0]) for r in rows if self._takeable(tuple(r[1:]), now)]
 
-    def sweep(self) -> int:
-        """Delete every lease that is expired or whose holder is dead (for `prune`); returns the
-        number deleted."""
-        with self.store.transaction() as conn:
-            stale = self.stale_pr_ids(conn)
-            for pr_id in stale:
-                conn.execute("DELETE FROM leases WHERE pr_id = ?", (pr_id,))
-            return len(stale)
-
     @staticmethod
     def _key(lease: Lease) -> tuple[int, str, str]:
         return (lease.holder.pid, lease.holder.start, lease.holder.boot_id)

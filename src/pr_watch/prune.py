@@ -154,6 +154,21 @@ def _delete_event_batch(store: Store, cutoff: str) -> int:
         return len(seqs)
 
 
+def _checkpoint(store: Store) -> None:
+    """`wal_checkpoint(TRUNCATE)` without waiting: a reader holding a snapshot would otherwise
+    make it block writers for up to `busy_timeout`. A busy or failed checkpoint is not an error:
+    the next prune or poll retries."""
+    conn = store.conn
+    previous = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+    conn.execute("PRAGMA busy_timeout = 0")
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+    except sqlite3.Error:
+        pass
+    finally:
+        conn.execute(f"PRAGMA busy_timeout = {previous}")
+
+
 def prune(store: Store, now: datetime, retention: str, after_terminal: str) -> PruneResult:
     """Apply retention, expiry and lease cleanup. Also the housekeeping `poll` runs once a day."""
     events_cutoff, expiry_cutoff = _cutoffs(now, retention, after_terminal)
@@ -169,10 +184,7 @@ def prune(store: Store, now: datetime, retention: str, after_terminal: str) -> P
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_prune_at', ?)",
             (format_ts(now),),
         )
-    try:
-        store.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
-    except sqlite3.Error:
-        pass  # a checkpoint blocked by a reader is not a failure: the next prune or poll retries
+    _checkpoint(store)
     return PruneResult(
         events_deleted=deleted,
         prs_deleted=cleaned.prs_deleted,
@@ -226,8 +238,8 @@ def plan(store: Store | None, now: datetime, retention: str, after_terminal: str
 # --- the command -----------------------------------------------------------------------------
 
 
-def _plural(n: int, noun: str) -> str:
-    return f"{n} {noun}" + ("" if n == 1 else "s")
+def _plural(n: int, noun: str, plural: str | None = None) -> str:
+    return f"{n} {noun if n == 1 else plural or noun + 's'}"
 
 
 def render(result: PruneResult) -> str:
@@ -235,7 +247,7 @@ def render(result: PruneResult) -> str:
     return (
         f"{verb}: {_plural(result.events_deleted, 'event')}, "
         f"{_plural(result.prs_deleted, 'PR')} "
-        f"({_plural(result.watches_ended, 'watch')} ended, "
+        f"({_plural(result.watches_ended, 'watch', 'watches')} ended, "
         f"{_plural(result.members_dropped, 'member')} dropped), "
         f"{_plural(result.leases_deleted, 'lease')}"
     )
