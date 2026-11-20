@@ -536,7 +536,14 @@ def test_list_on_a_read_only_store_works_or_fails_cleanly_and_creates_nothing(
     state_dir.chmod(dir_mode)
     try:
         code, out, err = run(capsys, "list", "--json")
-        if code == 0:
+        if dir_mode == 0o500:
+            # a clean WAL database with no -wal/-shm in a read-only directory is refused
+            assert code == 1
+            error = json.loads(out)["error"]
+            assert error["code"] == "internal"
+            assert "SQLITE_READONLY_DIRECTORY" in error["message"]
+            assert set(os.listdir(state_dir)) == set(names)  # nothing created
+        elif code == 0:
             assert len(json.loads(out)["watches"]) == 2
         else:
             assert json.loads(out)["error"]["code"] in {"internal", "state_unsafe"}
