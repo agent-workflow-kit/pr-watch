@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from pr_watch import forgectl_client as fc
+from pr_watch import prune as prune_mod
 from pr_watch import watch_add as wa
 from pr_watch import watches as w
 from pr_watch.cli import main
@@ -290,6 +291,37 @@ def test_expired_row_of_a_pr_that_is_open_again_is_baselined_as_a_new_active_row
     doc = ok(capsys, PR)
     assert (doc["baselined"], doc["events_emitted"], doc["pr"]["status"]) == (True, 0, "active")
     assert doc["pr"]["terminal_at"] is None
+
+
+def test_a_re_added_expired_row_survives_the_next_prune(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake.update(PR, state="merged", merged_at="2026-01-01T00:00:00Z", merge_commit_sha=sha(3))
+    seed_row(store, pr_id_of(fake), status="terminal", terminal_at=LONG_AGO, owners=("old:owner",))
+    watch_id = str(ok(capsys, PR)["watch"]["id"])  # refreshes the expired row: terminal_at is now
+    result = prune_mod.prune(store, datetime.now(UTC), "30d", "7d")
+    assert result.prs_deleted == 0 and result.watches_ended == 0
+    assert counts(store)["prs"] == 1
+    assert w.watch_exists(store.conn, watch_id)
+
+
+def test_prune_with_a_stale_expired_list_keeps_a_row_refreshed_since(
+    fake: FakeForgectl,
+    store: Store,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The id list is read before the drop; a `watch add` that refreshed the row in between (it
+    cannot run inside prune's own write transaction, so it is simulated by a stale list) is not
+    deleted: the predicate is re-evaluated per row at the drop."""
+    fake.update(PR, state="merged", merged_at="2026-01-01T00:00:00Z", merge_commit_sha=sha(3))
+    pr_id = pr_id_of(fake)
+    seed_row(store, pr_id, status="terminal", terminal_at=LONG_AGO)
+    ok(capsys, PR)  # refreshed
+    monkeypatch.setattr(w, "expired_pr_ids", lambda _conn, _cutoff: [pr_id])  # stale listing
+    result = prune_mod.prune(store, datetime.now(UTC), "30d", "7d")
+    assert result.prs_deleted == 0
+    assert counts(store)["prs"] == 1
 
 
 # --- failures record nothing -----

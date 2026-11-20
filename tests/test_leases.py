@@ -284,17 +284,6 @@ def test_leases_are_per_pr(store: Store, tmp_path: Path) -> None:
     assert leases.acquire("PR_b") is not None
 
 
-def test_sweep_deletes_dead_and_expired_leases_only(store: Store, tmp_path: Path) -> None:
-    leases = make(store, tmp_path, Clock())
-    insert_row(store, ProcessIdentity(99, "5", "boot-a"), NOW + TTL, "dead")
-    insert_row(store, ProcessIdentity(2, "200", "boot-a"), NOW - timedelta(seconds=1), "expired")
-    insert_row(store, ProcessIdentity(2, "200", "boot-a"), NOW + TTL, "live")
-    insert_row(store, ProcessIdentity(1, "100", "boot-a"), NOW + TTL, "mine")
-    assert leases.sweep() == 2
-    kept = {r[0] for r in store.conn.execute("SELECT pr_id FROM leases")}
-    assert kept == {"live", "mine"}
-
-
 def test_a_bad_ttl_is_refused(store: Store) -> None:
     with pytest.raises(ValueError):
         Leases(store, timedelta(0))

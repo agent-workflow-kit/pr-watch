@@ -222,7 +222,7 @@ HANDLERS: dict[str, Handler] = {
     "label add": lambda ctx, args: _label_add(ctx, args),
     "label remove": lambda ctx, args: _label_remove(ctx, args),
     "list": lambda ctx, args: _list(ctx, args),
-    "prune": _stub(20),  # TODO(#20): prune
+    "prune": lambda ctx, args: _prune(ctx, args),
     "poll": _stub(25),  # TODO(#25): poll (and the signal contract, exit 128+N)
     "events": _stub(27),  # TODO(#27): events
     "show": _stub(27),  # TODO(#27): show
@@ -254,6 +254,12 @@ def _watch_add(ctx: Context, args: argparse.Namespace) -> int:
     from .watch_add import watch_add  # lazy: it imports this module (failures needs CliError)
 
     return watch_add(ctx, args)
+
+
+def _prune(ctx: Context, args: argparse.Namespace) -> int:
+    from .prune import prune_command  # lazy: it imports this module
+
+    return prune_command(ctx, args)
 
 
 def _list(ctx: Context, args: argparse.Namespace) -> int:
@@ -795,7 +801,8 @@ def _execute(argv: Sequence[str]) -> int:
             )
         except RefError as exc:
             raise ref_error_to_cli(exc, leaf.format_usage()) from None
-    read_only = args.command in READ_ONLY_COMMANDS
+    # `prune --dry-run` is the one read-only form of a mutating command: it opens `mode=ro`.
+    read_only = args.command in READ_ONLY_COMMANDS or (args.command == "prune" and args.dry_run)
     try:
         # Read-only commands create nothing: a missing state directory or state.db is an empty
         # store (`ctx.state` / `ctx.store` None); an existing one is checked as usual.
@@ -814,7 +821,7 @@ def _execute(argv: Sequence[str]) -> int:
         log = Log(
             state, on_error=None if args.quiet else lambda line: _stderr_line(f"{PROG}: {line}\n")
         )
-        if args.command not in READ_ONLY_COMMANDS:
+        if not read_only:
             log.config_warnings(loaded.warnings)
         ctx = Context(
             json=args.json,
