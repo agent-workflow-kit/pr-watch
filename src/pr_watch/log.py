@@ -54,7 +54,7 @@ _BOOLS: Final = frozenset({"full", "already_running", "interrupted", "truncated"
 # integer fields -> minimum (None: any integer); `exit_code` may also be null.
 _INTS: Final[dict[str, int | None]] = {
     "duration_ms": 0, "snapshots": 0, "events": 0, "errors": 0, "requests_estimate": 0,
-    "failures": 0, "skipped": 1, "exit_code": None,
+    "failures": 0, "skipped": 1, "exit_code": None, "count": 1, "kept": 0, "total": 0,
 }  # fmt: skip
 _NULLABLE: Final = frozenset({"paused_until", "event_id", "exit_code"})
 # pattern fields: the schema pattern (tests/test_log.py pins them), matched whole. A length bound
@@ -80,6 +80,7 @@ ENUMS: Final[dict[str, tuple[str, ...]]] = {
     "from": ("active", "terminal", "unreachable"),
     "to": ("active", "terminal", "unreachable"),
 }
+MAX_REASONS: Final = 32  # `reasons` of `events_dropped`: a non-empty set of `reason` codes
 LEVELS: Final = ("debug", "info", "warn", "error")
 _FRAMING: Final = frozenset({"ts", "level", "event"})
 _ROTATE_LOCK: Final = threading.Lock()  # flock is per descriptor: it does not order threads
@@ -101,6 +102,8 @@ EVENT_FIELDS: Final[dict[str, tuple[set[str], set[str]]]] = {
     "host_failed": ({"host", "code"}, _MSG),
     "part_incomplete": ({"pr_id", "pr", "part", "snapshots"}, _MSG),
     "commit_skipped": ({"pr_id", "reason"}, _MSG),
+    "events_dropped": ({"pr_id", "pr", "count", "reasons"}, _MSG),
+    "labels_capped": ({"pr_id", "pr", "kept", "total"}, _MSG),
     "host_summary": (
         {"host", "snapshots", "requests_estimate", "errors", "paused_until"}, _MSG),
     "snapshot_failed": ({"pr", "pr_id", "code", "failures"}, _MSG),
@@ -120,6 +123,12 @@ def _clean(key: str, value: Any) -> Any:
         if key in _NULLABLE:
             return None
         raise ValueError(f"log field {key!r} cannot be null")
+    if key == "reasons":
+        ok = isinstance(value, list) and 1 <= len(value) <= MAX_REASONS
+        ok = ok and all(isinstance(v, str) and _COMPILED["reason"].fullmatch(v) for v in value)
+        if not ok or len(set(value)) != len(value):
+            raise ValueError("log field 'reasons' must be 1 to 32 distinct reason codes")
+        return list(value)
     if key in _BOOLS:
         if isinstance(value, bool):
             return value

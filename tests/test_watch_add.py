@@ -138,6 +138,25 @@ def test_new_open_pr_is_baselined_with_one_snapshot(
     assert counts(store)["events"] == 0
 
 
+def test_baseline_on_an_unsettled_pr_sets_unsettled_since_and_snap_updated_at(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    snap = new_pr(number=7, ci={"state": "pending"}, updated_at="2026-10-02T10:30:00Z")
+    fake.add(snap)
+    ok(capsys, PR)
+    r = row(store)
+    assert r["unsettled_since"] is not None  # the TODO(#22) of #18: set on the baseline
+    assert r["snap_updated_at"] == "2026-10-02T10:30:00.000000Z"
+
+
+def test_baseline_on_a_settled_pr_leaves_unsettled_since_null(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake.add(new_pr(number=7, ci={"state": "passing"}))
+    ok(capsys, PR)
+    assert row(store)["unsettled_since"] is None
+
+
 @pytest.mark.parametrize("state", ["merged", "closed"])
 def test_new_terminal_pr_stores_its_one_event_after_the_cursor(
     fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str], state: str

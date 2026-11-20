@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from . import watches
+from . import settle, watches
 from .baseline import RowState, plan_snapshot
 from .cli import CliError, Context, UsageError, _store
 from .commit import commit_in_transaction
@@ -208,7 +208,8 @@ def _write_pr(
         cursor = _cursor(store)
         row = conn.execute(
             "SELECT pr, repo, digest, status, terminal_at, terminal_kind, rebaseline, "
-            "incomplete, baselined_at, rev FROM prs WHERE pr_id = ?",
+            "incomplete, baselined_at, rev, listed_updated_at, unsettled_since FROM prs "
+            "WHERE pr_id = ?",
             (pr_id,),
         ).fetchone()
         replaced = False
@@ -227,7 +228,8 @@ def _write_pr(
             )
             row = conn.execute(
                 "SELECT pr, repo, digest, status, terminal_at, terminal_kind, rebaseline, "
-                "incomplete, baselined_at, rev FROM prs WHERE pr_id = ?",
+                "incomplete, baselined_at, rev, listed_updated_at, unsettled_since FROM prs "
+                "WHERE pr_id = ?",
                 (pr_id,),
             ).fetchone()
             created_row = True
@@ -260,7 +262,17 @@ def _write_pr(
                 settle_polls=cfg.repo_settings(state.repo).settle_polls,
                 persistent_after=cfg.repo_settings(state.repo).unreachable_after,
             )
-            # TODO(#22): set unsettled_since for a baseline that is unsettled.
+            fields = {
+                **plan.fields,
+                **settle.snapshot_columns(
+                    stored=None,
+                    new=plan.digest,
+                    snapshot=snap,
+                    unsettled_since=row[11],
+                    listed_updated_at=row[10],
+                    now=now,
+                ),
+            }
 
             def prepare(c: sqlite3.Connection) -> list[NewEvent]:
                 labels_now, ids = watches.event_context(c, pr_id)
@@ -272,7 +284,7 @@ def _write_pr(
                 pr_id=pr_id,
                 expected_rev=int(row[9]),
                 snapshot_pr_id=str(snap["pr_id"]),
-                fields=plan.fields,
+                fields=fields,
                 prepare=prepare,
                 snapshot_updated_at=str(snap["updated_at"]),
             )

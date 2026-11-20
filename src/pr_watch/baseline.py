@@ -35,8 +35,8 @@ here:
   columns cleared; an unreadable state keeps the row's, except that an `unreachable` row becomes
   `active`. A success clears `failure_count`.
 
-Left to other issues: `snap_updated_at` and `unsettled_since` (#22), and the `watch add` baseline
-and `--no-baseline` (#18, which calls this with a row that has no digest).
+`snap_updated_at` and `unsettled_since` are `settle.snapshot_columns` (#22). The `watch add`
+baseline and `--no-baseline` are #18, which calls this with a row that has no digest.
 """
 
 from __future__ import annotations

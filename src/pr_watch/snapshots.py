@@ -1,0 +1,592 @@
+"""Poll cycle steps 5 and 6: the snapshot pool and the per-PR commit pipeline
+(docs/interface.md: Poll cycle, Locks and commit, Pacing and backoff, Failures, Signals).
+
+`run_snapshots` takes the `Selection` of `selection.py` and runs it:
+
+- **Threads.** Worker threads only call forgectl and build the plan (`plan_snapshot` is pure); the
+  store, the leases and the log are used from the calling thread alone (one SQLite connection).
+  Each host has its own bounded pool (`HostPlan.concurrency` workers in flight, so memory is
+  bounded by a small multiple of it); hosts run in parallel.
+- **Lease per PR**, taken when the snapshot starts and released at its commit or failure, renewed
+  when the forgectl call returned. A PR whose lease a live other poll holds is `skipped_locked`.
+  With the lease held the row is read again and the trigger checked on it (`selection.still_due`):
+  a PR another poll committed in between is not snapshotted twice; a forced task is never skipped.
+- **Commit order.** Results of one host are committed in the order the PRs were started, so the
+  event stream is deterministic for a given selection. A result waits for the ones started
+  before it (at most `2 x concurrency` are started ahead of the oldest uncommitted one).
+- **Commit** is `commit.commit_snapshot` (compare-and-set). Inside its transaction each event's
+  labels and watches are read first, then the membership rule removes the query sources that left
+  (the snapshot shows `open`, `left_count` 2), so the events of a PR that loses its last source
+  still name that source. A label union over the store's 256 is cut to the first 256 in sorted
+  order and, when the snapshot has events, logged as `labels_capped`; diff drops are logged as
+  one `events_dropped` record per snapshot.
+- **Failures** (`failures.decide`): counted failures are written in their own transaction
+  (`failure_count`, `last_failure_code`, `last_attempt_at`, `status` unreachable at the threshold)
+  and never produce an event; a rate limit or whole-host failure cancels the host's queue and
+  changes no PR, and is recognised as soon as its call returns, not when its turn to commit comes
+  (a call that is already running still finishes); a tool failure stops the cycle. An exception
+  in a worker is an `internal` counted failure of that PR only.
+- **Stopping.** `should_stop` (a signal) ends the loop at once: nothing more is committed, the
+  leases are released and `interrupted` is set; PRs in flight keep their persisted triggers.
+  `out_of_time` (the `poll.max_duration` budget, #23) only stops starting: the rest is
+  `deferred` and `truncated` is set. The per-host cap is applied by `selection.py`.
+
+Judgment calls where the interface is silent (kept conservative):
+
+- `snapshots` counts committed snapshots; a discarded commit counts only as a conflict, and a
+  call that failed counts in `calls`.
+- A snapshot whose `updated_at` is not a readable timestamp is a `contract` failure (the commit
+  needs it for the closed-snapshot check and for `snap_updated_at`).
+- A host-level failure marks the host in `EnumerationResult.failures` once per cycle; its
+  in-flight PRs still commit what they fetched.
+
+TODO(#24): over-cap fallback (a `too_large` snapshot is a counted failure here) and the
+force-push compare (`forced_for` is the seam; with none, `forced` stays unknown).
+TODO(#23): host pause, low water and `last_full_at` are written by the pacing stage.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from collections import deque
+from collections.abc import Callable, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from . import failures as table
+from . import settle
+from .baseline import MalformedSnapshot, PrIdMismatch, RowState, SnapshotPlan, plan_snapshot
+from .commit import CommitResult, DiscardReason, commit_snapshot
+from .config import Config
+from .diff import ForcedCheck
+from .digest import digest_from_json
+from .enumeration import EnumerationResult, Failure, note_rate, parse_stamp, record_failure
+from .forgectl_client import ForgectlClient, Outcome, ToolError
+from .leases import Lease, Leases
+from .log import Log
+from .refs import duration_ms, parse_pr
+from .selection import Selection, Task, still_due
+from .store import MAX_LABELS, EventError, NewEvent, Store, StoredEvent, StoreError, format_ts
+from .watches import event_context
+
+WINDOW_FACTOR = 2
+WAIT_SECONDS = 0.2
+
+ForcedFor = Callable[["RowStart"], ForcedCheck | None]
+
+
+@dataclass(frozen=True)
+class RowStart:
+    """The row as it was when the snapshot started (`rev` is what the commit compares)."""
+
+    state: RowState
+    rev: int
+    listed_updated_at: str | None
+    unsettled_since: str | None
+    failure_count: int
+    last_failure_code: str | None
+    settle_polls: int
+    unreachable_after: int
+    detect_force_push: bool
+
+
+@dataclass
+class HostRun:
+    calls: int = 0
+    snapshots: int = 0  # committed
+    unchanged: int = 0  # committed with no event
+    events: int = 0
+    skipped_locked: int = 0
+    skipped_conflict: int = 0
+    deferred: int = 0
+
+
+@dataclass
+class PoolResult:
+    hosts: dict[str, HostRun] = field(default_factory=dict)
+    events: list[StoredEvent] = field(default_factory=list)
+    unreachable: list[tuple[str, str, str]] = field(default_factory=list)  # pr, pr_id, code
+    needed: int = 0
+    interrupted: bool = False
+    truncated: bool = False
+    tool_error: ToolError | None = None
+
+    def host(self, name: str) -> HostRun:
+        return self.hosts.setdefault(name, HostRun())
+
+    @property
+    def skipped_locked(self) -> int:
+        return sum(h.skipped_locked for h in self.hosts.values())
+
+    @property
+    def deferred(self) -> int:
+        return sum(h.deferred for h in self.hosts.values())
+
+    @property
+    def already_running(self) -> bool:
+        """At least one PR needed a snapshot and every such PR was held by a live other poll."""
+        return self.needed > 0 and self.skipped_locked == self.needed
+
+
+@dataclass(frozen=True)
+class _Prepared:
+    plan: SnapshotPlan
+    fields: dict[str, Any]
+    snapshot_pr_id: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class _Job:
+    outcome: Outcome | None = None
+    decision: table.Decision | None = None
+    prepared: _Prepared | None = None
+    tool: ToolError | None = None
+
+
+@dataclass
+class _Entry:
+    task: Task
+    start: RowStart
+    lease: Lease
+    future: Future[_Job]
+    renewed: bool = False
+    classified: bool = False
+
+
+@dataclass
+class _Host:
+    name: str
+    concurrency: int
+    queue: deque[Task]
+    entries: deque[_Entry] = field(default_factory=deque)
+    cancelled: bool = False
+    noted: bool = False
+
+    def inflight(self) -> int:
+        return sum(1 for e in self.entries if not e.future.done())
+
+
+# --- the worker: forgectl and the pure plan ---
+
+
+def _local(decision: table.Decision) -> _Job:
+    return _Job(decision=decision)
+
+
+def _work(
+    client: ForgectlClient, task: Task, start: RowStart, now: datetime, forced_for: ForcedFor | None
+) -> _Job:
+    """One snapshot call and its plan. Never raises: a failure is a decision."""
+    try:
+        outcome = client.snapshot(parse_pr(start.state.pr))
+    except ToolError as exc:
+        return _Job(tool=exc)
+    except Exception:
+        return _local(table.decide_code("internal", None, "pr"))
+    decision = table.decide(outcome, "pr")
+    if not decision.effect.commit or outcome.result is None:
+        return _Job(outcome, decision)
+    snap = outcome.result
+    try:
+        updated = parse_stamp(snap.get("updated_at"))
+        if updated is None:
+            return _Job(outcome, table.decision_for("contract", "pr"))
+        forced = forced_for(start) if forced_for is not None else None
+        plan = plan_snapshot(
+            start.state,
+            snap,
+            now=now,
+            forced=forced,
+            settle_polls=start.settle_polls,
+            persistent_after=start.unreachable_after,
+        )
+        fields = {
+            **plan.fields,
+            **settle.snapshot_columns(
+                stored=_stored_digest(start),
+                new=plan.digest,
+                snapshot=snap,
+                unsettled_since=start.unsettled_since,
+                listed_updated_at=start.listed_updated_at,
+                now=now,
+            ),
+        }
+        return _Job(
+            outcome, decision, _Prepared(plan, fields, str(snap["pr_id"]), format_ts(updated))
+        )
+    except PrIdMismatch:
+        return _Job(outcome, table.decide_local("pr_id_changed", "pr"))
+    except MalformedSnapshot:
+        return _Job(outcome, table.decision_for("contract", "pr"))
+    except Exception:
+        return _Job(outcome, table.decide_code("internal", None, "pr"))
+
+
+def _stored_digest(start: RowStart) -> dict[str, Any] | None:
+    return digest_from_json(start.state.digest)
+
+
+# --- the pool ---
+
+
+class _Pool:
+    def __init__(
+        self,
+        store: Store,
+        client: ForgectlClient,
+        config: Config,
+        selection: Selection,
+        res: EnumerationResult,
+        *,
+        log: Log | None,
+        leases: Leases,
+        clock: Callable[[], datetime],
+        should_stop: Callable[[], bool] | None,
+        out_of_time: Callable[[], bool] | None,
+        forced_for: ForcedFor | None,
+        concurrency: dict[str, int],
+    ) -> None:
+        self.store, self.client, self.config, self.res = store, client, config, res
+        self.log, self.leases, self.clock = log, leases, clock
+        self.should_stop, self.out_of_time, self.forced_for = should_stop, out_of_time, forced_for
+        self.out = PoolResult(needed=selection.total)
+        self.hosts = {
+            host: _Host(host, concurrency.get(host, 1), deque(tasks))
+            for host, tasks in sorted(selection.tasks.items())
+            if tasks
+        }
+        for host in selection.tasks:
+            self.out.host(host)
+        self.halt = False
+
+    # -- loop --
+
+    def run(self) -> PoolResult:
+        workers = max(1, sum(h.concurrency for h in self.hosts.values()))
+        executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="pr-watch-snap")
+        try:
+            while not self.halt:
+                if self.should_stop is not None and self.should_stop():
+                    self.out.interrupted = True
+                    break
+                self._classify()
+                for host in self.hosts.values():
+                    self._fill(executor, host)
+                self._renew()
+                for host in self.hosts.values():
+                    self._drain(host)
+                    if self.halt:
+                        break
+                if all(not h.queue and not h.entries for h in self.hosts.values()):
+                    break
+                pending = [e.future for h in self.hosts.values() for e in h.entries]
+                pending = [f for f in pending if not f.done()]
+                if pending:
+                    wait(pending, timeout=WAIT_SECONDS, return_when=FIRST_COMPLETED)
+        finally:
+            self._release_all()
+            executor.shutdown(wait=True)
+        return self.out
+
+    def _release_all(self) -> None:
+        for host in self.hosts.values():
+            for entry in host.entries:
+                self._release(entry)
+            host.entries.clear()
+
+    def _release(self, entry: _Entry) -> None:
+        self._release_lease(entry.lease)
+
+    def _release_lease(self, lease: Lease) -> None:
+        try:
+            self.leases.release(lease)
+        except StoreError:
+            pass  # a lease that cannot be released expires; nothing else to do
+
+    def _classify(self) -> None:
+        """Stop a host at once when a finished call shows a whole-host failure (rate limit, auth):
+        results are committed in order, but the failure must not wait for its turn while the pool
+        keeps calling the host. The failure itself is recorded when the entry is finished."""
+        for host in self.hosts.values():
+            if host.cancelled:
+                continue
+            for entry in host.entries:
+                if not entry.future.done() or entry.classified:
+                    continue
+                entry.classified = True
+                decision = entry.future.result().decision
+                if decision is None or decision.effect.stop_poll:
+                    continue
+                if decision.effect.pause != "none" or decision.effect.cancel_host:
+                    host.cancelled = True
+                    host.queue.clear()
+                    break
+
+    # -- starting --
+
+    def _fill(self, executor: ThreadPoolExecutor, host: _Host) -> None:
+        run = self.out.host(host.name)
+        while host.queue and not host.cancelled:
+            if len(host.entries) >= WINDOW_FACTOR * host.concurrency or (
+                host.inflight() >= host.concurrency
+            ):
+                return
+            if self.out_of_time is not None and self.out_of_time():
+                self.out.truncated = True
+                run.deferred += len(host.queue)
+                host.queue.clear()
+                return
+            task = host.queue.popleft()
+            lease = self.leases.acquire(task.pr_id)
+            if lease is None:
+                run.skipped_locked += 1
+                continue
+            try:
+                start = self._load(task)
+                if start is None or not self._due(task):
+                    self._release_lease(lease)
+                    continue
+                future = executor.submit(
+                    _work, self.client, task, start, self.clock(), self.forced_for
+                )
+            except BaseException:
+                self._release_lease(lease)  # not in `host.entries` yet: `_release_all` misses it
+                raise
+            host.entries.append(_Entry(task, start, lease, future))
+        if host.cancelled:
+            host.queue.clear()
+
+    def _due(self, task: Task) -> bool:
+        """The task's trigger on the row as it is now, with the lease held."""
+        return still_due(
+            self.store.conn, task, now=self.clock(),
+            pending_max_age_ms=duration_ms(self.config.ci.pending_max_age),
+        )  # fmt: skip
+
+    def _load(self, task: Task) -> RowStart | None:
+        """The row as the snapshot starts, or None when it is gone or no longer eligible."""
+        r = self.store.conn.execute(
+            "SELECT pr, repo, digest, status, terminal_at, terminal_kind, rebaseline, incomplete, "
+            "baselined_at, rev, listed_updated_at, unsettled_since, failure_count, "
+            "last_failure_code FROM prs WHERE pr_id = ?",
+            (task.pr_id,),
+        ).fetchone()
+        if r is None or r[3] == "terminal":
+            return None
+        settings = self.config.repo_settings(str(r[1]))
+        state = RowState(
+            pr_id=task.pr_id,
+            pr=str(r[0]),
+            repo=str(r[1]),
+            digest=r[2],
+            status=str(r[3]),
+            terminal_at=r[4],
+            terminal_kind=r[5],
+            rebaseline=bool(r[6]),
+            incomplete=str(r[7]),
+            baselined_at=r[8],
+        )
+        return RowStart(
+            state, int(r[9]), r[10], r[11], int(r[12]), r[13], settings.settle_polls,
+            settings.unreachable_after, settings.detect_force_push,
+        )  # fmt: skip
+
+    def _renew(self) -> None:
+        for host in self.hosts.values():
+            for entry in host.entries:
+                if entry.future.done() and not entry.renewed:
+                    entry.renewed = True
+                    renewed = self.leases.renew(entry.lease)
+                    if renewed is not None:
+                        entry.lease = renewed
+
+    # -- finishing --
+
+    def _drain(self, host: _Host) -> None:
+        while host.entries and host.entries[0].future.done() and not self.halt:
+            if self.should_stop is not None and self.should_stop():
+                self.out.interrupted = True
+                self.halt = True
+                return
+            entry = host.entries.popleft()
+            try:
+                self._finish(host, entry)
+            finally:
+                self._release(entry)
+
+    def _finish(self, host: _Host, entry: _Entry) -> None:
+        run = self.out.host(host.name)
+        job = entry.future.result()
+        run.calls += 1
+        if job.tool is not None:
+            self.out.tool_error = job.tool
+            self.halt = True
+            return
+        if job.outcome is not None and job.outcome.result is not None:
+            note_rate(self.res.facts(host.name), job.outcome.result)
+        if job.prepared is not None:
+            self._commit(host, entry, job.prepared)
+        else:
+            assert job.decision is not None
+            self._fail(host, entry, job.decision)
+
+    def _commit(self, host: _Host, entry: _Entry, p: _Prepared) -> None:
+        capped: tuple[int, int] | None = None  # (kept, total)
+
+        def prepare(conn: sqlite3.Connection) -> Sequence[NewEvent]:
+            nonlocal capped
+            # read before the membership rule below removes a source (the last one included)
+            labels, ids = event_context(conn, entry.task.pr_id)
+            if p.plan.digest.get("state") == "open":
+                conn.execute(
+                    "DELETE FROM sources WHERE pr_id = ? AND left_count >= 2 AND watch_id IN "
+                    "(SELECT id FROM watches WHERE kind = 'query')",
+                    (entry.task.pr_id,),
+                )
+            if p.plan.events and len(labels) > MAX_LABELS:
+                capped, labels = (MAX_LABELS, len(labels)), labels[:MAX_LABELS]
+            return [e.to_new_event(labels, ids) for e in p.plan.events]
+
+        try:
+            result = commit_snapshot(
+                self.store,
+                pr_id=entry.task.pr_id,
+                expected_rev=entry.start.rev,
+                snapshot_pr_id=p.snapshot_pr_id,
+                fields=p.fields,
+                prepare=prepare,
+                snapshot_updated_at=p.updated_at,
+            )
+        except EventError:
+            self._fail(host, entry, table.decision_for("contract", "pr"))
+            return
+        pr = str(p.fields.get("pr", entry.start.state.pr))
+        if not result.committed:
+            self._discarded(host, entry, result)
+            return
+        self._committed(host, entry, p, result, pr, capped)
+
+    def _committed(
+        self,
+        host: _Host,
+        entry: _Entry,
+        p: _Prepared,
+        result: CommitResult,
+        pr: str,
+        capped: tuple[int, int] | None,
+    ) -> None:
+        run = self.out.host(host.name)
+        run.snapshots += 1
+        run.events += len(result.events)
+        run.unchanged += 0 if result.events else 1
+        self.out.events.extend(result.events)
+        pr_id = entry.task.pr_id
+        for part in p.plan.persistent:
+            self._log("part_incomplete", pr_id=pr_id, pr=pr, part=part,
+                      snapshots=p.plan.incomplete[part])  # fmt: skip
+        drops = p.plan.events.dropped
+        if drops:
+            self._log("events_dropped", "warn", pr=pr, pr_id=pr_id, count=len(drops),
+                      reasons=sorted({d.reason for d in drops}))  # fmt: skip
+        if capped is not None:
+            self._log("labels_capped", "warn", pr=pr, pr_id=pr_id, kept=capped[0],
+                      total=capped[1])  # fmt: skip
+        before, after = entry.start.state.status, p.fields.get("status", entry.start.state.status)
+        if before != after:
+            self._log("pr_status", pr=pr, pr_id=pr_id, **{"from": before, "to": after})
+
+    def _discarded(self, host: _Host, entry: _Entry, result: CommitResult) -> None:
+        reason = result.reason
+        assert reason is not None
+        if reason is DiscardReason.PR_ID_MISMATCH:
+            self._fail(host, entry, table.decide_local("pr_id_changed", "pr"))
+            return
+        if result.counts_as_conflict:
+            self.out.host(host.name).skipped_conflict += 1
+        self._log("commit_skipped", "warn", pr_id=entry.task.pr_id, reason=reason.value)
+
+    def _fail(self, host: _Host, entry: _Entry, decision: table.Decision) -> None:
+        effect = decision.effect
+        code = decision.code or "internal"
+        pr = entry.start.state.pr
+        if effect.stop_poll:
+            self.halt = True
+            return
+        if effect.pause != "none" or effect.cancel_host:
+            host.cancelled = True
+            host.queue.clear()
+            if not host.noted:
+                host.noted = True
+                record_failure(
+                    self.res, self.res.facts(host.name), decision, kind_ref=host.name, log=self.log
+                )
+            return
+        if effect.counter == "increment":
+            self._count(entry, decision)
+        if effect.failed_kind == "pr":
+            self.res.failures.append(Failure("pr", pr, code, effect.poll_exit))
+
+    def _count(self, entry: _Entry, decision: table.Decision) -> None:
+        start, effect = entry.start, decision.effect
+        code = decision.code or "internal"
+        with self.store.transaction() as conn:
+            row = conn.execute(
+                "SELECT failure_count, status, last_failure_code FROM prs WHERE pr_id = ?",
+                (entry.task.pr_id,),
+            ).fetchone()
+            if row is None:
+                return
+            count, unreachable = table.apply_counter(
+                effect, int(row[0]), start.unreachable_after, str(row[1])
+            )
+            conn.execute(
+                "UPDATE prs SET failure_count = ?, last_failure_code = ?, last_attempt_at = ?"
+                + (", status = 'unreachable'" if unreachable else "")
+                + " WHERE pr_id = ?",
+                (count, code, format_ts(self.clock()), entry.task.pr_id),
+            )
+        pr = start.state.pr
+        if effect.record and table.should_record(row[2], code, count, start.unreachable_after):
+            self._log("snapshot_failed", "warn", pr=pr, pr_id=entry.task.pr_id, code=code,
+                      failures=count)  # fmt: skip
+        if unreachable:
+            self.out.unreachable.append((pr, entry.task.pr_id, code))
+            self._log("pr_status", pr=pr, pr_id=entry.task.pr_id,
+                      **{"from": "active", "to": "unreachable"})  # fmt: skip
+
+    def _log(self, event: str, level: str = "info", **fields: Any) -> None:
+        if self.log is not None:
+            self.log.write(event, level, **fields)
+
+
+def make_leases(store: Store, config: Config) -> Leases:
+    """The leases of one poll: a ttl of `3 x forgectl.timeout` (6 minutes by default)."""
+    return Leases(store, timedelta(milliseconds=3 * duration_ms(config.forgectl.timeout)))
+
+
+def run_snapshots(
+    store: Store,
+    client: ForgectlClient,
+    config: Config,
+    selection: Selection,
+    res: EnumerationResult,
+    *,
+    concurrency: dict[str, int],
+    leases: Leases,
+    log: Log | None = None,
+    clock: Callable[[], datetime] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    out_of_time: Callable[[], bool] | None = None,
+    forced_for: ForcedFor | None = None,
+) -> PoolResult:  # TODO(#23): make HostPlan.concurrency the single source (drop `concurrency`)
+    """Run the chosen snapshots (see the module docstring). Failures and host facts are added to
+    `res`; the counters and the committed events are returned."""
+    return _Pool(
+        store, client, config, selection, res,
+        log=log, leases=leases, clock=clock or (lambda: datetime.now(UTC)),
+        should_stop=should_stop, out_of_time=out_of_time, forced_for=forced_for,
+        concurrency=concurrency,
+    ).run()  # fmt: skip
