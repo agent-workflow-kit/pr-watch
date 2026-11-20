@@ -23,7 +23,8 @@ started, nothing in flight is committed, the pool releases its leases, `poll_end
 `interrupted: true` and the exit is 128 plus the number, with no report. The handlers are
 restored afterwards. After the signal the gateway refuses new forgectl launches and signals one
 that was being started (`gateway.signal_live(refuse_new=True)`; `allow_launches` on exit), so the
-poll never waits out a call's timeout.
+poll never waits out a call's timeout; a child that ignores the SIGTERM is group-SIGKILLed
+`gateway.SHUTDOWN_KILL_AFTER` (5 s) after the shutdown began.
 A signal ends the poll at the next check wherever it lands: a forgectl failure of the preflight or
 of the enumeration or the pool (a child killed by it, a refused launch) is the signal's exit, never
 the exit 12 envelope; a signal during `finish_hosts`, `finish_poll` or housekeeping is the same
@@ -563,6 +564,7 @@ def _poll(run: _Run) -> int:
     pc.finish_poll(
         store, run.res, run.pool, now=run.now(), restricted=run.restricted,
         exit_ok=exit_code == 0, interrupted=run.interrupted,
+        should_stop=lambda: run.interrupted,
     )  # fmt: skip
     if run.interrupted:  # a signal during `finish_poll`: no report
         return _stop_code(run)

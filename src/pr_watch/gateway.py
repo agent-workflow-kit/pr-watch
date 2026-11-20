@@ -37,6 +37,9 @@ Contract of `run`:
 - `signal_live(refuse_new=True)` (the poll's shutdown) also makes every later launch fail with
   `LaunchError` and signals a child that was started but not yet tracked when the signal came, so
   nothing launched after the shutdown outlives it; `allow_launches` ends that state.
+- A shutdown does not wait out a child that ignores its SIGTERM: a `run` that still has its leader
+  `SHUTDOWN_KILL_AFTER` seconds after the shutdown began kills the group (SIGKILL), so the poll
+  ends in seconds, not at the call's deadline.
 
 Out of scope here, by design: classifying results into error kinds (the poller), the fake
 forgectl and gh binaries (tests/fakebin) and hook specifics; this module only runs one argv.
@@ -61,6 +64,8 @@ from typing import IO
 TERM_GRACE = 2.0  # seconds between SIGTERM and SIGKILL (forgectl calls)
 ABANDON_AFTER = 5.0  # seconds to wait for the leader after SIGKILL before giving up
 STDERR_CAP = 64 * 1024
+SHUTDOWN_KILL_AFTER = 5.0  # seconds a child gets to obey the shutdown's SIGTERM (forgectl's own
+# cleanup of its children takes up to about 3 s)
 _TICK = 0.02  # longest poll interval
 _TICK_MIN = 0.001  # first poll interval; doubles while idle up to _TICK
 _CHUNK = 65536
@@ -351,7 +356,8 @@ def signal_live(sig: int = signal.SIGTERM, *, refuse_new: bool = False) -> int:
     including on a thread that is inside `run` (see the module docstring). A child that was busy
     is counted as signalled: its signal is queued and delivered by its `run` loop at the next tick,
     unless the leader was reaped meanwhile. Each `run` then sees its child exit and returns
-    normally; the caller recognises an interrupted call by its returncode.
+    normally; the caller recognises an interrupted call by its own stop flag (the returncode can
+    be -SIGTERM or, for a child that ignored it for `SHUTDOWN_KILL_AFTER`, -SIGKILL).
 
     With `refuse_new` the shutdown flag is set first: a launch that starts later fails with
     `LaunchError`, and one that is between `Popen` and its registration is signalled by `_launch`
@@ -457,6 +463,8 @@ def _run_real(request: Request) -> Result:
     sel = selectors.DefaultSelector()
     proc: subprocess.Popen[bytes] | None = None
     timed_out = False
+    shutdown_seen: float | None = None
+    shutdown_kill = False  # the loop ended because the child ignored the shutdown's SIGTERM
     try:
         child = _launch(request, started)
         proc = child.proc
@@ -490,6 +498,14 @@ def _run_real(request: Request) -> Result:
             if now >= deadline:
                 timed_out = True
                 break
+            if _SHUTDOWN.is_set():
+                if shutdown_seen is None:
+                    shutdown_seen = now
+                elif now - shutdown_seen >= SHUTDOWN_KILL_AFTER:
+                    shutdown_kill = True
+                    break  # SIGTERM was sent by signal_live; it was not obeyed: kill below
+            else:
+                shutdown_seen = None
             events = sel.select(min(tick, deadline - now)) if sel.get_map() else []
             if not events:
                 if not sel.get_map():
@@ -516,9 +532,13 @@ def _run_real(request: Request) -> Result:
             if cap.too_large:
                 break
         reaped = False
-        if timed_out or cap.too_large:
+        if shutdown_kill and not child.exited():
+            reaped = child.stop(0.0, request.abandon_after)  # SIGTERM already went out
+        elif timed_out or cap.too_large:
             reaped = child.stop(request.term_grace, request.abandon_after)
         else:
+            if _SHUTDOWN.is_set():  # the leader obeyed SIGTERM: a descendant may not have
+                child.signal_group(signal.SIGKILL)  # leader still unreaped: its group id is ours
             reaped = child.wait(request.abandon_after)  # the leader has exited: reaps at once
         return Result(
             returncode=proc.returncode if reaped else None,

@@ -10,7 +10,8 @@ What this module does (docs/interface.md: Failures, Version rule, Resolution):
 - Runs one call through the gateway: the caller's environment is passed to forgectl unchanged
   (`env`; forgectl reads its tokens and config location from it), the wall-clock deadline is
   `forgectl.timeout` plus `deadline_slack` (10 s), stdout is read under `max_output` bytes, and
-  the gateway signals the child's group (SIGTERM, then SIGKILL).
+  the gateway signals the child's group (SIGTERM, then SIGKILL; during a poll's shutdown the
+  SIGKILL follows `gateway.SHUTDOWN_KILL_AFTER`, 5 s, after the shutdown began).
 - Parses stdout strictly: UTF-8 decoded explicitly, one JSON object, no duplicate keys, no NaN or
   Infinity, every integer and float bounded, nesting at most MAX_DEPTH levels (checked after the
   parse by an iterative walk; a deeper document that the parser itself cannot read is also a

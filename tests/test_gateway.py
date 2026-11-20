@@ -408,6 +408,30 @@ def shutdown_reset() -> Iterator[None]:
     gateway.allow_launches()  # the flag is process-wide: never leak it into another test
 
 
+def test_a_shutdown_kills_a_child_that_ignores_sigterm_after_the_grace(
+    reaper: Reaper, monkeypatch: pytest.MonkeyPatch, shutdown_reset: None, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(gateway, "SHUTDOWN_KILL_AFTER", 0.3)
+    ready = tmp_path / "trap-set"
+    results: list[gateway.Result] = []
+    # The shell creates `ready` once its trap is in place (the handshake), then ignores TERM.
+    script = f"trap '' TERM; : > {ready}; sleep 60 & wait"
+    thread = threading.Thread(target=lambda: results.append(sh(script, timeout=50)))
+    thread.start()
+    try:
+        end = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < end:
+            time.sleep(0.01)
+        assert ready.exists() and len(gateway.live_pids()) == 1
+        started = time.monotonic()
+        assert gateway.signal_live(signal.SIGTERM, refuse_new=True) == 1
+    finally:
+        thread.join(20)
+    assert not thread.is_alive()
+    assert time.monotonic() - started < 15  # not the call's 50 s deadline
+    assert results[0].returncode == -signal.SIGKILL and not results[0].timed_out
+
+
 def test_a_child_started_after_the_shutdown_is_refused(
     reaper: Reaper, shutdown_reset: None
 ) -> None:
@@ -702,3 +726,66 @@ def test_python_is_the_interpreter_running_the_tests(reaper: Reaper) -> None:
         max_output=1000,
     )
     assert result.stdout.strip() == str(sys.version_info[:2])
+
+
+def test_a_deadline_hit_during_a_shutdown_still_gives_the_child_its_term_grace(
+    reaper: Reaper, shutdown_reset: None, tmp_path: Path
+) -> None:
+    ready, done = tmp_path / "trap-set", tmp_path / "cleaned"
+    # On TERM the shell cleans up for 4 s (its helper ignores TERM), then writes `done`: longer
+    # than the 3 s deadline, which therefore lands inside the cleanup.
+    script = (
+        f"trap '(trap \"\" TERM; sleep 4); : > {done}; exit 7' TERM; : > {ready}; "
+        "while :; do sleep 0.05; done"
+    )
+    results: list[gateway.Result] = []
+    thread = threading.Thread(
+        target=lambda: results.append(sh(script, timeout=3.0, term_grace=8.0))
+    )
+    launched = time.monotonic()
+    thread.start()
+    try:
+        end = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < end:
+            time.sleep(0.01)
+        assert ready.exists()
+        assert gateway.signal_live(signal.SIGTERM, refuse_new=True) == 1
+        signalled = time.monotonic() - launched
+    finally:
+        thread.join(20)
+    # Not vacuous: the shutdown began well before the deadline, which then hit during it.
+    assert signalled < 2.0, (
+        f"the signal came {signalled:.1f} s in: too late to precede the deadline"
+    )
+    assert results[0].timed_out  # the deadline came after the signal, inside the 4 s cleanup
+    assert done.exists(), "the child was killed without its term_grace"
+    assert results[0].returncode == 7
+
+
+def test_a_shutdown_kills_a_descendant_that_ignored_sigterm_when_the_leader_obeyed(
+    reaper: Reaper, shutdown_reset: None, tmp_path: Path
+) -> None:
+    pidfile = tmp_path / "descendant.pid"
+    script = (
+        "trap 'exit 0' TERM; "
+        f"(trap '' TERM; exec sh -c 'echo $$ > {pidfile}; exec sleep 60') & "
+        "wait"
+    )
+    results: list[gateway.Result] = []
+    thread = threading.Thread(target=lambda: results.append(sh(script, timeout=50)))
+    thread.start()
+    descendant = 0
+    try:
+        end = time.monotonic() + 10
+        while time.monotonic() < end:
+            if pidfile.exists() and pidfile.read_text().strip():
+                descendant = int(pidfile.read_text())
+                break
+            time.sleep(0.01)
+        assert descendant
+        reaper.track(descendant)
+        assert gateway.signal_live(signal.SIGTERM, refuse_new=True) == 1
+    finally:
+        thread.join(20)
+    assert results[0].returncode == 0
+    assert is_dead(descendant), "a descendant that ignored SIGTERM outlived the shutdown"

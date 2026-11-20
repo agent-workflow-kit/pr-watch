@@ -8,7 +8,7 @@ license = "MIT"
 dependencies = ["pyyaml>=6", "pydantic>=2.5"]
 
 [project.scripts]
-pr-watch = "pr_watch.cli:main"
+pr-watch = "pr_watch._entry:main"
 
 [build-system]
 requires = ["hatchling"]
