@@ -13,7 +13,13 @@ Per-PR form, in three steps:
    the source, owner and labels are added). The expiry predicate is evaluated here; an expired row
    and its per-PR watch are deleted and the PR is baselined as new. If the transaction finds it
    needs a snapshot it does not have (the row vanished or expired meanwhile) it writes nothing and
-   the loop fetches once more (at most three rounds, then exit 12: a retry is safe).
+   the loop plans again. The host is contacted at most once (a fetched snapshot is kept, and a
+   write that has one never asks for another); the loop makes at most three attempts, then exit
+   12 (a retry is safe).
+
+The write takes its own `now` and expiry cutoff inside the transaction, after the lock, so stamps
+and the expiry predicate describe the time of the write, not of the plan. The label cap is also
+checked up front against the stored watch, so an over-cap request fails before any host call.
 
 The query form only records the watch; it never contacts forgectl.
 
@@ -23,6 +29,10 @@ Judgment calls where the interface is silent (kept conservative):
   from the reference's, or whose `repo` is not the `pr`'s repo, is a `contract` failure.
 - A snapshot over the output cap (`too_large`) ends `watch add` with exit 12 and records nothing;
   the `show` fallback of the poll is for PRs already stored. `--no-baseline` still works.
+- A snapshot fetched for a stored row (an ambiguous name, a poll that won the race) refreshes the
+  row's `pr` and `repo` (a rename) even when its baseline is discarded; `rev` is not bumped.
+- A snapshot whose `pr_id` is not a valid id, or whose `updated_at` is not a string, is a
+  `contract` failure.
 - A baseline discarded because a listing already saw a newer state of a closed PR
   (`NEWER_LISTING`) leaves the row without a digest, `baselined: false`; the next poll does it.
 """
@@ -43,9 +53,9 @@ from .failures import decide, decide_tool, to_cli_error
 from .forgectl_client import ForgectlClient, ToolError
 from .refs import PrRef, RefError, duration_ms, watch_key
 from .rows import pr_row
-from .store import PR_RE, REPO_RE, NewEvent, Store
+from .store import PR_ID_RE, PR_RE, REPO_RE, NewEvent, Store
 
-PROG_ROUNDS = 3
+MAX_ATTEMPTS = 3
 
 
 @dataclass
@@ -124,10 +134,29 @@ def _snapshot_of(client: ForgectlClient, ref: PrRef, no_baseline: bool) -> dict[
         and pr.partition("/")[0] == ref.host
         and pr.rpartition("#")[2] == str(ref.number)
         and isinstance(snap.get("pr_id"), str)
+        and PR_ID_RE.match(snap["pr_id"]) is not None
+        and isinstance(snap.get("updated_at"), str)
     )
     if not ok:
         raise CliError("contract", "the snapshot does not describe the PR that was asked for")
     return snap
+
+
+def _expired(status: object, terminal_at: object, cutoff: str) -> bool:
+    """`watches.EXPIRED_PREDICATE` in Python (the same three conditions)."""
+    return status == "terminal" and watches.is_expired(
+        None if terminal_at is None else str(terminal_at), cutoff
+    )
+
+
+def _precheck_labels(conn: sqlite3.Connection, ref: PrRef, args: argparse.Namespace) -> None:
+    """The label cap against the stored watch (or none), before any host call."""
+    try:
+        found = watches.resolve_stored_pr(conn, ref)
+    except RefError:
+        found = None
+    watch_id = None if found is None else watches.pr_watch_id(conn, found[0])
+    _check_label_cap(conn, watch_id or "", args)
 
 
 def _needs_snapshot(
@@ -142,9 +171,9 @@ def _needs_snapshot(
         return None
     pr_id = found[0]
     row = conn.execute(
-        "SELECT digest IS NOT NULL, terminal_at FROM prs WHERE pr_id = ?", (pr_id,)
+        "SELECT digest IS NOT NULL, status, terminal_at FROM prs WHERE pr_id = ?", (pr_id,)
     ).fetchone()
-    if row is None or watches.is_expired(row[1] if row[1] is None else str(row[1]), cutoff):
+    if row is None or _expired(row[1], row[2], cutoff):
         return None
     if row[0] or no_baseline:
         return pr_id
@@ -157,8 +186,6 @@ def _write_pr(
     *,
     snap: dict[str, Any] | None,
     stored_pr_id: str | None,
-    now: datetime,
-    cutoff: str,
 ) -> _Outcome:
     store = _store(ctx)
     cfg = ctx.loaded.config
@@ -166,6 +193,8 @@ def _write_pr(
     pr_id = str(snap["pr_id"]) if snap is not None else stored_pr_id
     assert pr_id is not None
     with store.transaction() as conn:
+        now = datetime.now(UTC)
+        cutoff = watches.expiry_cutoff(now, cfg.expiry.after_terminal)
         cursor = _cursor(store)
         row = conn.execute(
             "SELECT pr, repo, digest, status, terminal_at, terminal_kind, rebaseline, "
@@ -173,11 +202,12 @@ def _write_pr(
             (pr_id,),
         ).fetchone()
         replaced = False
-        if row is not None and watches.is_expired(None if row[4] is None else str(row[4]), cutoff):
+        if row is not None and _expired(row[3], row[4], cutoff):
             if snap is None:
                 raise _NeedSnapshot
             replaced = watches.drop_expired_pr(conn, pr_id, cutoff)
-            row = None
+            if replaced:
+                row = None
         if row is None:
             if snap is None:
                 raise _NeedSnapshot
@@ -221,7 +251,6 @@ def _write_pr(
                 persistent_after=cfg.repo_settings(state.repo).unreachable_after,
             )
             # TODO(#22): set unsettled_since for a baseline that is unsettled.
-            updated = snap.get("updated_at")
 
             def prepare(c: sqlite3.Connection) -> list[NewEvent]:
                 labels_now, ids = watches.event_context(c, pr_id)
@@ -235,13 +264,23 @@ def _write_pr(
                 snapshot_pr_id=str(snap["pr_id"]),
                 fields=plan.fields,
                 prepare=prepare,
-                snapshot_updated_at=updated if isinstance(updated, str) else "",
+                snapshot_updated_at=str(snap["updated_at"]),
             )
             baselined, emitted = result.committed, len(result.events)
+        renamed = False
+        if snap is not None and not baselined and not created_row:
+            if (snap["pr"], snap["repo"]) != (row[0], row[1]):
+                conn.execute(
+                    "UPDATE prs SET pr = ?, repo = ? WHERE pr_id = ?",
+                    (snap["pr"], snap["repo"], pr_id),
+                )
+                renamed = True
         view = watches.watch_view(conn, watch_id)
         prrow = pr_row(conn, pr_id, now=now, pending_max_age_ms=pending_ms)
     assert view is not None
-    changed = created_row or replaced or created or source or owner or labels or baselined
+    changed = (
+        created_row or replaced or created or source or owner or labels or baselined or renamed
+    )
     return _Outcome(view, created, changed, baselined, emitted, cursor, prrow)
 
 
@@ -251,7 +290,8 @@ def _add_pr(ctx: Context, args: argparse.Namespace) -> _Outcome:
     assert isinstance(ref, PrRef)
     client: ForgectlClient | None = None
     snap: dict[str, Any] | None = None
-    for _ in range(PROG_ROUNDS):
+    _precheck_labels(store.conn, ref, args)
+    for _ in range(MAX_ATTEMPTS):
         now = datetime.now(UTC)
         cutoff = watches.expiry_cutoff(now, ctx.loaded.config.expiry.after_terminal)
         stored = _needs_snapshot(store.conn, ref, cutoff, args.no_baseline)
@@ -262,7 +302,7 @@ def _add_pr(ctx: Context, args: argparse.Namespace) -> _Outcome:
                 raise to_cli_error(decide_tool(exc)) from None
             snap = _snapshot_of(client, ref, args.no_baseline)
         try:
-            return _write_pr(ctx, args, snap=snap, stored_pr_id=stored, now=now, cutoff=cutoff)
+            return _write_pr(ctx, args, snap=snap, stored_pr_id=stored)
         except _NeedSnapshot:
             continue
     raise CliError("host_failed", "the PR changed while it was being added; retry")

@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from pr_watch import forgectl_client as fc
+from pr_watch import watch_add as wa
 from pr_watch import watches as w
 from pr_watch.cli import main
 from pr_watch.refs import PrRef, parse_pr
@@ -282,7 +283,7 @@ def test_terminal_row_inside_expiry_is_kept_and_emits_nothing(
     assert doc["pr"]["terminal_kind"] == "merged" and not cmds(fake)
 
 
-def test_expired_row_with_a_closed_listing_race_still_baselines_as_new(
+def test_expired_row_of_a_pr_that_is_open_again_is_baselined_as_a_new_active_row(
     fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
 ) -> None:
     seed_row(store, pr_id_of(fake), status="terminal", terminal_at=LONG_AGO)  # forge: open now
@@ -571,12 +572,12 @@ def test_a_baseline_committed_between_fetch_and_write_wins_and_the_snapshot_is_d
 def test_concurrent_adds_for_one_new_pr_store_one_baseline_in_real_processes(
     fake: FakeForgectl, store: Store, tmp_path: Path
 ) -> None:
+    """Two concurrent `watch add` processes (the poll is a stub here; the add + poll variant is
+    todo(#25)). The long `slow` makes both fetch before either writes; the assertions are on the
+    outcome only, so a slow machine cannot make the test flaky."""
     fake.update(PR, state="merged", merged_at="2026-01-01T00:00:00Z", merge_commit_sha=sha(3))
-    fake.slow("snapshot", 1.0)
-    env = {
-        **os.environ,
-        "PYTHONPATH": os.pathsep.join(sys.path),
-    }
+    fake.slow("snapshot", 5.0)
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
     procs = [
         subprocess.Popen(
             [sys.executable, "-m", "pr_watch", "--json", "watch", "add", PR, "--owner", owner],
@@ -588,17 +589,223 @@ def test_concurrent_adds_for_one_new_pr_store_one_baseline_in_real_processes(
         for owner in (A, B)
     ]
     docs = []
-    for proc in procs:
-        out, err = proc.communicate(timeout=120)
-        assert proc.returncode == 0, err
-        docs.append(json.loads(out))
+    try:
+        for proc in procs:
+            out, err = proc.communicate(timeout=120)
+            assert proc.returncode == 0, err
+            docs.append(json.loads(out))
+    finally:
+        for proc in procs:  # only the processes started here
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
     for doc in docs:
         assert_valid("cli/watch-add", doc)
     assert sorted(d["baselined"] for d in docs) == [False, True]
     assert sum(d["events_emitted"] for d in docs) == 1
     assert event_types(store) == ["merged"]
     assert counts(store)["prs"] == 1 and row(store)["rev"] == 1
-    assert len(fake.calls("snapshot")) == 2  # both fetched, one write was discarded
+
+
+# --- write-time clock (R1) -----
+
+
+def test_stamps_and_expiry_use_the_time_of_the_write_not_of_the_plan(
+    fake: FakeForgectl,
+    store: Store,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake.update(PR, state="merged", merged_at="2026-01-01T00:00:00Z", merge_commit_sha=sha(3))
+    t0 = datetime.now(UTC)
+    later = t0 + timedelta(hours=2)
+    clock = [t0]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> Any:
+            return clock[0]
+
+    monkeypatch.setattr(wa, "datetime", Clock)
+    # inside expiry (7d) at plan time, past it two hours later when the write happens
+    old = seed_row(
+        store,
+        pr_id_of(fake),
+        digest=None,
+        status="terminal",
+        terminal_at=format_ts(t0 - timedelta(days=7) + timedelta(hours=1)),
+    )
+    real = fc.ForgectlClient.snapshot
+
+    def slow_fetch(self: fc.ForgectlClient, ref: PrRef) -> fc.Outcome:
+        outcome = real(self, ref)
+        clock[0] = later  # the host call took two hours
+        return outcome
+
+    monkeypatch.setattr(fc.ForgectlClient, "snapshot", slow_fetch)
+    doc = ok(capsys, PR, owner=B)
+    stamp = format_ts(later)
+    assert w.watch_exists(store.conn, old) is False  # the write-time cutoff expired the row
+    assert doc["created"] is True and doc["watch"]["created_at"] == stamp
+    assert doc["pr"]["terminal_at"] == stamp and doc["pr"]["baselined_at"] == stamp
+
+
+# --- snapshot validation (R2, R8) -----
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"pr_id": "has space"},
+        {"pr_id": "../etc"},
+        {"pr_id": "x" * 5000},
+        {"pr_id": 7},
+        {"updated_at": 5},
+        {"updated_at": None},
+    ],
+    ids=["space", "dotdot", "oversize", "not_string", "updated_at_int", "updated_at_null"],
+)
+def test_a_snapshot_with_a_bad_pr_id_or_updated_at_is_a_contract_failure(
+    fake: FakeForgectl,
+    store: Store,
+    capsys: pytest.CaptureFixture[str],
+    changes: dict[str, Any],
+) -> None:
+    snap = new_pr(number=7)
+    snap.update(changes)
+    # a raw answer: the fake validates only the documents it builds itself
+    fake.raw("snapshot", stdout=json.dumps(snap))
+    got, doc = add(capsys, PR)
+    assert (got, doc["error"]["code"]) == (12, "contract")
+    assert counts(store) == dict.fromkeys(counts(store), 0)
+
+
+# --- too large, retries, deferred baseline (R4) -----
+
+
+def test_a_too_large_snapshot_ends_with_exit_12_and_no_baseline_still_works(
+    fake: FakeForgectl,
+    store: Store,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def huge(self: fc.ForgectlClient, ref: PrRef) -> fc.Outcome:
+        return fc.Outcome(command="snapshot", returncode=None, local="too_large", detail="d")
+
+    monkeypatch.setattr(fc.ForgectlClient, "snapshot", huge)
+    got, doc = add(capsys, PR)
+    assert (got, doc["error"]["code"]) == (12, "host_failed")
+    assert counts(store) == dict.fromkeys(counts(store), 0)
+    doc = ok(capsys, PR, "--no-baseline")
+    assert (doc["created"], doc["baselined"]) == (True, False)
+    assert row(store)["digest"] is None
+
+
+def test_a_row_that_vanishes_between_plan_and_write_is_fetched_and_baselined(
+    fake: FakeForgectl,
+    store: Store,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ok(capsys, PR)
+    real = wa._needs_snapshot
+    state = {"done": False}
+
+    def vanishing(*args: Any) -> str | None:
+        found = real(*args)
+        if found is not None and not state["done"]:
+            state["done"] = True
+            with store.transaction() as c:
+                c.execute("DELETE FROM prs")
+                c.execute("DELETE FROM watches")
+        return found
+
+    monkeypatch.setattr(wa, "_needs_snapshot", vanishing)
+    doc = ok(capsys, PR, owner=B)
+    assert (doc["created"], doc["baselined"]) == (True, True)
+    assert len(fake.calls("snapshot")) == 2 and row(store)["rev"] == 1
+
+
+def test_retries_are_exhausted_with_exit_12_and_nothing_recorded(
+    fake: FakeForgectl,
+    store: Store,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wa, "_needs_snapshot", lambda *a: "GONE")  # a row that is never there
+    got, doc = add(capsys, PR)
+    assert (got, doc["error"]["code"]) == (12, "host_failed")
+    assert counts(store) == dict.fromkeys(counts(store), 0) and not cmds(fake)
+
+
+def test_baseline_deferred_by_a_newer_listing_adds_source_and_owner_only(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake.update(PR, state="closed", closed_at="2026-01-01T00:00:00Z")
+    pr_id = pr_id_of(fake)
+    seed_row(store, pr_id, digest=None, owners=(A,))
+    with store.transaction() as c:
+        c.execute("UPDATE prs SET listed_updated_at = '2999-01-01T00:00:00Z'")
+    doc = ok(capsys, PR, owner=B)
+    assert (doc["created"], doc["changed"], doc["baselined"], doc["events_emitted"]) == (
+        False, True, False, 0,
+    )  # fmt: skip
+    assert doc["watch"]["owners"] == [B, A] and len(doc["pr"]["sources"]) == 1
+    assert row(store)["digest"] is None and counts(store)["events"] == 0
+    assert cmds(fake) == ["snapshot"]
+
+
+# --- label cap before the host call (R6) -----
+
+
+def test_label_cap_on_a_missing_pr_is_refused_before_any_forgectl_call(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    got, doc = add(capsys, PR, *_labels(w.MAX_LABELS_PER_WATCH + 1))
+    assert (got, doc["error"]["details"]["kind"]) == (2, "too_many_labels")
+    assert fake.calls() == [] and counts(store) == dict.fromkeys(counts(store), 0)
+
+
+def test_label_cap_on_a_stored_watch_is_refused_before_the_fetch(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ok(capsys, PR, "--no-baseline", *_labels(w.MAX_LABELS_PER_WATCH))
+    before, calls = counts(store), len(fake.calls())
+    got, doc = add(capsys, PR, "--label", "extra=1", owner=B)  # would baseline: needs a snapshot
+    assert (got, doc["error"]["details"]["kind"]) == (2, "too_many_labels")
+    assert len(fake.calls()) == calls and counts(store) == before
+
+
+# --- expiry predicate (R9) and renames (R10) -----
+
+
+def test_an_active_row_with_an_old_terminal_at_is_not_expired(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed_row(store, pr_id_of(fake), status="active", terminal_at=LONG_AGO)
+    doc = ok(capsys, PR, owner=B)
+    assert (doc["created"], doc["changed"], doc["baselined"]) == (False, True, False)
+    assert not cmds(fake) and counts(store)["prs"] == 1
+
+
+def test_a_rename_seen_by_a_discarded_snapshot_updates_the_stored_row(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    renamed = "github.com/example-org/gadgets"
+    pr_id = pr_id_of(fake)
+    seed_row(store, pr_id, digest="{}", owners=(A,))
+    seed_row(store, "OTHER", digest="{}", owners=(A,))  # same name: the reference is ambiguous
+    with store.transaction() as c:
+        c.execute("UPDATE prs SET pr = ? WHERE pr_id = 'OTHER'", (PR,))
+    snap = new_pr(number=7)
+    snap.update(pr=f"{renamed}#7", repo=renamed)
+    fake.scenario["prs"][PR]["snapshot"] = snap
+    fake._write()
+    doc = ok(capsys, PR, owner=B)
+    assert doc["baselined"] is False and doc["changed"] is True
+    assert doc["pr"]["pr"] == f"{renamed}#7"
+    assert (row(store, pr_id)["pr"], row(store, pr_id)["repo"]) == (f"{renamed}#7", renamed)
+    assert row(store, pr_id)["rev"] == 0
 
 
 # --- goldens -----
