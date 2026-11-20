@@ -151,7 +151,8 @@ class EnumerationResult:
     failures: list[Failure] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     stale_whoami: Failure | None = None
-    whoami_retry_after: float | None = None  # whoami was rate limited
+    whoami_retry_after: float | None = None  # `retry_after` of a rate limited whoami, if given
+    whoami_rate_limited: bool = False  # the whole whoami call was rate limited (pause all hosts)
     listed: dict[str, Listed] = field(default_factory=dict)  # newest listing per pr_id
     new_members: list[str] = field(default_factory=list)
     reactivated: list[str] = field(default_factory=list)
@@ -371,10 +372,14 @@ def load_host_list(
     if effect.stop_poll:
         res.stop_poll = True
     if effect.pause != "none":
+        res.whoami_rate_limited = True
         res.whoami_retry_after = decision.retry_after
     if cached is not None:
         res.warnings.append(f"whoami failed ({code}); the cached host list is reused")
         res.stale_whoami = failure
+        if effect.pause != "none":
+            for entry in cached[1]:  # rate limited as a whole: no host is listed this cycle
+                res.facts(entry.host).cancelled = True
         for entry in cached[1][:MAX_STALE_WARNINGS]:
             if log is not None:
                 log.write("host_failed", "warn", host=entry.host, code=code,
@@ -785,7 +790,7 @@ def enumerate_scopes(
         if host in paused_hosts:
             facts.cancelled = True
             continue
-        if host in hosts_to_query and host not in res.host_list.failed:
+        if host in hosts_to_query and host not in res.host_list.failed and not facts.cancelled:
             _list_query(store, client, res, facts, queries, now, log, restrict_repo)
         for repo, since, start in by_host.get(host, []):
             if facts.cancelled or _stopped(res, should_stop):

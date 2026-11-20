@@ -25,9 +25,12 @@ import argparse
 import json
 import os
 import re
+import signal
 import sys
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from types import FrameType
 from typing import Any, NoReturn
 
 from . import __version__, watches
@@ -223,7 +226,7 @@ HANDLERS: dict[str, Handler] = {
     "label remove": lambda ctx, args: _label_remove(ctx, args),
     "list": lambda ctx, args: _list(ctx, args),
     "prune": lambda ctx, args: _prune(ctx, args),
-    "poll": _stub(25),  # TODO(#25): poll (and the signal contract, exit 128+N)
+    "poll": lambda ctx, args: _poll(ctx, args),
     "events": _stub(27),  # TODO(#27): events
     "show": _stub(27),  # TODO(#27): show
     "export": _stub(27),  # TODO(#27): export
@@ -260,6 +263,12 @@ def _prune(ctx: Context, args: argparse.Namespace) -> int:
     from .prune import prune_command  # lazy: it imports this module
 
     return prune_command(ctx, args)
+
+
+def _poll(ctx: Context, args: argparse.Namespace) -> int:
+    from .poller import poll_command  # lazy: it imports this module
+
+    return poll_command(ctx, args)
 
 
 def _list(ctx: Context, args: argparse.Namespace) -> int:
@@ -592,6 +601,12 @@ def _merge_leftovers(args: argparse.Namespace, extras: list[str]) -> None:
         raise UsageError(f"unrecognized arguments ({len(extras)})")
 
 
+def _check_poll_target(args: argparse.Namespace) -> None:
+    """`--pr` and `--repo` name two different scopes: never both."""
+    if args.pr is not None and args.repo is not None:
+        raise _shape_error("bad_combination", "--pr and --repo cannot be combined")
+
+
 def _check_label(args: argparse.Namespace) -> None:
     items: list[str] = args.items
     delattr(args, "items")
@@ -608,6 +623,7 @@ def _check_label(args: argparse.Namespace) -> None:
 SHAPE_CHECKS: dict[str, Callable[[argparse.Namespace], None]] = {
     "watch add": _check_watch_target,
     "watch remove": _check_watch_target,
+    "poll": _check_poll_target,
     "label add": _check_label,
     "label remove": _check_label,
 }
@@ -840,9 +856,45 @@ def _execute(argv: Sequence[str]) -> int:
             state.close()
 
 
+class Signaled(BaseException):
+    """A SIGTERM, SIGINT or SIGHUP reached a command that does not handle signals itself (`poll`
+    does). A BaseException so no `except Exception` hides it; `main` turns it into exit 128+N."""
+
+    def __init__(self, number: int) -> None:
+        super().__init__(number)
+        self.number = number
+
+
+_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+
+
+def _raise_signaled(number: int, frame: FrameType | None) -> NoReturn:
+    raise Signaled(number)
+
+
+def _install_signal_handlers() -> dict[int, Any]:
+    """Make the three stop signals raise `Signaled` (so transactions roll back and the store
+    closes); only the main thread can. Returns what to restore."""
+    if threading.current_thread() is not threading.main_thread():
+        return {}
+    return {n: signal.signal(n, _raise_signaled) for n in _SIGNALS}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    # todo(#25): catch KeyboardInterrupt and SIGTERM here and exit 128+N (the signal contract).
     args = list(sys.argv[1:] if argv is None else argv)
+    saved = _install_signal_handlers()
+    try:
+        return _main(args)
+    except Signaled as stop:
+        return 128 + stop.number  # the signal contract: quiet, no traceback
+    except KeyboardInterrupt:
+        return 128 + signal.SIGINT
+    finally:
+        for number, old in saved.items():
+            signal.signal(number, old)
+
+
+def _main(args: list[str]) -> int:
     try:
         return _execute(args)
     except OutputError:

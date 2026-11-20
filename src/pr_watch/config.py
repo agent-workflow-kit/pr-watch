@@ -153,7 +153,7 @@ class Poll(_Model):
     @field_validator("max_duration", mode="after")
     @classmethod
     def _max_duration_is_positive(cls, value: str) -> str:
-        # 0 would make every snapshot stage start out of time: refused rather than read as "no limit"
+        # 0 would start every snapshot stage out of time: refused, not read as "no limit"
         if duration_ms(value) < 1:
             raise ValueError("must be at least 1ms (use a long duration for no practical limit)")
         return value

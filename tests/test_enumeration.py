@@ -521,6 +521,25 @@ def test_whoami_rate_limit_is_reported(store: Store, fake: FakeForgectl) -> None
     fake.raw("whoami", stdout=json.dumps(envelope), exit=12)
     res = run(store)
     assert res.whoami_retry_after == 12 and fake.calls("prs") == []
+    assert res.whoami_rate_limited
+
+
+def test_whoami_rate_limit_without_retry_after_is_still_flagged(
+    store: Store, fake: FakeForgectl
+) -> None:
+    add_query(store)
+    envelope = {"error": {"code": "rate_limited", "message": "slow down"}}
+    fake.raw("whoami", stdout=json.dumps(envelope), exit=12)
+    res = run(store)
+    assert res.whoami_rate_limited and res.whoami_retry_after is None
+
+
+def test_a_whoami_failure_that_is_not_a_rate_limit_is_not_flagged(
+    store: Store, fake: FakeForgectl
+) -> None:
+    add_query(store)
+    fake.network_error("whoami")
+    assert not run(store).whoami_rate_limited
 
 
 def test_whoami_rate_limit_of_one_host_pauses_that_host(store: Store, fake: FakeForgectl) -> None:
@@ -1064,3 +1083,22 @@ def test_a_listing_failure_without_stop_poll_lists_the_next_host(
     res = run(store)
     assert not res.stop_poll
     assert len(fake.calls("prs")) == 2
+
+
+def test_a_whole_whoami_rate_limit_with_a_stale_cache_lists_no_host(
+    store: Store, fake: FakeForgectl
+) -> None:
+    add_query(store)
+    cache = {
+        "fetched_at": format_ts(NOW - timedelta(hours=3)),
+        "hosts": [{"host": HOST, "backend": "github", "in_scope": True}],
+    }
+    store.conn.execute(
+        "INSERT INTO meta (key, value) VALUES ('hosts_cache', ?)", (json.dumps(cache),)
+    )
+    store.conn.commit()
+    envelope = {"error": {"code": "rate_limited", "message": "slow down", "retry_after": 12}}
+    fake.raw("whoami", stdout=json.dumps(envelope), exit=12)
+    res = run(store)
+    assert res.stale_whoami is not None and res.whoami_rate_limited
+    assert res.hosts[HOST].cancelled and fake.calls("prs") == []

@@ -5,8 +5,10 @@ from __future__ import annotations
 import errno
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -420,11 +422,22 @@ def test_label_shape_errors(
 def test_poll_options_parse(
     stubs: list[tuple[Context, Any]], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    run(capsys, "poll", "--pr", "o/r#1", "--repo", "h/o/r", "--full", "--no-hooks",
+    run(capsys, "poll", "--pr", "o/r#1", "--full", "--no-hooks",
         "--hook", "on-merged=echo hi", "--hook", "post-poll=true")  # fmt: skip
     a = stubs[-1][1]
-    assert a.pr == PR1 and a.repo == "h/o/r" and a.full and a.no_hooks
+    assert a.pr == PR1 and a.repo is None and a.full and a.no_hooks
     assert a.hook == [("on-merged", "echo hi"), ("post-poll", "true")]
+    run(capsys, "poll", "--repo", "h/o/r")
+    assert stubs[-1][1].repo == "h/o/r" and stubs[-1][1].pr is None
+
+
+def test_poll_pr_and_repo_together_is_a_usage_error(
+    stubs: list[tuple[Context, Any]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, _ = run(capsys, "--json", "poll", "--pr", "o/r#1", "--repo", "h/o/r")
+    assert code == 2 and stubs == []
+    error = envelope_of(out)
+    assert error["code"] == "usage" and error["details"]["kind"] == "bad_combination"
 
 
 def test_events_options_parse_as_validated_values(
@@ -569,7 +582,7 @@ def test_handler_oserror_is_still_an_internal_error(
 # --- unimplemented commands --------------------------------------------------------------------
 
 OWNERS = {
-    "poll": 25, "events": 27, "show": 27, "export": 27,
+    "events": 27, "show": 27, "export": 27,
     "cron install": 29, "cron uninstall": 29,
 }  # fmt: skip
 
@@ -784,14 +797,34 @@ def test_unexpected_exception_in_human_mode_prints_one_stderr_line(
     assert err.count("\n") == 1 and "secret" not in err
 
 
-def test_keyboard_interrupt_is_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
-    # TODO(#25) owns the signal contract (exit 128+N); the frame must not eat it.
+def test_keyboard_interrupt_exits_130_without_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     def handler(ctx: Context, args: Any) -> int:
         raise KeyboardInterrupt
 
     monkeypatch.setitem(HANDLERS, "poll", handler)
-    with pytest.raises(KeyboardInterrupt):
-        main(["poll"])
+    code, out, err = run(capsys, "--json", "poll")
+    assert (code, out) == (130, "")
+    assert "Traceback" not in err and "File " not in err
+
+
+@pytest.mark.parametrize("number", [signal.SIGTERM, signal.SIGHUP, signal.SIGINT])
+def test_a_signal_during_a_command_exits_128_plus_n_and_restores_the_handlers(
+    number: int, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    before = {n: signal.getsignal(n) for n in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+
+    def handler(ctx: Context, args: Any) -> int:
+        os.kill(os.getpid(), number)  # this process only
+        time.sleep(5)  # the handler's exception ends the sleep at once
+        return 0
+
+    monkeypatch.setitem(HANDLERS, "poll", handler)
+    code, out, err = run(capsys, "--json", "poll")
+    assert (code, out) == (128 + number, "")
+    assert "Traceback" not in err
+    assert {n: signal.getsignal(n) for n in before} == before
 
 
 # --- config wiring -----------------------------------------------------------------------------
