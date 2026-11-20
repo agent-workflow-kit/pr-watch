@@ -120,7 +120,7 @@ def test_first_poll_with_many_members_adds_silent_rows(store: Store, fake: FakeF
     assert res.candidates == {s["pr_id"] for s in snaps}
     args = fake.argvs("prs")
     assert len(args) == 1
-    assert "--host=github.com" in args[0] and "--author=me" in args[0]
+    assert any(x == "--host=github.com" for x in args[0]) and "--author=me" in args[0]
     assert "--state=open" in args[0] and "--limit=1000" in args[0]
     last = store.conn.execute("SELECT last_enumerated_at FROM hosts").fetchone()[0]
     assert last == format_ts(NOW)
@@ -253,7 +253,7 @@ def test_host_filter_and_other_hosts_untouched(store: Store, fake: FakeForgectl)
     fake.add(pr(1, host="gitlab.com"))
     run(store)
     assert [a for a in fake.argvs("prs")] and all(
-        "--host=github.com" in a for a in fake.argvs("prs")
+        any(x == "--host=github.com" for x in a) for a in fake.argvs("prs")
     )
     assert store.conn.execute("SELECT count(*) FROM sources").fetchone()[0] == 1
 
@@ -558,9 +558,9 @@ def test_partial_whoami_marks_failed_hosts_and_is_not_cached(
     fake.add(pr(1, host="gitlab.com"))
     fake.fail("whoami", "network_error", host="gitlab.com")
     res = run(store)
-    assert "gitlab.com" in res.host_list.failed
+    assert any(h == "gitlab.com" for h in res.host_list.failed)
     assert any(f.ref == "gitlab.com" for f in res.failures)
-    assert [a for a in fake.argvs("prs") if "--host=gitlab.com" in a] == []
+    assert [a for a in fake.argvs("prs") if any(x == "--host=gitlab.com" for x in a)] == []
     assert (
         store.conn.execute("SELECT count(*) FROM meta WHERE key = 'hosts_cache'").fetchone()[0] == 0
     )
@@ -799,7 +799,7 @@ def test_repo_restriction_lists_that_repo_and_its_host_query(
     assert len(fake.calls("whoami")) == 1
     argvs = fake.argvs("prs")
     assert len(argvs) == 2
-    assert any("--host=github.com" in a for a in argvs)
+    assert any(any(x == "--host=github.com" for x in a) for a in argvs)
     assert [a for a in argvs if f"--repo={REPO}" in a]
 
 
@@ -903,7 +903,7 @@ def test_a_failed_whoami_host_is_failed_not_skipped(store: Store, fake: FakeForg
     add_query(store, "mine+open;host=gitlab.com")
     fake.fail("whoami", "network_error", host="gitlab.com")
     res = run(store)
-    assert "gitlab.com" in res.host_list.failed
+    assert any(h == "gitlab.com" for h in res.host_list.failed)
     assert res.facts("gitlab.com").skipped is None
 
 
@@ -998,8 +998,8 @@ def test_restricted_poll_reports_only_the_restricted_hosts_whoami_problems(
     fake.add(pr(1))
     fake.fail("whoami", "network_error", host="gitlab.com")
     res = run(store, restrict_repo=REPO)
-    assert res.failures == [] and "gitlab.com" not in res.host_list.failed
-    assert "gitlab.com" not in res.hosts or res.hosts["gitlab.com"].skipped is None
+    assert res.failures == [] and not any(h == "gitlab.com" for h in res.host_list.failed)
+    assert not any(h == "gitlab.com" for h in res.hosts) or res.hosts["gitlab.com"].skipped is None
     assert not any(f.poll_exit for f in res.failures)
 
 
