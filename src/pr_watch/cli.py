@@ -217,7 +217,7 @@ READ_ONLY_COMMANDS = frozenset({"list", "show", "events", "export"})
 
 # One entry per command. A later issue replaces its stub with the real handler.
 HANDLERS: dict[str, Handler] = {
-    "watch add": _stub(18),  # TODO(#18): watch add
+    "watch add": lambda ctx, args: _watch_add(ctx, args),
     "watch remove": lambda ctx, args: _watch_remove(ctx, args),
     "label add": lambda ctx, args: _label_add(ctx, args),
     "label remove": lambda ctx, args: _label_remove(ctx, args),
@@ -248,6 +248,12 @@ def _store(ctx: Context) -> Store:
     if ctx.store is None:
         raise CliError("internal", "the state store is not open")
     return ctx.store
+
+
+def _watch_add(ctx: Context, args: argparse.Namespace) -> int:
+    from .watch_add import watch_add  # lazy: it imports this module (failures needs CliError)
+
+    return watch_add(ctx, args)
 
 
 def _remove_target(conn: Any, args: argparse.Namespace) -> tuple[str | None, str, str | None]:

@@ -1,0 +1,46 @@
+{
+  "baselined": false,
+  "changed": true,
+  "created": true,
+  "cursor": "CURSOR",
+  "events_emitted": 0,
+  "owner": "human:a",
+  "pr": {
+    "baselined": null,
+    "baselined_at": null,
+    "ci_head_sha": null,
+    "ci_stale": false,
+    "ci_state": null,
+    "ci_stuck": false,
+    "draft": null,
+    "failures": 0,
+    "head_sha": null,
+    "incomplete": [],
+    "incomplete_snapshots": 0,
+    "last_full_at": null,
+    "last_polled_at": null,
+    "pr": "github.com/example-org/widgets#7",
+    "pr_id": "PR_example_github_com_example-org_widgets_7",
+    "sources": [
+      "w-GOLDEN"
+    ],
+    "state": null,
+    "status": "active",
+    "terminal_at": null,
+    "terminal_kind": null
+  },
+  "watch": {
+    "created_at": "TS",
+    "enumerated_at": null,
+    "id": "w-GOLDEN",
+    "key": "PR_example_github_com_example-org_widgets_7",
+    "kind": "pr",
+    "labels": [],
+    "members": null,
+    "owners": [
+      "human:a"
+    ],
+    "pending_baseline": null,
+    "pr": "github.com/example-org/widgets#7"
+  }
+}
