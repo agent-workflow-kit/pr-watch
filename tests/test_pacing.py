@@ -761,6 +761,19 @@ def test_later_of_two_pauses_wins(store: Store, retry: float, expect: int) -> No
     assert row(store)["paused_until"] == format_ts(NOW + timedelta(minutes=expect))
 
 
+def test_later_finishing_poll_pause_beyond_an_hour_survives_the_merge(store: Store) -> None:
+    add_pr(store, 1)
+    other = NOW + timedelta(hours=1, minutes=5)  # written by a poll that finished later
+    _hosts_row(store, paused_until=format_ts(other))
+    res = empty()
+    facts(res, listings=0, rate_limited=True, retry_after=10.0, cancelled=True)
+    pacing = pc.Pacing(
+        NOW, pc.PollMode(), hosts={HOST: pc.HostPlanning(HOST, "github", 6, False, False, None)}
+    )
+    pc.finish_hosts(store, Config(), res, None, pacing, now=NOW)
+    assert row(store)["paused_until"] == format_ts(other)
+
+
 def test_unreachable_row_keeps_the_pass_open(store: Store) -> None:
     add_pr(store, 1, last_polled_at=format_ts(NOW))
     add_pr(store, 2, status="unreachable")

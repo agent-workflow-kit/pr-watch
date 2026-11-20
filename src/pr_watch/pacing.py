@@ -132,6 +132,15 @@ def active_pause(until: datetime | None, now: datetime) -> datetime | None:
     return until
 
 
+def concurrent_pause(until: datetime | None, now: datetime) -> datetime | None:
+    """A stored pause as seen by the in-transaction merge. A poll that finished later than this one
+    may have written a pause up to an hour past this poll's `now`, so up to two hours ahead is
+    kept; anything further is invalid (corrupt or clock-stepped) and is overwritten or cleared."""
+    if until is None or until <= now or until > now + 2 * MAX_PAUSE:
+        return None
+    return until
+
+
 def paused_hosts(conn: sqlite3.Connection, now: datetime) -> dict[str, datetime]:
     """Hosts paused at `now` and until when (persisted, so a later process honours it)."""
     out = {}
@@ -328,9 +337,9 @@ def _write_host(
             except ValueError:
                 seconds, step = table.host_pause(None, step)
             new = now + timedelta(seconds=seconds)
-            current = active_pause(paused_until, now)
+            current = concurrent_pause(paused_until, now)
             paused_until = new if current is None else max(new, current)
-        elif active_pause(paused_until, now) is None:
+        elif concurrent_pause(paused_until, now) is None:
             paused_until = None  # expired or invalid
             step = 0 if contacted else step  # a success resets the backoff
         low = row.low_water_until
