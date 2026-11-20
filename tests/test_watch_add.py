@@ -623,9 +623,9 @@ def test_a_baseline_committed_between_fetch_and_write_wins_and_the_snapshot_is_d
 def test_concurrent_adds_for_one_new_pr_store_one_baseline_in_real_processes(
     fake: FakeForgectl, store: Store, tmp_path: Path
 ) -> None:
-    """Two concurrent `watch add` processes (the poll is a stub here; the add + poll variant is
-    todo(#25)). The long `slow` makes both fetch before either writes; the assertions are on the
-    outcome only, so a slow machine cannot make the test flaky."""
+    """Two concurrent `watch add` processes (the add + poll variant is in tests/test_poll.py).
+    The long `slow` makes both fetch before either writes; the assertions are on the outcome
+    only, so a slow machine cannot make the test flaky."""
     fake.update(PR, state="merged", merged_at="2026-01-01T00:00:00Z", merge_commit_sha=sha(3))
     fake.slow("snapshot", 5.0)
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}

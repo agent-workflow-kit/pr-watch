@@ -13,7 +13,7 @@ poll:
   host_low_water: 100         # forgectl rate_limit.remaining below this: snapshot only what must be
   overlap: 60s                # subtracted from the host-time watermark of a per-PR repo scope (covers search index lag)
   hosts_ttl: 1h               # how long whoami's host list is cached
-  max_duration: 15m           # the cycle stops starting snapshots after this
+  max_duration: 15m           # the cycle stops starting snapshots after this (at least 1ms)
   max_snapshots: 40           # snapshots started per host and cycle; deferred ones keep their triggers (0 is unlimited)
 
 hosts: {}                     # per-host overrides: full_every and concurrency

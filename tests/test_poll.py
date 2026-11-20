@@ -282,11 +282,7 @@ def test_an_auth_failure_fails_the_host_and_exits_12_with_the_report(
     assert code == 12
     doc = json.loads(out)
     assert_valid("cli/poll", doc)
-    assert {"kind": "host", "ref": HOST, "code": "auth_required"} in doc["failed"] or {
-        "kind": "query",
-        "ref": HOST,
-        "code": "auth_required",
-    } in doc["failed"]
+    assert doc["failed"] == [{"kind": "host", "ref": HOST, "code": "auth_required"}]
     assert HOST in err and "auth_required" in err
     assert doc["hosts"][HOST]["errors"][0]["code"] == "auth_required"
     assert meta(store, "last_poll_finished_at") is None  # not exit 0

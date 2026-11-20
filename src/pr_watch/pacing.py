@@ -13,9 +13,12 @@ The poll command (#25) calls, in this order:
    plan). `HostPlan.concurrency` is the one source of the pool size (`Selection.concurrency`).
 3. `selection.choose_snapshots` and
    `snapshots.run_snapshots(out_of_time=time_budget(config, started=started))`.
-4. `finish_hosts(store, config, res, pool, pacing, now=...)`: host state (transaction 4) is written
-   after the host's cycle, each host in its own `BEGIN IMMEDIATE` that re-reads the row, so two
-   polls updating one host merge instead of overwriting.
+4. `finish_host(store, config, res, pool, pacing, host, now=...)` as each host's cycle ends: right
+   after enumeration for a host that runs no snapshot, and from the pool's `on_host_done` for the
+   others (host state, transaction 4, each host in its own `BEGIN IMMEDIATE` that re-reads the row,
+   so two polls updating one host merge instead of overwriting). A host is written once per poll;
+   `finish_hosts` writes the ones still open and returns every outcome. A rate limit of the whole
+   `whoami` call is `pause_hosts` (persisted at once, for every host the poll names).
 5. `finish_poll(...)` writes `meta.last_poll_finished_at` (transaction 5) when the rules allow.
 
 Judgment calls where the interface is silent (kept conservative):
