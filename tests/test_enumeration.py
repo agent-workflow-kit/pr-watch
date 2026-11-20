@@ -988,3 +988,50 @@ def test_extreme_watermark_is_treated_as_no_watermark(store: Store, fake: FakeFo
     store.conn.commit()
     run(store)
     assert "--updated-since=2026-10-02T09:59:00Z" in fake.argvs("prs")[0]
+
+
+def test_restricted_poll_reports_only_the_restricted_hosts_whoami_problems(
+    store: Store, fake: FakeForgectl
+) -> None:
+    fake.host("gitlab.com", me="user-1")
+    add_query(store)
+    fake.add(pr(1))
+    fake.fail("whoami", "network_error", host="gitlab.com")
+    res = run(store, restrict_repo=REPO)
+    assert res.failures == [] and "gitlab.com" not in res.host_list.failed
+    assert "gitlab.com" not in res.hosts or res.hosts["gitlab.com"].skipped is None
+    assert not any(f.poll_exit for f in res.failures)
+
+
+def test_restricted_poll_does_not_report_other_hosts_as_skipped(
+    store: Store, fake: FakeForgectl
+) -> None:
+    add_query(store, "mine+open;host=github.com;host=nowhere.example.test")
+    res = run(store, restrict_repo=REPO)
+    assert "nowhere.example.test" not in res.hosts
+
+
+def test_join_refuses_a_stored_row_of_another_host(store: Store) -> None:
+    add_query(store)
+    mine = pr(1)
+    add_pr_watch(store, mine)
+    foreign = en.Listed(
+        mine["pr_id"],
+        "gitlab.com/o/r#1",
+        "gitlab.com/o/r",
+        "gitlab.com",
+        "2026-10-02T10:00:00.000000Z",
+        "open",
+    )
+    assert en._join(store.conn, WATCH, foreign) is False
+    assert source(store, mine) is None
+    assert col(store, mine, "host") == HOST
+
+
+def test_first_listing_start_before_year_one_is_left_to_the_full_pass(
+    store: Store, fake: FakeForgectl
+) -> None:
+    # `first - overlap` is the operation that overflows; format_ts of a UTC value cannot.
+    per_pr(store, 1, "0001-01-01T00:00:00.000000Z")
+    res = run(store)
+    assert fake.calls("prs") == [] and res.failures == []

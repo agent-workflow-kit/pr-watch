@@ -343,11 +343,13 @@ def load_host_list(
     ttl_ms: int,
     result: EnumerationResult | None = None,
     log: Log | None = None,
+    restrict_host: str | None = None,
 ) -> tuple[HostList, EnumerationResult]:
     """Step 1: the host list from the cache (younger than `ttl_ms`) or `whoami`.
 
     A failed call reuses the stale cache with a warning; with no cache the list is unavailable
-    and the query watches are skipped this cycle."""
+    and the query watches are skipped this cycle. With `restrict_host` (a `--repo` poll) a partial
+    result reports only that host's errors."""
     res = result if result is not None else EnumerationResult(HostList((), frozenset(), False))
     cached = _read_cache(store.conn)
     if cached is not None:
@@ -359,7 +361,7 @@ def load_host_list(
     decision = table.decide(outcome, "whoami")
     effect = decision.effect
     if effect.commit or effect.use_result:
-        host_list = _from_whoami(store, outcome, decision, now, res)
+        host_list = _from_whoami(store, outcome, decision, now, res, restrict_host)
         res.host_list = host_list
         return host_list, res
     code = decision.code or "internal"
@@ -387,6 +389,7 @@ def _from_whoami(
     decision: table.Decision,
     now: datetime,
     res: EnumerationResult,
+    restrict_host: str | None = None,
 ) -> HostList:
     assert outcome.result is not None
     entries = _entries(outcome.result)
@@ -401,6 +404,8 @@ def _from_whoami(
             )
             host = err.get("host")
             ref = host if _valid_host(host) else None
+            if restrict_host is not None and ref is not None and ref != restrict_host:
+                continue  # a restricted poll reports only its repo's host
             if ref is not None:
                 failed.add(ref)
                 if one.effect.pause != "none" or one.effect.cancel_host:
@@ -525,8 +530,10 @@ def _foreign(conn: sqlite3.Connection, item: Listed) -> bool:
 def _join(conn: sqlite3.Connection, watch_id: str, item: Listed) -> bool:
     """Make the item a member (silently: no digest) or reset its `left_count`. True when the PR
     got a new source."""
-    exists = conn.execute("SELECT 1 FROM prs WHERE pr_id = ?", (item.pr_id,)).fetchone()
-    if exists is None:
+    row = conn.execute("SELECT host FROM prs WHERE pr_id = ?", (item.pr_id,)).fetchone()
+    if row is not None and row[0] != item.host:
+        return False  # the stored row is another host's PR: never joined by this listing
+    if row is None:
         conn.execute(
             "INSERT INTO prs (pr_id, pr, repo, host, listed_updated_at) VALUES (?, ?, ?, ?, ?)",
             (item.pr_id, item.pr, item.repo, item.host, item.updated_at),
@@ -747,7 +754,9 @@ def enumerate_scopes(
     if restrict_host is not None:
         queries = [q for q in queries if q.covers(restrict_host)]
     if queries and not _stopped(res, should_stop):
-        load_host_list(store, client, now=now, ttl_ms=ttl, result=res, log=log)
+        load_host_list(
+            store, client, now=now, ttl_ms=ttl, result=res, log=log, restrict_host=restrict_host
+        )
     plan = plan_repo_scopes(
         store,
         now=now,
@@ -759,7 +768,7 @@ def enumerate_scopes(
     by_host: dict[str, list[tuple[str, datetime, str | None]]] = {}
     for entry in plan:
         by_host.setdefault(entry[0].partition("/")[0], []).append(entry)
-    hosts_to_query = _query_hosts(res, queries)
+    hosts_to_query = _query_hosts(res, queries, restrict_host)
     if restrict_host is not None:
         hosts_to_query &= {restrict_host}
     for host in sorted({*hosts_to_query, *by_host}):
@@ -778,7 +787,9 @@ def enumerate_scopes(
     return res
 
 
-def _query_hosts(res: EnumerationResult, queries: list[QueryWatch]) -> set[str]:
+def _query_hosts(
+    res: EnumerationResult, queries: list[QueryWatch], restrict_host: str | None = None
+) -> set[str]:
     """The hosts to list (in scope, some query applies); records the skipped ones."""
     if not queries or not res.host_list.available:
         return set()
@@ -787,6 +798,8 @@ def _query_hosts(res: EnumerationResult, queries: list[QueryWatch]) -> set[str]:
     named: set[str] = set()
     for q in queries:
         named.update(q.hosts, (r.partition("/")[0] for r in q.repos))
+        if restrict_host is not None:
+            named &= {restrict_host}
         if not q.hosts and not q.repos:
             wanted.update(h for h, e in known.items() if e.in_scope)
     wanted.update(h for h in named if h in known and known[h].in_scope)
