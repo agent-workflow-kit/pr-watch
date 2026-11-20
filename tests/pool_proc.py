@@ -38,7 +38,7 @@ def main(state_dir: str, go: str) -> None:
         res = en.EnumerationResult(en.HostList((), frozenset(), True))
         out = sn.run_snapshots(
             store, client, Config(), chosen, res,
-            concurrency={plan.host: 2}, leases=Leases(store, timedelta(minutes=6)),
+            leases=Leases(store, timedelta(minutes=6)),
         )  # fmt: skip
         run = out.host("github.com")
         print(json.dumps({

@@ -72,7 +72,7 @@ class Task:
     group: str
     # the pool re-checks the trigger once it holds the lease (a concurrent poll may have
     # committed in between); a forced task (`--pr`, `--full`) is never skipped
-    # TODO(#23): --pr and --full callers must build forced Tasks (forced=True)
+    # (`choose_snapshots(force=True)` and `forced_pr_task` build them)
     forced: bool = False
     pass_started_at: datetime | None = None  # the pass in progress (not set on a limited host)
 
@@ -81,6 +81,8 @@ class Task:
 class Selection:
     tasks: dict[str, list[Task]] = field(default_factory=dict)
     deferred: dict[str, int] = field(default_factory=dict)
+    # workers per host: `HostPlan.concurrency` is the single source (the pool reads this)
+    concurrency: dict[str, int] = field(default_factory=dict)
 
     @property
     def total(self) -> int:
@@ -136,9 +138,11 @@ def choose_snapshots(
     now: datetime,
     pending_max_age_ms: int,
     only_pr_ids: Collection[str] | None = None,
+    force: bool = False,
 ) -> Selection:
     """The snapshots of this cycle, per host, in the order they start. `only_pr_ids` restricts
-    the candidates (a `--pr` or `--repo` poll)."""
+    the candidates (a `--repo` poll); `force` builds forced tasks (`--full`: the pool never skips
+    them on the post-lease re-check)."""
     buckets: dict[str, dict[str, list[tuple[tuple[str, str], str, str]]]] = {}
     for row in conn.execute(_ROWS):
         plan = plans.get(str(row[2]))
@@ -149,7 +153,7 @@ def choose_snapshots(
             buckets.setdefault(plan.host, {}).setdefault(group, []).append(
                 (_order(tuple(row)), str(row[0]), str(row[1]))
             )
-    out = Selection()
+    out = Selection(concurrency={host: plan.concurrency for host, plan in plans.items()})
     for host in sorted(buckets):
         plan = plans[host]
         by_group = buckets[host]
@@ -168,7 +172,7 @@ def choose_snapshots(
                 # every group keeps the pass start (not on a limited host), so the recheck
                 # under the lease can fall through to (e)
                 started = None if plan.limited else plan.pass_started_at
-                tasks.append(Task(pr_id, pr, host, group, pass_started_at=started))
+                tasks.append(Task(pr_id, pr, host, group, force, started))
         out.tasks[host] = tasks
         if eligible > len(tasks):
             out.deferred[host] = eligible - len(tasks)
@@ -188,3 +192,15 @@ def still_due(
         return False
     plan = HostPlan(task.host, 1, pass_started_at=task.pass_started_at)
     return _group(tuple(row), plan, now, pending_max_age_ms) is not None
+
+
+def forced_pr_task(conn: sqlite3.Connection, pr_id: str) -> Task | None:
+    """The forced task of a `--pr` poll, or None when the PR is not stored or is `merged` (a
+    merged PR is final: `polled: false`). Any other status snapshots, a terminal-closed row
+    included (the commit reactivates it when the PR is open)."""
+    row = conn.execute(
+        "SELECT pr, host, status, terminal_kind FROM prs WHERE pr_id = ?", (pr_id,)
+    ).fetchone()
+    if row is None or (row[2] == "terminal" and row[3] == "merged"):
+        return None
+    return Task(pr_id, str(row[0]), str(row[1]), "pr", forced=True)

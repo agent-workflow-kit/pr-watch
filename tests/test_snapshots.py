@@ -122,7 +122,7 @@ def cycle(
     res = res or en.EnumerationResult(en.HostList((), frozenset(), True))
     out = sn.run_snapshots(
         store, client or make_client(), cfg, chosen, res,
-        concurrency={plan.host: plan.concurrency}, leases=lease or leases(store),
+        leases=lease or leases(store),
         log=log, **kw,
     )  # fmt: skip
     return out, res
@@ -655,9 +655,7 @@ def test_a_task_whose_trigger_a_concurrent_poll_cleared_is_skipped(
     chosen = _choose(store)
     assert chosen.total == 1
     res = en.EnumerationResult(en.HostList((), frozenset(), True))
-    out = sn.run_snapshots(
-        store, make_client(), Config(), chosen, res, concurrency={HOST: 4}, leases=_Racy(store)
-    )
+    out = sn.run_snapshots(store, make_client(), Config(), chosen, res, leases=_Racy(store))
     assert out.host(HOST).snapshots == 0 and out.host(HOST).calls == 0
     assert len(fake.calls("snapshot")) == before and lease_count(store) == 0
     assert col(store, pr_id, "rev") == 1
@@ -668,9 +666,7 @@ def test_a_forced_task_is_never_skipped_by_the_recheck(store: Store, fake: FakeF
     chosen = _choose(store)
     chosen.tasks[HOST] = [dataclasses.replace(t, forced=True) for t in chosen.tasks[HOST]]
     res = en.EnumerationResult(en.HostList((), frozenset(), True))
-    out = sn.run_snapshots(
-        store, make_client(), Config(), chosen, res, concurrency={HOST: 4}, leases=_Racy(store)
-    )
+    out = sn.run_snapshots(store, make_client(), Config(), chosen, res, leases=_Racy(store))
     assert out.host(HOST).snapshots == 1 and col(store, pr_id, "rev") == 2
 
 
