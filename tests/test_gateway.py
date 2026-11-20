@@ -408,6 +408,30 @@ def shutdown_reset() -> Iterator[None]:
     gateway.allow_launches()  # the flag is process-wide: never leak it into another test
 
 
+def test_a_shutdown_kills_a_child_that_ignores_sigterm_after_the_grace(
+    reaper: Reaper, monkeypatch: pytest.MonkeyPatch, shutdown_reset: None, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(gateway, "SHUTDOWN_KILL_AFTER", 0.3)
+    ready = tmp_path / "trap-set"
+    results: list[gateway.Result] = []
+    # The shell creates `ready` once its trap is in place (the handshake), then ignores TERM.
+    script = f"trap '' TERM; : > {ready}; sleep 60 & wait"
+    thread = threading.Thread(target=lambda: results.append(sh(script, timeout=50)))
+    thread.start()
+    try:
+        end = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < end:
+            time.sleep(0.01)
+        assert ready.exists() and len(gateway.live_pids()) == 1
+        started = time.monotonic()
+        assert gateway.signal_live(signal.SIGTERM, refuse_new=True) == 1
+    finally:
+        thread.join(20)
+    assert not thread.is_alive()
+    assert time.monotonic() - started < 15  # not the call's 50 s deadline
+    assert results[0].returncode == -signal.SIGKILL and not results[0].timed_out
+
+
 def test_a_child_started_after_the_shutdown_is_refused(
     reaper: Reaper, shutdown_reset: None
 ) -> None:
