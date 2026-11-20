@@ -757,8 +757,18 @@ def _stderr_line(text: str) -> None:
     try:
         sys.stderr.write(text)
         sys.stderr.flush()
-    except (OSError, AttributeError):  # closed (fd 2 closed: `sys.stderr` is None)
-        pass  # nowhere left to report it
+    except (OSError, ValueError, AttributeError):  # closed (fd 2 closed: `sys.stderr` is None)
+        _silence_stderr()  # nowhere left to report it
+
+
+def _silence_stderr() -> None:
+    """A failed stderr write leaves the text in the stream's buffer (on Python 3.12 fd 2 can be
+    some other, unwritable descriptor, not None), so the interpreter's final flush fails again and
+    the exit code becomes 120. Swap in a sink so the shutdown flush is quiet."""
+    try:
+        sys.stderr = open(os.devnull, "w")  # noqa: SIM115 - kept open for the shutdown flush
+    except OSError:
+        pass
 
 
 def _output_failed() -> int:
