@@ -38,7 +38,9 @@ Judgment calls where the interface is silent (kept conservative):
 - A successful contact resets `pause_step` and clears an expired pause; a pause another poll set
   in the meantime (still in the future) is kept, and the later of two pauses wins.
 - Host without a known backend (no `whoami` this cycle and none stored): `github.com` is GitHub,
-  any other host gets the GitLab defaults (fewer workers).
+  any other host gets the GitLab defaults (fewer workers). A snapshot carries its backend, so a
+  host that only has per-PR watches (never asked by `whoami`) learns it from its first committed
+  snapshot and persists it; that cycle's plan and later reports use it.
 - `--pr` ignores low water (one explicit PR); a host pause still blocks it. A restricted poll
   never runs (e) or (f) work and never counts or ends a pass; it still persists a pause and a
   low-water reading, which are observations.
@@ -155,16 +157,21 @@ def paused_hosts(conn: sqlite3.Connection, now: datetime) -> dict[str, datetime]
 
 
 def backend_of(host: str, res: EnumerationResult, state: HostState | None) -> str:
-    for entry in res.host_list.hosts:
-        if entry.host == host and entry.backend is not None:
-            return entry.backend
+    known = _known_backend(host, res)
+    if known is not None:
+        return known
     if state is not None and state.backend is not None:
         return state.backend
     return "github" if host == "github.com" else "gitlab"
 
 
 def _known_backend(host: str, res: EnumerationResult) -> str | None:
-    return next((e.backend for e in res.host_list.hosts if e.host == host and e.backend), None)
+    """The backend `whoami` named, else the one a snapshot of the host carried this cycle."""
+    listed = next((e.backend for e in res.host_list.hosts if e.host == host and e.backend), None)
+    if listed is not None:
+        return listed
+    facts = res.hosts.get(host)
+    return None if facts is None else facts.backend
 
 
 @dataclass(frozen=True)
@@ -191,7 +198,7 @@ class Pacing:
 
 
 def _listed(facts: HostFacts | None) -> bool:
-    return facts is not None and (facts.queried or facts.listings > 0)
+    return facts is not None and facts.listings > 0  # a failed listing is not a listing
 
 
 def _blocked(facts: HostFacts | None, res: EnumerationResult, host: str) -> bool:

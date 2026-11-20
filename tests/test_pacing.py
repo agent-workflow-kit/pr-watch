@@ -801,13 +801,24 @@ def test_full_starts_a_pass_regardless_of_counter_and_overrides_stored_start(
     assert pacing.plans[HOST].pass_started_at == later
 
 
-def test_query_only_listing_counts(store: Store) -> None:
+def test_a_successful_query_listing_counts(store: Store) -> None:
     add_pr(store, 1)
     res = empty()
-    facts(res, listings=0, queried=True)
+    facts(res, listings=1, queried=True)
     _, finish = run(store, res)
     finish()
     assert row(store)["poll_count_since_full"] == 1
+
+
+def test_a_failed_listing_does_not_count_as_a_cycle(store: Store) -> None:
+    """`queried` is set before the call: only a listing that succeeded (`listings`) counts."""
+    add_pr(store, 1)
+    res = empty()
+    facts(res, listings=0, queried=True)
+    pacing, finish = run(store, res)
+    finish()
+    assert not pacing.hosts[HOST].counted
+    assert row(store)["poll_count_since_full"] == 0
 
 
 def test_unknown_backend_defaults(store: Store) -> None:

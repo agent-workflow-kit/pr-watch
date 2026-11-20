@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -19,6 +20,7 @@ import pytest
 
 from pr_watch import poller
 from pr_watch.cli import main
+from pr_watch.leases import ProcFs
 from pr_watch.state_dir import open_state_dir
 from pr_watch.store import Store, format_ts, open_store
 from tests.forgectl_support import FakeForgectl, new_pr, sha
@@ -449,6 +451,63 @@ def test_a_whoami_rate_limit_pause_is_clamped_to_an_hour(
     assert until <= datetime.now(UTC) + timedelta(hours=1, seconds=5)
 
 
+def test_a_whole_whoami_rate_limit_lists_no_host_even_one_missing_from_the_cache(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake.host(GL, me="user-1")
+    add_many(fake, 1)
+    other = new_pr(GL, "example-org/widgets", 2, updated_at="2026-10-02T10:30:00Z")
+    fake.add(other)
+    watch_query(capsys)
+    watch_pr(capsys, other["pr"])  # a per-PR scope on a host the cache does not hold
+    stale_cache(store, HOST)
+    envelope = {"error": {"code": "rate_limited", "message": "slow down", "retry_after": 90}}
+    fake.raw("whoami", stdout=json.dumps(envelope), exit=12)
+    baselines = calls(fake, "snapshot")  # `watch add` baselined the per-PR watch
+    _, doc = poll(capsys)
+    assert calls(fake, "prs") == 0 and calls(fake, "snapshot") == baselines  # nothing was called
+    assert doc["hosts"][GL]["paused_until"] is not None and not doc["hosts"][GL]["queried"]
+
+
+def test_a_whoami_rate_limit_pauses_stored_rows_and_hosts_that_only_have_prs(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The pause targets: the host list in use, the stored host rows, the hosts with PR rows."""
+    fake.host(GL, me="user-1")
+    add_many(fake, 1)
+    other = new_pr(GL, "example-org/widgets", 2, updated_at="2026-10-02T10:30:00Z")
+    fake.add(other)
+    watch_query(capsys)
+    watch_pr(capsys, other["pr"])  # GL: only a PR row, in neither the cache nor `hosts`
+    with store.transaction() as conn:
+        conn.execute("INSERT INTO hosts (host) VALUES ('stored.example.net')")
+    stale_cache(store, HOST)
+    envelope = {"error": {"code": "rate_limited", "message": "slow down", "retry_after": 90}}
+    fake.raw("whoami", stdout=json.dumps(envelope), exit=12)
+    poll(capsys)
+    for host in (HOST, GL, "stored.example.net"):
+        assert host_row(store, host)["paused_until"] is not None, host
+    assert host_row(store, "never.example.net") == {}
+
+
+def test_a_whoami_config_invalid_with_a_stale_cache_is_named_in_failed(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    add_many(fake, 1)
+    watch_query(capsys)
+    stale_cache(store, HOST)
+    envelope = {
+        "error": {"code": "config_invalid", "message": "bad", "details": {"key": "hosts.x"}}
+    }
+    fake.raw("whoami", stdout=json.dumps(envelope), exit=2)  # the call as a whole
+    baselines = calls(fake, "snapshot")
+    code, out, err = run(capsys, "--json", "poll")
+    doc = json.loads(out)
+    assert code == 12 and calls(fake, "snapshot") == baselines
+    assert doc["failed"] == [{"kind": "host", "ref": "whoami", "code": "config_invalid"}]
+    assert "cached host list is reused" not in err and "whoami" in err
+
+
 def test_forgectl_config_invalid_on_a_host_call_stops_the_poll_with_exit_12(
     fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -475,6 +534,55 @@ def test_max_duration_stops_new_snapshots_and_reports_truncated(
     _, doc = poll(capsys)
     assert doc["truncated"] and doc["deferred"] == 3 and doc["prs"]["snapshotted"] == 0
     assert calls(fake, "snapshot") == 0
+
+
+def test_a_cut_listing_then_max_duration_snapshots_the_cut_prs_next_cycle(
+    fake: FakeForgectl,
+    store: Store,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance criterion 3: an incomplete listing and a spent budget lose nothing."""
+    snaps = add_many(fake, 3)
+    watch_query(capsys)
+    cut = [True]
+    real = poller.ForgectlClient.prs
+
+    def prs(self: Any, **kw: Any) -> Any:
+        out = real(self, **kw)
+        if cut[0]:
+            assert out.result is not None
+            out.result["complete"] = False
+        return out
+
+    monkeypatch.setattr(poller.ForgectlClient, "prs", prs)
+    monkeypatch.setenv("PR_WATCH_POLL__MAX_DURATION", "1ms")
+    _, doc = poll(capsys)
+    assert doc["hosts"][HOST]["incomplete_listing"] and doc["truncated"]
+    assert doc["deferred"] == 3 and doc["prs"]["snapshotted"] == 0
+    assert all(col(store, s["pr_id"], "digest") is None for s in snaps)  # still unbaselined
+    cut[0] = False
+    monkeypatch.delenv("PR_WATCH_POLL__MAX_DURATION")
+    _, doc = poll(capsys)
+    assert doc["prs"]["snapshotted"] == 3 and not doc["truncated"] and doc["deferred"] == 0
+    assert all(col(store, s["pr_id"], "digest") is not None for s in snaps)
+
+
+def test_a_host_with_only_per_pr_watches_learns_its_backend_from_the_snapshot(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    host = "ghe.example.net"  # not github.com, and never asked by whoami (no query watch)
+    fake.host(host, backend="github", me="user-1")
+    snap = new_pr(
+        host, "example-org/widgets", 5, backend="github", updated_at="2026-10-02T10:30:00Z"
+    )
+    fake.add(snap)
+    watch_pr(capsys, snap["pr"])
+    fake.update(snap["pr"], updated_at=LATER)
+    _, doc = poll(capsys)
+    assert calls(fake, "whoami") == 0 and doc["hosts"][host]["snapshots"] == 1
+    assert host_row(store, host)["backend"] == "github"
+    assert doc["hosts"][host]["requests_estimate"] == 7  # not the GitLab 21 of an unknown host
 
 
 @pytest.mark.parametrize("value", ["0", "0s", "0ms"])
@@ -647,6 +755,137 @@ def test_prune_also_runs_after_a_poll_that_exits_12(
     assert meta(store, "last_prune_at") is not None  # an exit 12 poll still ran to its end
 
 
+@pytest.mark.parametrize("extra", [(), ("--full",)])
+def test_already_running_reports_no_deferred_truncated_or_full_pass(
+    extra: tuple[str, ...],
+    fake: FakeForgectl,
+    store: Store,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snaps = add_many(fake, 3)
+    watch_query(capsys)
+    poll(capsys)
+    for snap in snaps:
+        fake.update(snap["pr"], updated_at=LATER)
+        other = ProcFs().identity(1)  # a live poll of another process holds every lease
+        with store.transaction() as conn:
+            conn.execute(
+                "INSERT INTO leases VALUES (?, ?, ?, ?, ?)",
+                (snap["pr_id"], other.pid, other.start, other.boot_id,
+                 format_ts(datetime.now(UTC) + timedelta(minutes=30))),
+            )  # fmt: skip
+    monkeypatch.setenv("PR_WATCH_POLL__MAX_SNAPSHOTS", "1")  # would defer two
+    _, doc = poll(capsys, *extra)
+    assert doc["already_running"] is True and doc["prs"]["skipped_locked"] >= 1
+    assert doc["deferred"] == 0 and doc["truncated"] is False and doc["full_pass"] is False
+    assert doc["prs"]["snapshotted"] == 0 and doc["prs"]["incomplete"] == 0
+
+
+@pytest.mark.parametrize("failure", [sqlite3.OperationalError("disk I/O error"), OSError("EIO")])
+def test_a_housekeeping_failure_is_a_stderr_warning_and_one_json_document(
+    failure: Exception,
+    fake: FakeForgectl,
+    store: Store,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    add_many(fake, 1)
+    watch_query(capsys)
+
+    def boom(*args: Any, **kw: Any) -> Any:
+        raise failure
+
+    monkeypatch.setattr(poller.prune, "prune", boom)
+    code, out, err = run(capsys, "--json", "poll")
+    assert code == 0 and "housekeeping" in err
+    assert json.loads(out)["prs"]["snapshotted"] == 1  # exactly one document
+
+
+def signal_in_process(monkeypatch: pytest.MonkeyPatch, owner: Any, name: str, after: bool) -> None:
+    """Deliver SIGTERM to this process from inside `owner.name` (the poll's handler is live)."""
+    real = getattr(owner, name)
+
+    def wrapper(*args: Any, **kw: Any) -> Any:
+        if not after:
+            signal.raise_signal(signal.SIGTERM)
+        result = real(*args, **kw)
+        if after:
+            signal.raise_signal(signal.SIGTERM)
+        return result
+
+    monkeypatch.setattr(owner, name, wrapper)
+
+
+def test_a_signal_in_finish_hosts_exits_143_with_no_report_and_no_finished_stamp(
+    fake: FakeForgectl,
+    store: Store,
+    state_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    add_many(fake, 1)
+    watch_query(capsys)
+    signal_in_process(monkeypatch, poller.pc, "finish_hosts", after=True)
+    code, out, err = run(capsys, "--json", "poll")
+    assert code == 128 + signal.SIGTERM and out == "" and "Traceback" not in err
+    assert meta(store, "last_poll_finished_at") is None and meta(store, "last_prune_at") is None
+    ends = [r for r in log_records(state_dir) if r["event"] == "poll_end"]
+    assert len(ends) == 1 and ends[0]["interrupted"] is True
+
+
+def test_a_signal_in_finish_poll_exits_143_with_no_report(
+    fake: FakeForgectl,
+    store: Store,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    add_many(fake, 1)
+    watch_query(capsys)
+    signal_in_process(monkeypatch, poller.pc, "finish_poll", after=True)
+    code, out, _ = run(capsys, "--json", "poll")
+    assert code == 128 + signal.SIGTERM and out == ""
+    assert meta(store, "last_prune_at") is None
+
+
+def test_a_signal_after_the_report_skips_housekeeping_and_exits_143(
+    fake: FakeForgectl,
+    store: Store,
+    state_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    add_many(fake, 1)
+    watch_query(capsys)
+    signal_in_process(monkeypatch, poller, "_write_end", after=True)  # runs after the emit
+    code, out, _ = run(capsys, "--json", "poll")
+    assert code == 128 + signal.SIGTERM
+    assert json.loads(out)["prs"]["snapshotted"] == 1  # the report was already out
+    assert meta(store, "last_prune_at") is None  # and no prune started
+
+
+def test_a_signal_during_the_prune_stops_it_unstamped_and_exits_143(
+    fake: FakeForgectl,
+    store: Store,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    add_many(fake, 1)
+    watch_query(capsys)
+    seen: list[bool] = []
+    real = poller.prune.prune
+
+    def prune(*args: Any, should_stop: Any = None, **kw: Any) -> Any:
+        signal.raise_signal(signal.SIGTERM)  # arrives as the prune begins
+        seen.append(should_stop is not None and should_stop())
+        return real(*args, should_stop=should_stop, **kw)
+
+    monkeypatch.setattr(poller.prune, "prune", prune)
+    code, _, _ = run(capsys, "--json", "poll")
+    assert code == 128 + signal.SIGTERM and seen == [True]
+    assert meta(store, "last_prune_at") is None
+
+
 # --- output --------------------------------------------------------------------------------------
 
 
@@ -706,8 +945,8 @@ def test_golden_reports(
 # --- processes: concurrency and signals ----------------------------------------------------------
 
 
-def spawn(*argv: str) -> subprocess.Popen[str]:
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
+def spawn(*argv: str, env: dict[str, str] | None = None) -> subprocess.Popen[str]:
+    env = {**(os.environ if env is None else env), "PYTHONPATH": os.pathsep.join(sys.path)}
     return subprocess.Popen(
         [sys.executable, "-m", "pr_watch", "--json", *argv],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True,
@@ -731,6 +970,20 @@ def finish(proc: subprocess.Popen[str], timeout: float = 120.0) -> tuple[int, st
         proc.kill()
         out, err = proc.communicate()
     return proc.returncode, out, err
+
+
+def snapshots_overlapped(fake: FakeForgectl) -> bool:
+    """Two `snapshot` calls were both started before either ended (the order of the call log)."""
+    lines = [
+        json.loads(line)
+        for line in (fake.dir / "calls.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    ids = [r["id"] for r in lines if r["phase"] == "start" and "snapshot" in r["argv"]]
+    if len(ids) != 2:
+        return False
+    started = [i for i, r in enumerate(lines) if r["phase"] == "start" and r["id"] in ids]
+    ended = [i for i, r in enumerate(lines) if r["phase"] == "end" and r["id"] in ids]
+    return len(ended) == 2 and max(started) < min(ended)
 
 
 def test_two_concurrent_polls_the_second_reports_already_running(
@@ -757,17 +1010,22 @@ def test_two_concurrent_polls_the_second_reports_already_running(
     assert store.conn.execute("SELECT count(*) FROM leases").fetchone()[0] == 0
 
 
-def test_sigterm_mid_poll_exits_143_with_nothing_partial_and_no_leases(
-    fake: FakeForgectl, store: Store, state_dir: Path, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP])
+def test_a_stop_signal_mid_poll_exits_128_plus_it_with_nothing_partial_and_no_leases(
+    signum: signal.Signals,
+    fake: FakeForgectl,
+    store: Store,
+    state_dir: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     snap = add_many(fake, 2)[0]
     watch_query(capsys)
     fake.slow("snapshot", 60.0)
     proc = spawn("poll")
     wait_for_call(fake, "snapshot")
-    proc.send_signal(signal.SIGTERM)  # the exact process this test started
+    proc.send_signal(signum)  # the exact process this test started
     code, out, err = finish(proc, timeout=60)
-    assert code == 128 + signal.SIGTERM and out == ""
+    assert code == 128 + signum and out == ""
     assert "Traceback" not in err
     assert events(store) == [] and col(store, snap["pr_id"], "digest") is None
     assert store.conn.execute("SELECT count(*) FROM leases").fetchone()[0] == 0
@@ -785,7 +1043,7 @@ def test_a_concurrent_watch_add_and_poll_store_one_baseline(
     snap = pr(7)
     fake.add(snap)
     watch_query(capsys)
-    fake.slow("snapshot", 4.0)
+    fake.slow("snapshot", 10.0)  # both processes must be inside their snapshot call together
     procs = [
         spawn("poll"),
         spawn("watch", "add", snap["pr"], "--owner", "agent:b"),
@@ -793,6 +1051,69 @@ def test_a_concurrent_watch_add_and_poll_store_one_baseline(
     results = [finish(p) for p in procs]
     for code, _, err in results:
         assert code == 0, err
+    assert snapshots_overlapped(fake), "the two fetches never overlapped: the race was not run"
     assert store.conn.execute("SELECT count(*) FROM prs").fetchone()[0] == 1
     assert col(store, snap["pr_id"], "rev") == 1 and col(store, snap["pr_id"], "digest")
     assert events(store) == []
+
+
+def test_a_signal_during_the_version_preflight_exits_with_the_signal_not_tool_missing(
+    store: Store, tmp_path: Path
+) -> None:
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir()
+    ready = stub_dir / "ready"
+    stub = stub_dir / "forgectl"
+    stub.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys, time\n"
+        f"open({str(ready)!r}, 'w').write(str(os.getpid()))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    env = {**os.environ, "PATH": os.pathsep.join([str(stub_dir), os.environ["PATH"]])}
+    proc = spawn("poll", env=env)
+    try:
+        end = time.monotonic() + 60
+        while not ready.exists() and time.monotonic() < end:
+            time.sleep(0.05)
+        assert ready.exists(), "the stub forgectl never started"
+        stub_pid = int(ready.read_text())
+        proc.send_signal(signal.SIGTERM)  # the exact process this test started
+        code, out, err = finish(proc, timeout=60)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    assert code == 128 + signal.SIGTERM, (out, err)
+    assert out == "" and "tool_missing" not in err and "Traceback" not in err
+    end = time.monotonic() + 15
+    while Path(f"/proc/{stub_pid}").exists() and time.monotonic() < end:
+        time.sleep(0.05)
+    state = Path(f"/proc/{stub_pid}/stat")
+    assert not state.exists() or state.read_text().rsplit(")", 1)[1].split()[0] in ("Z", "X")
+
+
+def test_a_signal_in_enumeration_keeps_the_pause_learned_and_counts_no_failure(
+    fake: FakeForgectl, store: Store, state_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake.host(GL, me="user-1")
+    fake.add(pr(1))
+    fake.add(new_pr(GL, "example-org/widgets", 2, updated_at="2026-10-02T10:30:00Z"))
+    watch_query(capsys)
+    fake.rate_limited("prs", retry_after=300, host=HOST)  # listed first (host order)
+    fake.slow("prs", 60.0, host=GL)
+    proc = spawn("poll")
+    end = time.monotonic() + 60
+    while len(fake.calls("prs")) < 2 and time.monotonic() < end:  # the GL listing has begun
+        time.sleep(0.05)
+    assert len(fake.calls("prs")) == 2
+    proc.send_signal(signal.SIGTERM)  # the exact process this test started
+    code, out, err = finish(proc, timeout=60)
+    assert code == 128 + signal.SIGTERM and out == "", err
+    assert host_row(store, HOST)["paused_until"] is not None  # the pause survived the signal
+    records = log_records(state_dir)
+    ends = [r for r in records if r["event"] == "poll_end"]
+    assert len(ends) == 1 and ends[0]["interrupted"] is True and ends[0]["errors"] == 0
+    assert not [r for r in records if r["event"] == "host_failed" and r["host"] == GL]

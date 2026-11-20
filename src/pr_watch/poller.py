@@ -21,7 +21,14 @@ Signals. SIGTERM, SIGINT and SIGHUP set a stop flag (`_Signals`) and SIGTERM the
 groups the poll started (`gateway.signal_live`); the stages poll the flag, so nothing more is
 started, nothing in flight is committed, the pool releases its leases, `poll_end` carries
 `interrupted: true` and the exit is 128 plus the number, with no report. The handlers are
-restored afterwards. A forgectl child that exits 128+N while the flag is clear is an interrupted PR
+restored afterwards. After the signal the gateway refuses new forgectl launches and signals one
+that was being started (`gateway.signal_live(refuse_new=True)`; `allow_launches` on exit), so the
+poll never waits out a call's timeout.
+A signal ends the poll at the next check wherever it lands: a forgectl failure of the preflight or
+of the enumeration or the pool (a child killed by it, a refused launch) is the signal's exit, never
+the exit 12 envelope; a signal during `finish_hosts`, `finish_poll` or housekeeping is the same
+exit 128 plus the number (no report if it came before the report; the prune stops between batches
+and stamps nothing). A forgectl child that exits 128+N while the flag is clear is an interrupted PR
 (`failures`); the flag is what tells the two apart.
 
 Judgment calls where the interface is silent (kept conservative):
@@ -42,7 +49,8 @@ Judgment calls where the interface is silent (kept conservative):
   7 or 21; `hosts.<h>.errors` holds the listing and whole-host errors (`pr` null), per-PR
   failures are in `failed[]` only.
 - With `already_running` every counter but `prs.skipped_locked` is zero, `prs.incomplete`
-  included (the schema says only `skipped_locked` can be non-zero).
+  and `deferred` included, and `truncated` and `full_pass` are false (the schema says only
+  `skipped_locked` can be non-zero).
 - Housekeeping runs at the end of any poll that was not interrupted, when `last_prune_at` is
   missing, unreadable, in the future or at least a day old. A failure of it never changes the
   poll's result (one warning line on stderr).
@@ -54,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import signal
+import sqlite3
 import threading
 import time
 from collections.abc import Iterable
@@ -100,6 +109,7 @@ class _Signals:
         self._saved: dict[int, Any] = {}
 
     def __enter__(self) -> _Signals:
+        gateway.allow_launches()
         if threading.current_thread() is threading.main_thread():
             for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
                 self._saved[number] = signal.signal(number, self._handle)
@@ -109,14 +119,20 @@ class _Signals:
         for number, old in self._saved.items():
             signal.signal(number, old)
         self._saved.clear()
+        gateway.allow_launches()
 
     def _handle(self, number: int, frame: FrameType | None) -> None:
         if self.signum is None:
             self.signum = number
-        gateway.signal_live(signal.SIGTERM)
+        gateway.signal_live(signal.SIGTERM, refuse_new=True)
 
     def stopped(self) -> bool:
         return self.signum is not None
+
+
+class _Stopped(Exception):
+    """The poll was signalled: unwind to `poll_command`, which returns 128 plus the number (no
+    envelope, no report). Raised where a forgectl failure is really the signal's doing."""
 
 
 # --- the run -----------------------------------------------------------------------------------
@@ -166,12 +182,21 @@ class _Run:
         return datetime.now(UTC)
 
 
-def _preflight(ctx: Context) -> tuple[ForgectlClient, ToolVersion]:
+def _tool_failed(run: _Run, exc: ToolError) -> Exception:
+    """What a `ToolError` on the poll path ends the poll with: the signal's exit when pr-watch was
+    signalled (its child was killed by the same signal, or a launch was refused), else the
+    `tool_missing` / `tool_too_old` envelope."""
+    if run.sig.stopped():
+        return _Stopped()
+    return to_cli_error(decide_tool(exc))
+
+
+def _preflight(run: _Run) -> tuple[ForgectlClient, ToolVersion]:
     try:
-        client = ForgectlClient.from_config(ctx.loaded.config.forgectl)
+        client = ForgectlClient.from_config(run.ctx.loaded.config.forgectl)
         return client, client.version()
     except ToolError as exc:
-        raise to_cli_error(decide_tool(exc)) from None
+        raise _tool_failed(run, exc) from None
 
 
 def _resolve_pr(store: Store, args: argparse.Namespace) -> tuple[str, str]:
@@ -205,12 +230,28 @@ def _enumerate(run: _Run, client: ForgectlClient, paused: dict[str, datetime]) -
             paused_hosts=set(paused), restrict_repo=args.repo, should_stop=run.sig.stopped,
         )  # fmt: skip
     except ToolError as exc:
-        raise to_cli_error(decide_tool(exc)) from None
-    if run.res.whoami_rate_limited and not run.res.interrupted:
+        raise _tool_failed(run, exc) from None
+    if run.res.whoami_rate_limited:  # persisted even when a signal ended the enumeration
         pause = pc.pause_hosts(
             run.store, _known_hosts(run), run.res.whoami_retry_after, now=run.now()
         )
         paused.update(pause)
+
+
+def _stop_code(run: _Run) -> int:
+    return 128 + (run.sig.signum or signal.SIGTERM)
+
+
+def _persist_listing_pauses(run: _Run, paused: dict[str, datetime]) -> None:
+    """A signal ended the enumeration: a host whose listing was rate limited before it has earned
+    its pause, so it is written now (`pacing.finish_host`) like any host whose work ended."""
+    limited = sorted(h for h, f in run.res.hosts.items() if f.rate_limited)
+    if not limited:
+        return
+    _plan(run, paused)
+    assert run.pacing is not None
+    for host in limited:
+        pc.finish_host(run.store, run.config, run.res, None, run.pacing, host, now=run.now())
 
 
 def _plan(run: _Run, paused: dict[str, datetime]) -> None:
@@ -340,7 +381,7 @@ def build_report(run: _Run) -> dict[str, Any]:
     """The poll report (schemas/cli/poll.json)."""
     pool = run.pool or PoolResult()
     already = pool.already_running
-    truncated = pool.truncated or run.selection.total_deferred > 0
+    truncated = not already and (pool.truncated or run.selection.total_deferred > 0)
     hosts = {h: _host_entry(run, h) for h in _host_names(run)}
     report: dict[str, Any] = {
         "already_running": already,
@@ -358,9 +399,9 @@ def build_report(run: _Run) -> dict[str, Any]:
         "events": _events_by_type(pool),
         "hooks": {"run": 0, "skipped": 0, "failed": 0},  # TODO(#28): hook counts
         "failed": _failed(run.res),
-        "full_pass": any(o.full_pass for o in run.outcomes.values()),
+        "full_pass": not already and any(o.full_pass for o in run.outcomes.values()),
         "truncated": truncated,
-        "deferred": run.selection.total_deferred + pool.deferred,
+        "deferred": 0 if already else run.selection.total_deferred + pool.deferred,
     }
     if run.args.pr is not None:
         report["polled"] = run.pr_task is not None and any(
@@ -409,8 +450,11 @@ def _housekeeping(run: _Run) -> None:
         now = run.now()
         if last is not None and last <= now < last + PRUNE_EVERY:
             return
-        prune.prune(store, now, config.retention.events, config.expiry.after_terminal)
-    except StoreError:
+        prune.prune(
+            store, now, config.retention.events, config.expiry.after_terminal,
+            should_stop=run.sig.stopped,
+        )  # fmt: skip
+    except (StoreError, sqlite3.Error, OSError):
         _stderr_line(f"{PROG}: warning: housekeeping (prune) failed; it runs again next poll\n")
 
 
@@ -462,6 +506,8 @@ def poll_command(ctx: Context, args: argparse.Namespace) -> int:
         run = _Run(ctx, args, store, ctx.loaded.config, sig, datetime.now(UTC), time.monotonic())
         try:
             return _poll(run)
+        except _Stopped:
+            return _stop_code(run)
         finally:
             _write_end(run, None)  # only reached unwritten on an error or an interruption
 
@@ -471,7 +517,7 @@ def _poll(run: _Run) -> int:
     if args.pr is not None:
         pr_id, run.pr_host = _resolve_pr(store, args)
         run.pr_task = forced_pr_task(store.conn, pr_id)
-    client, run.version = _preflight(ctx)
+    client, run.version = _preflight(run)
     scope = (
         None
         if args.pr is None and args.repo is None
@@ -490,23 +536,30 @@ def _poll(run: _Run) -> int:
     if args.pr is None:
         _enumerate(run, client, paused)
     if run.interrupted:
-        return 128 + (run.sig.signum or signal.SIGTERM)
+        _persist_listing_pauses(run, paused)
+        return _stop_code(run)
     _plan(run, paused)
     _finish_idle_hosts(run)
     if run.selection.total and not run.res.stop_poll:
         _snapshot(run, client)
         assert run.pool is not None
+        if run.interrupted:  # before the tool error: a child killed by the signal is not one
+            return _stop_code(run)
         if run.pool.tool_error is not None:
             raise to_cli_error(decide_tool(run.pool.tool_error))
     if run.interrupted:
-        return 128 + (run.sig.signum or signal.SIGTERM)
+        return _stop_code(run)
     assert run.pacing is not None
     run.outcomes = pc.finish_hosts(store, run.config, run.res, run.pool, run.pacing, now=run.now())
+    if run.interrupted:  # a signal during `finish_hosts`: nothing more is written
+        return _stop_code(run)
     exit_code = 12 if run.res.stop_poll or any(f.poll_exit == 12 for f in run.res.failures) else 0
     pc.finish_poll(
         store, run.res, run.pool, now=run.now(), restricted=run.restricted,
-        exit_ok=exit_code == 0, interrupted=False,
+        exit_ok=exit_code == 0, interrupted=run.interrupted,
     )  # fmt: skip
+    if run.interrupted:  # a signal during `finish_poll`: no report
+        return _stop_code(run)
     report = build_report(run)
     _host_summaries(run, report)
     _stderr_lines(run, exit_code)
@@ -514,5 +567,8 @@ def _poll(run: _Run) -> int:
     # TODO(#28): run the on-<event> hooks (queued after each PR's commit) and post-poll here, with
     # `args.no_hooks` and `args.hook`; fill `report["hooks"]` before it is printed.
     _write_end(run, report)
-    _housekeeping(run)
+    if not run.sig.stopped():
+        _housekeeping(run)
+    if run.sig.stopped():  # a signal after the report: the exit is still the signal's
+        return _stop_code(run)
     return exit_code

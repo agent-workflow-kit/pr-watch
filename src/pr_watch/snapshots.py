@@ -203,9 +203,19 @@ def _local(decision: table.Decision) -> _Job:
 
 
 def _work(
-    client: ForgectlClient, task: Task, start: RowStart, now: datetime, forced_for: ForcedFor | None
+    client: ForgectlClient,
+    task: Task,
+    start: RowStart,
+    now: datetime,
+    forced_for: ForcedFor | None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> _Job:
-    """One snapshot call and its plan. Never raises: a failure is a decision."""
+    """One snapshot call and its plan. Never raises: a failure is a decision. After a signal no
+    follow-up call (`show`, `compare`) is started: the pool discards the result anyway."""
+
+    def stopped() -> bool:
+        return should_stop is not None and should_stop()
+
     try:
         outcome = client.snapshot(parse_pr(start.state.pr))
     except ToolError as exc:
@@ -213,6 +223,8 @@ def _work(
     except Exception:
         return _local(table.decide_code("internal", None, "pr"))
     decision = table.decide(outcome, "pr")
+    if stopped():
+        return _local(table.decision_for("interrupted", "pr"))
     if decision.effect.fallback_show:
         return _fallback(client, start, now, decision)
     if not decision.effect.commit or outcome.result is None:
@@ -222,7 +234,7 @@ def _work(
         updated = parse_stamp(snap.get("updated_at"))
         if updated is None:
             return _Job(outcome, table.decision_for("contract", "pr"))
-        forced = forced_for(start) if forced_for is not None else None
+        forced = forced_for(start) if forced_for is not None and not stopped() else None
         plan = plan_snapshot(
             start.state,
             snap,
@@ -472,8 +484,9 @@ class _Pool:
                     self._release_lease(lease)
                     continue
                 future = executor.submit(
-                    _work, self.client, task, start, self.clock(), self.forced_for
-                )
+                    _work, self.client, task, start, self.clock(), self.forced_for,
+                    self.should_stop,
+                )  # fmt: skip
             except BaseException:
                 self._release_lease(lease)  # not in `host.entries` yet: `_release_all` misses it
                 raise
@@ -548,7 +561,11 @@ class _Pool:
             self.halt = True
             return
         if job.outcome is not None and job.outcome.result is not None:
-            note_rate(self.res.facts(host.name), job.outcome.result)
+            facts = self.res.facts(host.name)
+            note_rate(facts, job.outcome.result)
+            backend = job.outcome.result.get("backend")
+            if backend in ("github", "gitlab"):
+                facts.backend = backend  # a host that only has per-PR watches learns it here
         if job.prepared is not None:
             self._commit(host, entry, job.prepared)
         else:

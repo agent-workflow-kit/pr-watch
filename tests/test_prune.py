@@ -266,6 +266,33 @@ def test_batches_are_separate_transactions(store: Store, monkeypatch: pytest.Mon
     assert seen == [False, False, False]  # 2+2+1, none nested inside a transaction
 
 
+def test_a_stop_flag_ends_prune_between_batches_and_stamps_nothing(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(prune_mod, "EVENT_BATCH", 2)
+    for _ in range(7):
+        add_event(store, OLD)
+    batches: list[int] = []
+    real = prune_mod._delete_event_batch
+
+    def counted(s: Store, cutoff: str) -> int:
+        batches.append(1)
+        return real(s, cutoff)
+
+    monkeypatch.setattr(prune_mod, "_delete_event_batch", counted)
+    result = prune_mod.prune(store, NOW, "30d", "7d", should_stop=lambda: len(batches) >= 1)
+    assert len(batches) == 1 and result.events_deleted == 2  # stopped after the first batch
+    assert count(store, "events") == 5 and meta(store, "last_prune_at") is None
+    assert meta(store, "pruned_through_seq") == "2"  # what was deleted is consistent
+
+
+def test_a_stop_flag_set_before_prune_starts_does_nothing(store: Store) -> None:
+    add_event(store, OLD)
+    result = prune_mod.prune(store, NOW, "30d", "7d", should_stop=lambda: True)
+    assert result == prune_mod.PruneResult() and count(store, "events") == 1
+    assert meta(store, "last_prune_at") is None
+
+
 def test_an_event_appended_between_batches_is_never_lost(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:

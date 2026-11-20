@@ -8,7 +8,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -400,6 +400,50 @@ def test_signal_live_terminates_running_children_and_the_calls_return(reaper: Re
     assert not thread.is_alive()
     assert results[0].returncode == -signal.SIGTERM and not results[0].timed_out
     assert gateway.signal_live(signal.SIGTERM) == 0  # nothing live, nothing signalled
+
+
+@pytest.fixture
+def shutdown_reset() -> Iterator[None]:
+    yield
+    gateway.allow_launches()  # the flag is process-wide: never leak it into another test
+
+
+def test_a_child_started_after_the_shutdown_is_refused(
+    reaper: Reaper, shutdown_reset: None
+) -> None:
+    assert gateway.signal_live(signal.SIGTERM, refuse_new=True) == 0
+    with pytest.raises(gateway.LaunchError, match="shutting down"):
+        sh("sleep 30", timeout=30)
+    gateway.allow_launches()
+    assert sh("exit 3").returncode == 3  # launches work again once the shutdown is over
+
+
+def test_a_child_between_popen_and_registration_is_signalled_by_the_shutdown(
+    reaper: Reaper, monkeypatch: pytest.MonkeyPatch, shutdown_reset: None
+) -> None:
+    """The window of a worker: Popen returned, `_register` not yet run, the signal arrives."""
+    reached, proceed = threading.Event(), threading.Event()
+    real_register = gateway._register
+
+    def paused_register(child: Any) -> None:
+        reached.set()
+        assert proceed.wait(30)
+        real_register(child)
+
+    monkeypatch.setattr(gateway, "_register", paused_register)
+    results: list[gateway.Result] = []
+    thread = threading.Thread(target=lambda: results.append(sh("sleep 60", timeout=50)))
+    thread.start()
+    try:
+        assert reached.wait(30)
+        assert gateway.signal_live(signal.SIGTERM, refuse_new=True) == 0  # nothing registered yet
+        proceed.set()
+    finally:
+        proceed.set()
+        thread.join(30)
+    assert not thread.is_alive()
+    assert results[0].returncode == -signal.SIGTERM and not results[0].timed_out
+    assert results[0].elapsed < 20
 
 
 def _unregistered_child(reaper: Reaper, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, list[int]]:
