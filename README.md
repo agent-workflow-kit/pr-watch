@@ -29,7 +29,7 @@ Finalized in [docs/interface.md](docs/interface.md).
 - `pr-watch watch remove (<pr> | --mine --open ...) [--owner <tool>]`
 - `pr-watch poll [--pr <ref>] [--repo <id>] [--full] [--no-hooks] [--hook NAME=CMD]`
 - `pr-watch list`, `show <pr>`, `events [--label k=v]... [--pr <ref>]... [--type T]... [--since <cursor>] [--limit N]`
-- `pr-watch label add|remove <pr|--watch ID> k=v... [--owner O]`, `prune [--dry-run]`, `cron install|uninstall`
+- `pr-watch label add|remove <pr|--watch ID> k=v... [--owner O]`, `prune [--dry-run]`, `cron install|uninstall [--dry-run]`
 - `pr-watch export [--since D] [--label k=v]... [--type T]... [--pr <ref>]...`
 
 All commands take `--json`. Exit codes: 0 success, 2 usage, 10 not found, 12 failed (host failing, forgectl missing or too old), 20 refused (a forgectl refusal passed through).

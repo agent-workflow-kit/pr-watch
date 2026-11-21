@@ -194,9 +194,9 @@ def test_unknown_flag_is_a_usage_error_everywhere(
 def test_flags_pr_watch_does_not_have_are_rejected(
     flag: str, stubs: list[tuple[Context, Any]], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # --dry-run exists on prune only.
+    # --dry-run exists on prune and cron install|uninstall only.
     for name, argv in VALID.items():
-        if name == "prune" and flag == "--dry-run":
+        if name in ("prune", "cron install", "cron uninstall") and flag == "--dry-run":
             continue
         code, out, _ = run(capsys, "--json", *argv, flag)
         assert code == 2, name
