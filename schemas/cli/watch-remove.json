@@ -45,13 +45,13 @@
       "oneOf": [
         {
           "type": "string",
-          "maxLength": 256
+          "maxLength": 4096
         },
         {
           "type": "null"
         }
       ],
-      "description": "The resolved reference (canonical pr for a per-PR remove, the watch key for a query remove, null when nothing resolved), so a typo or a stale name is visible."
+      "description": "The resolved reference (canonical pr for a per-PR remove, the watch key for a query remove, null when nothing resolved), so a typo or a stale name is visible. Up to 4096 characters: a query watch key or a stored pr."
     }
   },
   "additionalProperties": false,

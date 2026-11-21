@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "config_invalid",
+    "message": "config.yaml: poll.interval_hint: not an accepted interval",
+    "reason": null,
+    "details": {
+      "key": "poll.interval_hint",
+      "source": "config.yaml"
+    }
+  }
+}

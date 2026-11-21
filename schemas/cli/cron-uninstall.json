@@ -9,11 +9,31 @@
     },
     "changed": {
       "type": "boolean"
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "block": {
+      "description": "The block's lines that a real run removes (from the start line to the end line); null when there is no block.",
+      "oneOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
   "required": [
     "installed",
-    "changed"
-  ]
+    "changed",
+    "dry_run",
+    "block"
+  ],
+  "description": "dry_run is true for --dry-run: nothing was written and changed is what a real run would do. block holds the lines of the removed block (null when there was none)."
 }

@@ -253,6 +253,108 @@
           ]
         },
         "event": {
+          "const": "events_dropped"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 256,
+          "x-untrusted": true
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reasons": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z_]{1,64}$"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "level",
+        "event",
+        "pr_id",
+        "pr",
+        "count",
+        "reasons"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "event": {
+          "const": "labels_capped"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 256,
+          "x-untrusted": true
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "kept": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "ts",
+        "level",
+        "event",
+        "pr_id",
+        "pr",
+        "kept",
+        "total"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "ts": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "event": {
           "const": "host_summary"
         },
         "message": {
@@ -491,9 +593,7 @@
         "ts",
         "level",
         "event",
-        "skipped",
-        "first_event_id",
-        "last_event_id"
+        "skipped"
       ]
     },
     {

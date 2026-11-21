@@ -1,0 +1,5 @@
+# my backups
+MAILTO=me@example.invalid
+SHELL=/bin/sh
+0 3 * * * /usr/local/bin/backup --all
+@reboot /usr/local/bin/hello

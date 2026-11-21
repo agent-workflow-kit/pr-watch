@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "pr-watch/cli/cron-install.json",
   "title": "cron install --json",
-  "description": "lines are the managed block's lines as written. replaced is true when a block existed and was replaced; changed is true when the crontab text changed (an identical re-install is replaced true, changed false). previous_every is null when the old first line had no every=. warnings names a pr-watch poll line outside the block.",
+  "description": "lines are the managed block's lines as written. replaced is true when a block existed and was replaced; changed is true when the crontab text changed (an identical re-install is replaced true, changed false). previous_every is null when the old first line had no every=. warnings names a pr-watch poll line outside the block. dry_run is true for --dry-run: nothing was written and changed is what a real run would do (changed, block and the other members are computed by the same code). block is the block that would be written (null when nothing changes).",
   "type": "object",
   "properties": {
     "installed": {
@@ -40,6 +40,23 @@
         "type": "string",
         "maxLength": 1024
       }
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "block": {
+      "description": "The block's lines that a real run would write (the same as lines); null when the crontab would not change.",
+      "oneOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -50,6 +67,8 @@
     "replaced",
     "previous_every",
     "lines",
-    "warnings"
+    "warnings",
+    "dry_run",
+    "block"
   ]
 }

@@ -1,0 +1,23 @@
+{
+  "baselined": false,
+  "changed": true,
+  "created": true,
+  "cursor": "CURSOR",
+  "events_emitted": 0,
+  "owner": "human:a",
+  "pr": null,
+  "watch": {
+    "created_at": "TS",
+    "enumerated_at": null,
+    "id": "w-GOLDEN",
+    "key": "mine+open;host=github.com",
+    "kind": "query",
+    "labels": [],
+    "members": 0,
+    "owners": [
+      "human:a"
+    ],
+    "pending_baseline": 0,
+    "pr": null
+  }
+}

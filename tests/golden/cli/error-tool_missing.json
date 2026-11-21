@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "tool_missing",
+    "message": "forgectl not found",
+    "reason": null,
+    "details": {
+      "install": "pip x"
+    }
+  }
+}

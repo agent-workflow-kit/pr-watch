@@ -1,0 +1,22 @@
+{
+  "changed": true,
+  "owner": "human:a",
+  "prs_dropped": 0,
+  "reason": null,
+  "reference": "github.com/o/r#1",
+  "watch": {
+    "created_at": "TS",
+    "enumerated_at": null,
+    "id": "w-GOLDEN",
+    "key": "P1",
+    "kind": "pr",
+    "labels": [],
+    "members": null,
+    "owners": [
+      "agent:b"
+    ],
+    "pending_baseline": null,
+    "pr": "github.com/o/r#1"
+  },
+  "watch_ended": false
+}

@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "store_too_new",
+    "message": "database is from a newer version",
+    "reason": null
+  }
+}

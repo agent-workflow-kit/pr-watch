@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # docs/plan.md module map (stage in the comment). Later modules are stubs until their issue.
 MODULES = [
     "gateway", "config", "cli",  # stage 0
-    "refs", "forgectl_client",  # stage 1
+    "refs", "forgectl_client", "failures",  # stage 1
     "store", "watches",  # stage 2
     "digest", "diff",  # stage 3
     "poller",  # stage 4
@@ -39,7 +39,7 @@ def test_every_module_of_the_map_imports(module: str) -> None:
 
 def test_console_script_is_declared() -> None:
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'pr-watch = "pr_watch.cli:main"' in text
+    assert 'pr-watch = "pr_watch._entry:main"' in text
 
 
 def test_module_entry_point_runs_and_reports_version() -> None:
@@ -67,7 +67,7 @@ def test_installed_console_script_runs() -> None:
 
 def test_console_script_entry_point_is_registered() -> None:
     eps = importlib.metadata.entry_points(group="console_scripts")
-    assert {ep.name: ep.value for ep in eps}.get("pr-watch") == "pr_watch.cli:main"
+    assert {ep.name: ep.value for ep in eps}.get("pr-watch") == "pr_watch._entry:main"
 
 
 def test_version_output_matches_pyproject() -> None:
@@ -143,11 +143,23 @@ def test_tmpdir_points_into_tmp(tmp_path: Path) -> None:
 
 @pytest.mark.expect_guard_hit
 @pytest.mark.parametrize("tool", ["forgectl", "crontab"])
-def test_stubs_are_unreachable_by_name_and_exit_99(tool: str, sandbox_bin: Path) -> None:
-    for argv in ([tool, "-l"], [str(sandbox_bin / tool), "-l"]):
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=15, check=False)
-        assert proc.returncode == GUARD_EXIT
-        assert "tests must not run the real" in proc.stderr
+def test_guard_stubs_exit_99_by_absolute_path(tool: str, sandbox_bin: Path) -> None:
+    proc = subprocess.run(
+        [str(sandbox_bin / tool), "-l"], capture_output=True, text=True, timeout=15, check=False
+    )
+    assert proc.returncode == GUARD_EXIT
+    assert "tests must not run the real" in proc.stderr
+
+
+def test_forgectl_by_name_is_the_fake_and_leaves_no_stub_hit(sandbox_bin: Path) -> None:
+    # tests/fakebin/forgectl shadows the stub: with no scenario it refuses (98), and the stub's
+    # hit log stays empty, so the test needs no `expect_guard_hit`
+    proc = subprocess.run(
+        ["forgectl", "-l"], capture_output=True, text=True, timeout=15, check=False
+    )
+    assert proc.returncode == 98
+    assert "fake-forgectl: no scenario" in proc.stderr
+    assert (sandbox_bin / "hits.log").read_text() == ""
 
 
 def _fake_real_crontab(tmp_path: Path) -> Path:
@@ -176,6 +188,60 @@ def test_explicit_env_path_cannot_reach_a_real_crontab(tmp_path: Path) -> None:
     env = {"PATH": f"{real.parent}:/usr/bin:/bin", "HOME": str(tmp_path)}
     with pytest.raises(AssertionError, match="must not run the real crontab"):
         subprocess.run(["crontab", "-l"], env=env, check=False)
+
+
+def _real_crontab_in(directory: Path) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    fake = directory / "crontab"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+    return fake
+
+
+def test_the_launch_guard_refuses_a_non_fake_crontab_at_any_path_position(
+    tmp_path: Path, sandbox_bin: Path
+) -> None:
+    # Nothing is executed: the guard function is asked about launches of a stand-in "real" binary.
+    from tests.conftest import FAKEBIN, forbidden_launch
+
+    real = _real_crontab_in(tmp_path / "real")
+    allowed = (sandbox_bin.resolve(), FAKEBIN)
+    sep = os.pathsep
+    for path in (
+        f"{real.parent}{sep}{FAKEBIN}",  # real first
+        f"{FAKEBIN}{sep}{real.parent}",  # fake first: the fake wins, see below
+        f"{sandbox_bin}{sep}{real.parent}",  # only the exit-99 stub shadows it
+    ):
+        found = forbidden_launch(["crontab", "-l"], {"PATH": path}, False, allowed)
+        first = path.split(sep)[0]
+        assert (found is None) == (first != str(real.parent)), path
+    assert forbidden_launch([str(real), "-l"], {"PATH": str(FAKEBIN)}, False, allowed)
+    assert forbidden_launch(f"{real} -l", None, True, allowed)
+    assert forbidden_launch(["x", "-l"], None, False, allowed, executable=str(real))
+    assert forbidden_launch([str(FAKEBIN / "crontab"), "-l"], None, False, allowed) is None
+    assert forbidden_launch(["crontab", "-l"], None, False, allowed) is None  # the test PATH
+
+
+def test_the_launch_guard_refuses_a_symlink_from_an_allowed_dir_to_a_real_crontab(
+    tmp_path: Path,
+) -> None:
+    from tests.conftest import forbidden_launch
+
+    real = _real_crontab_in(tmp_path / "real")
+    allowed_dir = tmp_path / "allowed"
+    allowed_dir.mkdir()
+    (allowed_dir / "crontab").symlink_to(real)
+    (allowed_dir / "alias").symlink_to(real)
+    for name in ("crontab", "alias"):
+        launch = [str(allowed_dir / name), "-l"]
+        assert forbidden_launch(launch, None, False, (allowed_dir.resolve(),))
+
+
+@pytest.mark.expect_guard_hit
+def test_popen_executable_cannot_reach_a_real_crontab(tmp_path: Path) -> None:
+    real = _real_crontab_in(tmp_path / "real")
+    with pytest.raises(AssertionError, match="must not run the real crontab"):
+        subprocess.run(["anything", "-l"], executable=str(real), check=False)
 
 
 def test_allowlisted_python_and_tools_resolve_and_run(sandbox_bin: Path) -> None:
@@ -216,11 +282,15 @@ def test_a_swallowed_stub_hit_fails_the_test(
         pytester,
         monkeypatch,
         """
+        import os
         import subprocess
+
+        # `crontab` by name is the fake (tests/fakebin); the exit-99 stub is the second PATH entry
+        STUB = os.environ["PATH"].split(os.pathsep)[1] + "/crontab"
 
         def test_swallows():
             try:
-                subprocess.run(["crontab", "-l"], check=True)
+                subprocess.run([STUB, "-l"], check=True)
             except subprocess.CalledProcessError:
                 pass
         """,
@@ -236,12 +306,15 @@ def test_expect_guard_hit_marker_allows_the_hit_and_resets_the_log(
         pytester,
         monkeypatch,
         """
+        import os
         import subprocess
         import pytest
 
+        STUB = os.environ["PATH"].split(os.pathsep)[1] + "/crontab"
+
         @pytest.mark.expect_guard_hit
         def test_marked():
-            subprocess.run(["crontab", "-l"], check=False)
+            subprocess.run([STUB, "-l"], check=False)
 
         def test_clean_after():
             pass

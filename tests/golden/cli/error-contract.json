@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "contract",
+    "message": "result violates the contract",
+    "reason": null
+  }
+}

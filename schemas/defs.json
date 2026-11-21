@@ -26,7 +26,8 @@
     },
     "sha": {
       "type": "string",
-      "pattern": "^[0-9a-f]{40}$"
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+      "description": "A git object id: 40 lowercase hex (sha-1) or 64 lowercase hex (sha-256); nothing in between."
     },
     "ts": {
       "type": "string",

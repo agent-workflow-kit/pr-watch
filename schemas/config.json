@@ -11,7 +11,8 @@
         "name": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 128
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
         }
       },
       "additionalProperties": false,
@@ -22,7 +23,7 @@
       "properties": {
         "interval_hint": {
           "type": "string",
-          "pattern": "^(?:[1-9][0-9]*m|[1-9][0-9]*h)$",
+          "pattern": "^(?:[1-9][0-9]{0,8}m|[1-9][0-9]{0,8}h)$",
           "default": "5m",
           "description": "The cron install default only. The --every forms: Nm with N dividing 60, Nh with N dividing 24 (divisibility is checked by the loader)."
         },
@@ -41,23 +42,25 @@
         "host_low_water": {
           "type": "integer",
           "minimum": 0,
-          "default": 100
+          "default": 100,
+          "maximum": 1000000
         },
         "overlap": {
           "type": "string",
-          "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+          "pattern": "^(?:0|[0-9]{1,9}(?:ms|s|m|h|d))$",
           "default": "60s",
           "description": "Subtracted from the host-time watermark of a per-PR repo scope (covers search index lag)."
         },
         "hosts_ttl": {
           "type": "string",
-          "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+          "pattern": "^(?:0|[0-9]{1,9}(?:ms|s|m|h|d))$",
           "default": "1h"
         },
         "max_duration": {
           "type": "string",
-          "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
-          "default": "15m"
+          "pattern": "^(?:0|[0-9]{1,9}(?:ms|s|m|h|d))$",
+          "default": "15m",
+          "description": "The cycle stops starting snapshots after this. The loader refuses a zero value (config_invalid)."
         },
         "max_snapshots": {
           "type": "integer",
@@ -97,7 +100,7 @@
       "properties": {
         "events": {
           "type": "string",
-          "pattern": "^(?:[3-9][0-9]|[1-9][0-9]{2,})d$",
+          "pattern": "^(?:[3-9][0-9]|[1-9][0-9]{2,8})d$",
           "default": "30d",
           "description": "Whole days, at least 30."
         }
@@ -109,7 +112,7 @@
       "properties": {
         "after_terminal": {
           "type": "string",
-          "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+          "pattern": "^(?:0|[0-9]{1,9}(?:ms|s|m|h|d))$",
           "default": "7d"
         }
       },
@@ -142,7 +145,7 @@
         },
         "pending_max_age": {
           "type": "string",
-          "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+          "pattern": "^(?:0|[0-9]{1,9}(?:ms|s|m|h|d))$",
           "default": "6h"
         }
       },
@@ -153,7 +156,7 @@
       "properties": {
         "timeout": {
           "type": "string",
-          "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+          "pattern": "^(?:0|[0-9]{1,9}(?:ms|s|m|h|d))$",
           "default": "120s"
         },
         "max_output_mib": {
@@ -191,7 +194,7 @@
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^(?!PR_WATCH_|LD_|DYLD_)[A-Za-z_][A-Za-z0-9_]{0,127}$"
+            "pattern": "^(?![Pp][Rr]_[Ww][Aa][Tt][Cc][Hh]_|[Ll][Dd]_|[Dd][Yy][Ll][Dd]_)[A-Za-z_][A-Za-z0-9_]{0,127}$"
           },
           "default": [],
           "description": "Names starting with PR_WATCH_, LD_ or DYLD_ are rejected."
@@ -204,7 +207,8 @@
               "cmd": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 4096
+                "maxLength": 4096,
+                "pattern": "^[ \\t\\n]*[^\\u0000-\\u0020\\u007f-\\u009f][^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
               },
               "timeout": {
                 "type": "integer",
@@ -213,7 +217,8 @@
                 "default": 30
               },
               "async": {
-                "type": "boolean"
+                "type": "boolean",
+                "default": true
               }
             },
             "additionalProperties": false,
@@ -230,7 +235,8 @@
               "cmd": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 4096
+                "maxLength": 4096,
+                "pattern": "^[ \\t\\n]*[^\\u0000-\\u0020\\u007f-\\u009f][^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
               },
               "timeout": {
                 "type": "integer",
@@ -239,7 +245,8 @@
                 "default": 30
               },
               "async": {
-                "type": "boolean"
+                "type": "boolean",
+                "default": true
               }
             },
             "additionalProperties": false,
@@ -256,7 +263,8 @@
               "cmd": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 4096
+                "maxLength": 4096,
+                "pattern": "^[ \\t\\n]*[^\\u0000-\\u0020\\u007f-\\u009f][^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
               },
               "timeout": {
                 "type": "integer",
@@ -265,7 +273,8 @@
                 "default": 30
               },
               "async": {
-                "type": "boolean"
+                "type": "boolean",
+                "default": true
               }
             },
             "additionalProperties": false,
@@ -282,7 +291,8 @@
               "cmd": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 4096
+                "maxLength": 4096,
+                "pattern": "^[ \\t\\n]*[^\\u0000-\\u0020\\u007f-\\u009f][^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
               },
               "timeout": {
                 "type": "integer",
@@ -291,7 +301,8 @@
                 "default": 30
               },
               "async": {
-                "type": "boolean"
+                "type": "boolean",
+                "default": true
               }
             },
             "additionalProperties": false,
@@ -308,7 +319,8 @@
               "cmd": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 4096
+                "maxLength": 4096,
+                "pattern": "^[ \\t\\n]*[^\\u0000-\\u0020\\u007f-\\u009f][^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
               },
               "timeout": {
                 "type": "integer",
@@ -317,7 +329,8 @@
                 "default": 30
               },
               "async": {
-                "type": "boolean"
+                "type": "boolean",
+                "default": true
               }
             },
             "additionalProperties": false,
@@ -334,7 +347,8 @@
               "cmd": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 4096
+                "maxLength": 4096,
+                "pattern": "^[ \\t\\n]*[^\\u0000-\\u0020\\u007f-\\u009f][^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
               },
               "timeout": {
                 "type": "integer",
@@ -343,7 +357,8 @@
                 "default": 30
               },
               "async": {
-                "type": "boolean"
+                "type": "boolean",
+                "default": true
               }
             },
             "additionalProperties": false,
@@ -360,7 +375,8 @@
               "cmd": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 4096
+                "maxLength": 4096,
+                "pattern": "^[ \\t\\n]*[^\\u0000-\\u0020\\u007f-\\u009f][^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
               },
               "timeout": {
                 "type": "integer",
@@ -369,7 +385,8 @@
                 "default": 30
               },
               "async": {
-                "type": "boolean"
+                "type": "boolean",
+                "default": true
               }
             },
             "additionalProperties": false,
@@ -386,7 +403,8 @@
               "cmd": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 4096
+                "maxLength": 4096,
+                "pattern": "^[ \\t\\n]*[^\\u0000-\\u0020\\u007f-\\u009f][^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
               },
               "timeout": {
                 "type": "integer",
@@ -395,7 +413,8 @@
                 "default": 30
               },
               "async": {
-                "type": "boolean"
+                "type": "boolean",
+                "default": true
               }
             },
             "additionalProperties": false,
@@ -412,7 +431,8 @@
               "cmd": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 4096
+                "maxLength": 4096,
+                "pattern": "^[ \\t\\n]*[^\\u0000-\\u0020\\u007f-\\u009f][^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
               },
               "timeout": {
                 "type": "integer",
@@ -421,7 +441,8 @@
                 "default": 30
               },
               "async": {
-                "type": "boolean"
+                "type": "boolean",
+                "default": true
               }
             },
             "additionalProperties": false,
@@ -438,7 +459,8 @@
               "cmd": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 4096
+                "maxLength": 4096,
+                "pattern": "^[ \\t\\n]*[^\\u0000-\\u0020\\u007f-\\u009f][^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
               },
               "timeout": {
                 "type": "integer",
@@ -447,7 +469,8 @@
                 "default": 30
               },
               "async": {
-                "type": "boolean"
+                "type": "boolean",
+                "default": true
               }
             },
             "additionalProperties": false,
@@ -464,7 +487,8 @@
               "cmd": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 4096
+                "maxLength": 4096,
+                "pattern": "^[ \\t\\n]*[^\\u0000-\\u0020\\u007f-\\u009f][^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
               },
               "timeout": {
                 "type": "integer",
@@ -473,7 +497,8 @@
                 "default": 30
               },
               "async": {
-                "type": "boolean"
+                "type": "boolean",
+                "default": true
               }
             },
             "additionalProperties": false,
@@ -495,7 +520,8 @@
           ],
           "minLength": 1,
           "maxLength": 4096,
-          "default": null
+          "default": null,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
         }
       },
       "additionalProperties": false

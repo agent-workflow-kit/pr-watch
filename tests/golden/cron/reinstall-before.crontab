@@ -1,0 +1,7 @@
+0 3 * * * /usr/local/bin/backup
+# pr-watch managed v1 every=15m
+PATH=/old/bin
+*/15 * * * * '/old/pr-watch' poll --quiet
+# pr-watch managed end
+# jobsctl managed
+* * * * * '/usr/local/bin/jobsctl' run --quiet

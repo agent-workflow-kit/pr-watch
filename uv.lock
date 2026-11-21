@@ -135,7 +135,7 @@ wheels = [
 
 [[package]]
 name = "pr-watch"
-version = "0.0.2"
+version = "0.26.0"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
@@ -155,7 +155,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "pydantic", specifier = ">=2" },
+    { name = "pydantic", specifier = ">=2.5" },
     { name = "pyyaml", specifier = ">=6" },
 ]
 

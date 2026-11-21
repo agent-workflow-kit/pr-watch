@@ -1,0 +1,195 @@
+{
+  "hosts": [
+    {
+      "host": "github.com",
+      "last_enumerated_at": "2026-06-01T02:00:00.000000Z",
+      "last_full_at": "2026-06-01T01:00:00.000000Z",
+      "paused_until": "2026-06-01T02:00:00.000000Z"
+    },
+    {
+      "host": "gitlab.example",
+      "last_enumerated_at": null,
+      "last_full_at": null,
+      "paused_until": null
+    }
+  ],
+  "last_poll_finished_at": "2026-06-01T02:00:00.000000Z",
+  "prs": [
+    {
+      "baselined": {
+        "ci": true,
+        "reviews": true,
+        "threads": true
+      },
+      "baselined_at": null,
+      "ci_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ci_stale": false,
+      "ci_state": "passing",
+      "ci_stuck": false,
+      "draft": false,
+      "failures": 0,
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "incomplete": [],
+      "incomplete_snapshots": 0,
+      "last_full_at": "2026-06-01T01:00:00.000000Z",
+      "last_polled_at": "2026-06-01T01:00:00.000000Z",
+      "pr": "github.com/o/r#1",
+      "pr_id": "P1",
+      "sources": [
+        "w-aaaaaaaaaa"
+      ],
+      "state": "open",
+      "status": "active",
+      "terminal_at": null,
+      "terminal_kind": null
+    },
+    {
+      "baselined": {
+        "ci": true,
+        "reviews": true,
+        "threads": true
+      },
+      "baselined_at": null,
+      "ci_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ci_stale": false,
+      "ci_state": "passing",
+      "ci_stuck": false,
+      "draft": false,
+      "failures": 0,
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "incomplete": [],
+      "incomplete_snapshots": 0,
+      "last_full_at": "2026-06-01T01:00:00.000000Z",
+      "last_polled_at": "2026-06-01T01:00:00.000000Z",
+      "pr": "github.com/o/r#2",
+      "pr_id": "P2",
+      "sources": [
+        "w-bbbbbbbbbb"
+      ],
+      "state": "merged",
+      "status": "terminal",
+      "terminal_at": "2026-06-01T02:00:00.000000Z",
+      "terminal_kind": "merged"
+    },
+    {
+      "baselined": {
+        "ci": true,
+        "reviews": true,
+        "threads": true
+      },
+      "baselined_at": null,
+      "ci_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ci_stale": false,
+      "ci_state": "passing",
+      "ci_stuck": false,
+      "draft": false,
+      "failures": 3,
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "incomplete": [
+        "ci",
+        "reviews"
+      ],
+      "incomplete_snapshots": 2,
+      "last_full_at": "2026-06-01T01:00:00.000000Z",
+      "last_polled_at": "2026-06-01T01:00:00.000000Z",
+      "pr": "github.com/o/s#3",
+      "pr_id": "P3",
+      "sources": [
+        "w-bbbbbbbbbb"
+      ],
+      "state": "open",
+      "status": "unreachable",
+      "terminal_at": null,
+      "terminal_kind": null
+    },
+    {
+      "baselined": null,
+      "baselined_at": null,
+      "ci_head_sha": null,
+      "ci_stale": false,
+      "ci_state": null,
+      "ci_stuck": false,
+      "draft": null,
+      "failures": 0,
+      "head_sha": null,
+      "incomplete": [],
+      "incomplete_snapshots": 0,
+      "last_full_at": "2026-06-01T01:00:00.000000Z",
+      "last_polled_at": null,
+      "pr": "github.com/o/s#4",
+      "pr_id": "P4",
+      "sources": [
+        "w-bbbbbbbbbb"
+      ],
+      "state": null,
+      "status": "active",
+      "terminal_at": null,
+      "terminal_kind": null
+    },
+    {
+      "baselined": {
+        "ci": true,
+        "reviews": true,
+        "threads": true
+      },
+      "baselined_at": null,
+      "ci_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ci_stale": false,
+      "ci_state": "pending",
+      "ci_stuck": true,
+      "draft": true,
+      "failures": 0,
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "incomplete": [],
+      "incomplete_snapshots": 0,
+      "last_full_at": "2026-06-01T01:00:00.000000Z",
+      "last_polled_at": "2026-06-01T01:00:00.000000Z",
+      "pr": "github.com/o/s#6",
+      "pr_id": "P6",
+      "sources": [
+        "w-bbbbbbbbbb"
+      ],
+      "state": "open",
+      "status": "active",
+      "terminal_at": null,
+      "terminal_kind": null
+    }
+  ],
+  "watches": [
+    {
+      "created_at": "2026-06-01T00:00:00.000000Z",
+      "enumerated_at": null,
+      "id": "w-aaaaaaaaaa",
+      "key": "P1",
+      "kind": "pr",
+      "labels": [
+        "team=x",
+        "team=y",
+        "tier=1"
+      ],
+      "members": null,
+      "owners": [
+        "agent:b",
+        "human:a"
+      ],
+      "pending_baseline": null,
+      "pr": "github.com/o/r#1"
+    },
+    {
+      "created_at": "2026-06-01T01:00:00.000000Z",
+      "enumerated_at": "2026-06-01T02:00:00.000000Z",
+      "id": "w-bbbbbbbbbb",
+      "key": "mine+open;host=github.com",
+      "kind": "query",
+      "labels": [
+        "team=x"
+      ],
+      "members": 4,
+      "owners": [
+        "human:a"
+      ],
+      "pending_baseline": 1,
+      "pr": null
+    }
+  ]
+}

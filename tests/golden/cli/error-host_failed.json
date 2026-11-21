@@ -1,0 +1,13 @@
+{
+  "error": {
+    "code": "host_failed",
+    "message": "host unreachable",
+    "reason": null,
+    "lower_error": {
+      "code": "rate_limited",
+      "reason": null,
+      "retry_after": 30,
+      "message": "slow down"
+    }
+  }
+}

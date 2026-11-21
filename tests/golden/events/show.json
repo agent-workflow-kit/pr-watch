@@ -1,0 +1,114 @@
+{
+  "approvals_at_head": 1,
+  "baselined": {
+    "ci": true,
+    "reviews": true,
+    "threads": true
+  },
+  "baselined_at": null,
+  "blocked_by": [
+    {
+      "code": "reviews_required"
+    },
+    {
+      "code": "other",
+      "detail": "x"
+    }
+  ],
+  "ci_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "ci_stale": false,
+  "ci_state": "passing",
+  "ci_stuck": false,
+  "draft": false,
+  "events": [
+    {
+      "detected_at": "2026-06-01T00:00:00.000000Z",
+      "forced": null,
+      "from_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "id": "ev-aaaaaaaaaaaa",
+      "labels": [],
+      "occurred_at": null,
+      "pr": "github.com/o/r#1",
+      "pr_id": "P1",
+      "repo": "github.com/o/r",
+      "seq": 1,
+      "to_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "type": "pushed",
+      "watches": [
+        "w-aaaaaaaaaa"
+      ]
+    }
+  ],
+  "failures": 0,
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "incomplete": [],
+  "incomplete_snapshots": 0,
+  "last_full_at": null,
+  "last_polled_at": "2026-06-01T01:00:00.000000Z",
+  "pr": "github.com/o/r#1",
+  "pr_id": "P1",
+  "review_decision": "review_required",
+  "reviewers": [
+    {
+      "at": null,
+      "can_push": null,
+      "commit_sha": null,
+      "id": null,
+      "key": "login:bob",
+      "state": "changes_requested"
+    },
+    {
+      "at": "2026-06-01T10:00:00.000000Z",
+      "can_push": true,
+      "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "id": "u2",
+      "key": "u2",
+      "state": "approved"
+    }
+  ],
+  "seen": {
+    "comments": 3,
+    "reviews": 1
+  },
+  "sources": [
+    "w-aaaaaaaaaa",
+    "w-bbbbbbbbbb"
+  ],
+  "state": "open",
+  "status": "active",
+  "terminal_at": null,
+  "terminal_kind": null,
+  "watches": [
+    {
+      "created_at": "2026-06-01T00:00:00.000000Z",
+      "enumerated_at": null,
+      "id": "w-aaaaaaaaaa",
+      "key": "P1",
+      "kind": "pr",
+      "labels": [
+        "team=x"
+      ],
+      "members": null,
+      "owners": [
+        "human:a"
+      ],
+      "pending_baseline": null,
+      "pr": "github.com/o/r#1"
+    },
+    {
+      "created_at": "2026-06-01T00:00:00.000000Z",
+      "enumerated_at": null,
+      "id": "w-bbbbbbbbbb",
+      "key": "mine+open;host=github.com",
+      "kind": "query",
+      "labels": [],
+      "members": 1,
+      "owners": [
+        "agent:b"
+      ],
+      "pending_baseline": 0,
+      "pr": null
+    }
+  ]
+}

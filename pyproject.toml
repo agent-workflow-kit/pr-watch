@@ -1,14 +1,14 @@
 [project]
 name = "pr-watch"
-version = "0.0.2"
+version = "0.26.0"
 description = "Watches PRs for changes and exposes them as events and hooks."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-dependencies = ["pyyaml>=6", "pydantic>=2"]
+dependencies = ["pyyaml>=6", "pydantic>=2.5"]
 
 [project.scripts]
-pr-watch = "pr_watch.cli:main"
+pr-watch = "pr_watch._entry:main"
 
 [build-system]
 requires = ["hatchling"]
