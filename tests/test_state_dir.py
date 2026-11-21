@@ -372,3 +372,47 @@ def test_creation_does_not_follow_a_symlink_swapped_in_after_mkdir(
     with pytest.raises(StateDirError):
         open_state_dir(target)
     assert stat.S_IMODE(victim.stat().st_mode) == 0o755
+
+
+# --- ensure_hooks_cwd (the hook runner's lazy check) ------------------------------------------
+
+
+def test_ensure_hooks_cwd_returns_the_verified_private_directory(tmp_path: Path) -> None:
+    with open_state_dir(tmp_path / "pr-watch") as state:
+        assert sd.ensure_hooks_cwd(state) == tmp_path / "pr-watch" / "hooks-cwd"
+
+
+@pytest.mark.parametrize("code", [errno.EROFS, errno.EACCES])
+def test_ensure_hooks_cwd_refuses_when_it_is_missing_and_cannot_be_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    def mkdir(path: Any, mode: int = 0o777, *, dir_fd: int | None = None) -> None:
+        raise OSError(code, os.strerror(code))
+
+    monkeypatch.setattr(sd, "_mkdir", mkdir)
+    with open_state_dir(tmp_path / "pr-watch") as state:  # the start tolerates it
+        with pytest.raises(StateDirError, match="hooks-cwd is missing and cannot be created"):
+            sd.ensure_hooks_cwd(state)
+
+
+def test_ensure_hooks_cwd_refuses_a_symlink_swapped_in_after_the_start(tmp_path: Path) -> None:
+    target = tmp_path / "pr-watch"
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    with open_state_dir(target) as state:
+        (target / "hooks-cwd").rmdir()
+        (target / "hooks-cwd").symlink_to(real)
+        with pytest.raises(StateDirError, match="hooks-cwd is a symlink"):
+            sd.ensure_hooks_cwd(state)
+    assert list(real.iterdir()) == []
+
+
+@pytest.mark.parametrize("mode", [0o770, 0o707, 0o777])
+def test_ensure_hooks_cwd_refuses_a_writable_directory_after_the_start(
+    tmp_path: Path, mode: int
+) -> None:
+    target = tmp_path / "pr-watch"
+    with open_state_dir(target) as state:
+        (target / "hooks-cwd").chmod(mode)
+        with pytest.raises(StateDirError, match="hooks-cwd is group- or world-writable"):
+            sd.ensure_hooks_cwd(state)

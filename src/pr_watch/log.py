@@ -109,7 +109,7 @@ EVENT_FIELDS: Final[dict[str, tuple[set[str], set[str]]]] = {
     "snapshot_failed": ({"pr", "pr_id", "code", "failures"}, _MSG),
     "pr_status": ({"pr", "pr_id", "from", "to"}, _MSG),
     "hook_run": ({"event_id", "hook", "exit_code", "duration_ms", "timed_out"}, _MSG),
-    "hook_cap": ({"skipped", "first_event_id", "last_event_id"}, _MSG),
+    "hook_cap": ({"skipped"}, {"message", "first_event_id", "last_event_id"}),
     "config_warning": ({"key"}, _MSG),
 }  # fmt: skip
 

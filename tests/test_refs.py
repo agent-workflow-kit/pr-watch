@@ -309,7 +309,7 @@ def test_match_more_than_one_row_is_usage_with_pr_id_hint() -> None:
     assert exc.code == "usage"
     assert exc.kind == "ambiguous_reference"
     assert "pr_id" in str(exc)
-    assert "github.com/o/r" not in str(exc)
+    assert parse_pr("github.com/o/r#7").repo not in str(exc)
 
 
 def test_match_same_row_twice_is_not_ambiguous() -> None:

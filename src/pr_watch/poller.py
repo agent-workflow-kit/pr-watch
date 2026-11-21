@@ -14,8 +14,9 @@ belongs to no stage: the signal contract, the report, the exit code, the log rec
    state are persisted before any later long phase).
 4. `snapshots.run_snapshots`, with the cycle's start as the `poll.max_duration` clock. Each host's
    state is written the moment its queue ends (`on_host_done`), not at the end of the pool.
-5. `pacing.finish_hosts` (the rest), `pacing.finish_poll` (`meta.last_poll_finished_at`), the
-   report, `poll_end`, and at most once a day `prune.prune`.
+5. `pacing.finish_hosts` (the rest), the hook drain, the report and `post-poll`, then
+   `pacing.finish_poll` (`meta.last_poll_finished_at`, only once the hooks finished uninterrupted),
+   `poll_end`, and at most once a day `prune.prune`.
 
 Signals. SIGTERM, SIGINT and SIGHUP set a stop flag (`_Signals`) and SIGTERM the forgectl process
 groups the poll started (`gateway.signal_live`); the stages poll the flag, so nothing more is
@@ -55,8 +56,13 @@ Judgment calls where the interface is silent (kept conservative):
 - Housekeeping runs at the end of any poll that was not interrupted, when `last_prune_at` is
   missing, unreadable, in the future or at least a day old. A failure of it never changes the
   poll's result (one warning line on stderr).
-- Hooks (`on-<event>`, `post-poll`, `--hook`, `--no-hooks`) are the seams marked TODO(#28); the
-  report counts them as zero.
+- Hooks (`hooks.py`): the runner is created after the preflight; the snapshot pool queues a PR's
+  `on-<event>` hooks right after its commit (`on_events`), the pool of workers runs them while
+  snapshots continue, and the poll waits for it to drain after `finish_poll` and before the report
+  (a signal during the drain: hooks stopped, no report, exit 128+N, `poll_end` interrupted).
+  `post-poll` is queued after the event hooks drained, from the built report (counts exclude it),
+  when `hooks.should_post_poll` says so; the report's `hooks` block is final after it. `--hook` and
+  `--no-hooks` come from the arguments. An `already_running` poll queues nothing.
 """
 
 from __future__ import annotations
@@ -72,7 +78,7 @@ from datetime import UTC, datetime, timedelta
 from types import FrameType
 from typing import Any, Final
 
-from . import gateway, prune, watches
+from . import gateway, hooks, prune, watches
 from . import pacing as pc
 from .cli import CliError, Context, _stderr_line, _store
 from .config import Config
@@ -162,6 +168,8 @@ class _Run:
     exit_code: int = 0
     ended: bool = False
     version: ToolVersion | None = None
+    hooks: hooks.HookRunner | None = None
+    unreachable_at_start: set[str] = field(default_factory=set)
 
     @property
     def restricted(self) -> bool:
@@ -315,6 +323,7 @@ def _snapshot(run: _Run, client: ForgectlClient) -> None:
         should_stop=run.sig.stopped,
         out_of_time=pc.time_budget(run.config, started=run.clock0),
         on_host_done=host_done,
+        on_events=run.hooks.submit_events if run.hooks is not None else None,
     )  # fmt: skip
 
 
@@ -404,7 +413,7 @@ def build_report(run: _Run) -> dict[str, Any]:
             "incomplete": 0 if already else _incomplete_count(run.store),
         },
         "events": _events_by_type(pool),
-        "hooks": {"run": 0, "skipped": 0, "failed": 0},  # TODO(#28): hook counts
+        "hooks": (run.hooks.counts if run.hooks is not None else hooks.HookCounts()).as_report(),
         "failed": _failed(run.res),
         "full_pass": not already and any(o.full_pass for o in run.outcomes.values()),
         "truncated": truncated,
@@ -516,7 +525,37 @@ def poll_command(ctx: Context, args: argparse.Namespace) -> int:
         except _Stopped:
             return _stop_code(run)
         finally:
+            _drop_hooks(run)
             _write_end(run, None)  # only reached unwritten on an error or an interruption
+
+
+def _drop_hooks(run: _Run) -> None:
+    """Whatever ends the poll, no hook thread outlives it: queued hooks of a signalled poll are
+    dropped (the stop flag is set), others are run to the end (their events are committed)."""
+    if run.hooks is not None:
+        run.hooks.finish()
+
+
+def _setup_hooks(run: _Run) -> None:
+    args = run.args
+    run.hooks = hooks.HookRunner.from_config(
+        run.config, run.ctx.state, log=run.ctx.log, started=run.clock0,
+        should_stop=run.sig.stopped, extra=args.hook or (), no_hooks=args.no_hooks,
+    )  # fmt: skip
+    run.unreachable_at_start = {
+        str(r[0]) for r in run.store.conn.execute("SELECT pr FROM prs WHERE status = 'unreachable'")
+    }
+
+
+def _run_post_poll(run: _Run, report: dict[str, Any]) -> None:
+    """After the event hooks drained: `post-poll` if something failed, then the final counts."""
+    assert run.hooks is not None
+    newly = (run.pool or PoolResult()).unreachable
+    if run.hooks.specs.get("post-poll") and hooks.should_post_poll(
+        report, run.unreachable_at_start, newly
+    ):
+        run.hooks.submit_post_poll(hooks.post_poll_payload(report, newly))
+    report["hooks"] = run.hooks.finish().as_report()
 
 
 def _poll(run: _Run) -> int:
@@ -525,6 +564,7 @@ def _poll(run: _Run) -> int:
         pr_id, run.pr_host = _resolve_pr(store, args)
         run.pr_task = forced_pr_task(store.conn, pr_id)
     client, run.version = _preflight(run)
+    _setup_hooks(run)
     scope = (
         None
         if args.pr is None and args.repo is None
@@ -561,19 +601,25 @@ def _poll(run: _Run) -> int:
     if run.interrupted:  # a signal during `finish_hosts`: nothing more is written
         return _stop_code(run)
     exit_code = 12 if run.res.stop_poll or any(f.poll_exit == 12 for f in run.res.failures) else 0
+    assert run.hooks is not None
+    run.hooks.finish()  # the pool drains: every on-<event> hook (queued after its commit) is done
+    if run.interrupted:  # a signal while hooks ran: they were stopped, no report
+        return _stop_code(run)
+    report = build_report(run)
+    _run_post_poll(run, report)
+    if run.interrupted:
+        return _stop_code(run)
+    # the stamp comes last: a poll signalled while hooks ran never leaves `last_poll_finished_at`
     pc.finish_poll(
         store, run.res, run.pool, now=run.now(), restricted=run.restricted,
         exit_ok=exit_code == 0, interrupted=run.interrupted,
         should_stop=lambda: run.interrupted,
     )  # fmt: skip
-    if run.interrupted:  # a signal during `finish_poll`: no report
+    if run.interrupted:  # a signal during `finish_poll`: no stamp, no report
         return _stop_code(run)
-    report = build_report(run)
     _host_summaries(run, report)
     _stderr_lines(run, exit_code)
     ctx.emit(report, human=_human(report))
-    # TODO(#28): run the on-<event> hooks (queued after each PR's commit) and post-poll here, with
-    # `args.no_hooks` and `args.hook`; fill `report["hooks"]` before it is printed.
     _write_end(run, report)
     if not run.sig.stopped():
         _housekeeping(run)

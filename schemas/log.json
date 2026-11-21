@@ -593,9 +593,7 @@
         "ts",
         "level",
         "event",
-        "skipped",
-        "first_event_id",
-        "last_event_id"
+        "skipped"
       ]
     },
     {
