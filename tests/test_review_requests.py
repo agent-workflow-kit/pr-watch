@@ -353,6 +353,18 @@ def test_a_login_with_a_space_is_a_valid_stored_key() -> None:
     assert again["review_requests"]["outstanding"] == ["user:login:a b"]
 
 
+@pytest.mark.parametrize("login", ["a\u00a0b", "a\u0378b"])  # no-break space, unassigned code point
+def test_a_login_sanitized_keeps_its_stored_key_through_the_incomplete_path(login: str) -> None:
+    stored = build_digest(requests(gh(), rr(login, None)))
+    key = stored["review_requests"]["outstanding"]
+    assert len(key) == 1
+    incomplete = requests(gh(), rr(login, None))
+    incomplete["incomplete"] = ["review_requests"]
+    kept = build_digest(incomplete, stored)
+    assert kept["review_requests"]["outstanding"] == key
+    assert events(kept, requests(gh(), rr(login, None))) == []
+
+
 def test_same_key_with_a_different_instance_and_head_fires_nothing() -> None:
     old = requests(gh(), rr("alice", "100", instance="r1"))
     new = requests(gh(), rr("alice", "100", instance="r2"))

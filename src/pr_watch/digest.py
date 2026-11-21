@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
@@ -225,13 +226,17 @@ def reviewer_key(entry: object) -> str | None:
 REQUEST_KINDS: Final = ("user", "team")
 _REQUEST_STATES = ("outstanding", "reviewed")
 _REQUEST_KEY = re.compile(r"(?:user|team):.{1,300}", re.DOTALL)
+_UNSAFE_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp", "Cs"})
 
 
 def _valid_request_key(value: object) -> bool:
-    """A stored request key: `user:`/`team:` plus one line of printable text (the shape
-    `reviewer_key` produces, so logins with brackets or spaces are kept)."""
+    """A stored request key: `user:`/`team:` plus one line of text with none of the characters
+    `sanitized` replaces (control, format, line/paragraph separator, surrogate), the shape
+    `reviewer_key` produces, so logins with brackets, spaces or unassigned characters are kept."""
     return (
-        isinstance(value, str) and _REQUEST_KEY.fullmatch(value) is not None and value.isprintable()
+        isinstance(value, str)
+        and _REQUEST_KEY.fullmatch(value) is not None
+        and not any(unicodedata.category(c) in _UNSAFE_CATEGORIES for c in value)
     )
 
 
