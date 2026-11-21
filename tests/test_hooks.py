@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from pr_watch import gateway, hooks
+from pr_watch import log as log_module
 from pr_watch.config import Config
 from pr_watch.gateway import LaunchError, Request, Result
 from pr_watch.hooks import HookRunner, HookSpec
@@ -30,6 +31,7 @@ from tests.harness import assert_valid
 from tests.test_signals import alive, wait_gone
 
 WAIT = 30.0
+GOLDEN = Path(__file__).parent / "golden" / "hooks"
 
 
 def ev(n: int, type_: str = "pushed", pr_id: str = "P1") -> StoredEvent:
@@ -63,6 +65,10 @@ class Records:
         self._lock = threading.Lock()
 
     def write(self, event: str, level: str = "info", **fields: Any) -> bool:
+        try:
+            log_module._build(event, level, fields, 0.0)  # what the real Log would refuse
+        except ValueError:
+            return False
         with self._lock:
             self.items.append((event, level, fields))
         return True
@@ -399,6 +405,40 @@ def test_a_max_per_poll_of_zero_runs_no_hook_at_all(cwd: Path) -> None:
         runner.submit_post_poll({"object_id": "T"})
         counts = runner.finish()
     assert (counts.run, counts.skipped) == (0, 3) and log.of("hook_run") == []
+    (cap,) = log.of("hook_cap")  # accepted by the log's own validation (Records checks it)
+    assert cap["skipped"] == 3
+    assert (cap["first_event_id"], cap["last_event_id"]) == (ev(1).id, ev(2).id)
+
+
+def test_a_skipped_post_poll_alone_still_writes_a_hook_cap_record_without_event_ids(
+    cwd: Path,
+) -> None:
+    log = Records()
+    runner = make(cwd, {"post-poll": [spec("x", "post-poll")]}, log, max_per_poll=0)
+    with gateway.use_backend(ok_backend):
+        runner.submit_post_poll({"object_id": "T"})
+        counts = runner.finish()
+    assert (counts.run, counts.skipped) == (0, 1)
+    assert log.of("hook_cap") == [{"skipped": 1, "message": "hooks skipped by the cap"}]
+    assert_valid("log", {"ts": "2026-10-03T00:00:00.000000Z", "level": "warn",
+                         "event": "hook_cap", **log.of("hook_cap")[0]})  # fmt: skip
+
+
+def test_a_payload_that_cannot_be_encoded_is_skipped_with_its_own_message(
+    cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(payload: Any) -> bytes:
+        raise ValueError("no")
+
+    log = Records()
+    runner = make(cwd, {"on-pushed": [spec("x")]}, log)
+    monkeypatch.setattr(hooks, "encode_payload", boom)
+    runner.submit_events([ev(1)])
+    counts = runner.finish()
+    assert (counts.run, counts.skipped) == (0, 1)
+    (cap,) = log.of("hook_cap")
+    assert cap["message"] == "hooks skipped: payload could not be encoded"
+    assert cap["first_event_id"] == cap["last_event_id"] == ev(1).id
 
 
 # --- the pool ------------------------------------------------------------------------------------
@@ -522,6 +562,144 @@ def test_no_specs_means_nothing_is_queued(cwd: Path) -> None:
     runner = make(cwd, {})
     runner.submit_events([ev(1)])
     assert not runner.active and runner.finish().run == 0
+
+
+@pytest.mark.parametrize(
+    ("result", "logged"),
+    [
+        (Result(returncode=3), True),  # it failed on its own while the stop flag was set
+        (Result(returncode=-signal.SIGTERM, timed_out=True), True),  # its own timeout
+        (Result(returncode=-signal.SIGTERM), False),  # our shutdown's SIGTERM
+        (Result(returncode=-signal.SIGKILL), False),  # our shutdown's SIGKILL
+        (Result(returncode=None, abandoned=True), False),
+    ],
+)
+def test_a_hook_that_failed_on_its_own_is_logged_even_when_the_stop_flag_is_set(
+    cwd: Path, result: Result, logged: bool
+) -> None:
+    stop = [False]
+    log = Records()
+    runner = make(cwd, {"on-pushed": [spec("a")]}, log, should_stop=lambda: stop[0])
+
+    def backend(request: Request) -> Result:
+        stop[0] = True  # the poll is signalled while the hook runs
+        return result
+
+    with gateway.use_backend(backend):
+        runner.submit_events([ev(1)])
+        counts = runner.finish()
+    assert counts.failed == 1
+    assert (len(log.of("hook_run")) == 1) is logged
+
+
+def test_a_launch_refused_by_the_shutdown_writes_no_hook_run(cwd: Path) -> None:
+    stop = [False]
+    log = Records()
+    runner = make(cwd, {"on-pushed": [spec("a")]}, log, should_stop=lambda: stop[0])
+
+    def backend(request: Request) -> Result:
+        stop[0] = True
+        raise LaunchError("/bin/sh: not started: shutting down")
+
+    with gateway.use_backend(backend):
+        runner.submit_events([ev(1)])
+        counts = runner.finish()
+    assert counts.failed == 1 and log.of("hook_run") == []
+
+
+def failed(kind: str, ref: str, code: str) -> dict[str, str]:
+    return {"kind": kind, "ref": ref, "code": code}
+
+
+def report(failures: list[dict[str, str]], hosts: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "started_at": "2026-10-03T00:00:00.000000Z", "duration_ms": 1200, "full_pass": False,
+        "prs": {"snapshotted": 2, "unchanged": 1, "skipped_locked": 0, "skipped_conflict": 0,
+                "unreachable": 0, "incomplete": 0},
+        "events": {"pushed": 1}, "hooks": {"run": 1, "skipped": 0, "failed": 0},
+        "hosts": hosts or {}, "failed": failures,
+    }  # fmt: skip
+
+
+def test_a_pr_failing_too_large_alone_does_not_fire_post_poll_but_other_failures_do() -> None:
+    too_large = report([failed("pr", "example.net/o/r#1", "too_large")])
+    assert not hooks.should_post_poll(too_large, set(), [])
+    assert hooks.should_post_poll(too_large, set(), [("example.net/o/r#1", "P1", "too_large")])
+    other = report([failed("pr", "example.net/o/r#1", "not_found")])
+    assert hooks.should_post_poll(other, set(), [])
+    mixed = report([failed("pr", "example.net/o/r#1", "too_large"), failed("scope", "s", "x")])
+    assert hooks.should_post_poll(mixed, set(), [])
+
+
+def test_failed_host_entries_without_a_hosts_entry_are_in_post_poll_errors() -> None:
+    rep = report(
+        [
+            failed("host", "a.example.net", "auth_required"),
+            failed("host", "a.example.net", "auth_required"),
+            failed("host", "a.example.net", "rate_limited"),
+            failed("host", "whoami", "garbled"),
+            failed("host", "Bad Host!", "x"),
+            failed("pr", "example.net/o/r#1", "not_found"),
+            failed("host", "b.example.net", "network_error"),
+        ],
+        hosts={
+            "b.example.net": {"errors": [{"code": "contract", "pr": None, "retry_after": None}]}
+        },
+    )
+    payload = hooks.post_poll_payload(rep, [])
+    assert payload["errors"] == [
+        {"host": "b.example.net", "codes": ["contract", "network_error"]},
+        {"host": "a.example.net", "codes": ["auth_required", "rate_limited"]},
+    ]
+    assert_valid("hooks/post-poll", payload)
+
+
+def check_golden(name: str, actual: Any) -> None:
+    path = GOLDEN / f"{name}.json"
+    if not path.exists():  # first run: write it, fail, and review the file before committing
+        GOLDEN.mkdir(exist_ok=True)
+        path.write_text(json.dumps(actual, indent=2, sort_keys=True) + "\n")
+        pytest.fail(f"golden {path.name} was missing and has been written; review it")
+    assert actual == json.loads(path.read_text())
+
+
+def test_the_on_pushed_payload_golden() -> None:
+    event = ev(1, "pushed")
+    event.payload.update(from_sha="b" * 40, to_sha="a" * 40, forced=False)
+    payload = hooks.event_payload(event)
+    assert_valid("hooks/on-pushed", payload)
+    check_golden("on-pushed", payload)
+
+
+def test_the_post_poll_payload_golden() -> None:
+    rep = report(
+        [
+            failed("host", "a.example.net", "auth_required"),
+            failed("pr", "example.net/o/r#1", "gone"),
+        ],
+        hosts={
+            "b.example.net": {"errors": [{"code": "rate_limited", "pr": None, "retry_after": 60}]}
+        },
+    )
+    payload = hooks.post_poll_payload(rep, [("example.net/o/r#2", "P2", "not_found")])
+    assert_valid("hooks/post-poll", payload)
+    check_golden("post-poll", payload)
+
+
+def test_home_and_xdg_are_passed_only_when_absolute_and_home_falls_back_to_the_account() -> None:
+    import pwd
+
+    account = pwd.getpwuid(os.geteuid()).pw_dir
+    rel = hooks.hook_environment(
+        "post-poll", "T", None, "poll",
+        environ={"HOME": "rel/home", "XDG_STATE_HOME": "rel", "XDG_CONFIG_HOME": "/abs"},
+    )  # fmt: skip
+    assert rel["HOME"] == account and "XDG_STATE_HOME" not in rel
+    assert rel["XDG_CONFIG_HOME"] == "/abs"
+    unset = hooks.hook_environment("post-poll", "T", None, "poll", environ={})
+    assert unset["HOME"] == account
+    kept = hooks.hook_environment("post-poll", "T", None, "poll", environ={"HOME": "/h"})
+    assert kept["HOME"] == "/h"
 
 
 @pytest.fixture(autouse=True)

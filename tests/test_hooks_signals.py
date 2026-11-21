@@ -29,6 +29,7 @@ from tests.test_signals import (
     group_members,
     launch,  # noqa: F401  (fixture)
     log_records,
+    meta,
     pushed,
     run_to_end,
     store,  # noqa: F401  (fixture)
@@ -185,3 +186,37 @@ def test_a_hook_that_starts_a_daemon_in_a_new_session_does_not_hold_the_poll_and
     assert code == 0 and doc["hooks"] == {"run": 1, "skipped": 0, "failed": 0}
     pid = pid_of(daemon, reaper)  # the Reaper kills it at teardown
     assert alive(pid)  # not reached by pr-watch: another session, another group
+
+
+def test_a_poll_signalled_during_a_slow_hook_leaves_last_poll_finished_at_unset(
+    launch: Launch,  # noqa: F811
+    fake: FakeForgectl,  # noqa: F811
+    store: Any,  # noqa: F811
+    reaper: Reaper,
+    tmp_path: Path,
+) -> None:
+    baselined(launch, fake)
+    stamp = meta(store, "last_poll_finished_at")
+    pushed(fake)
+    started = tmp_path / "started"
+    cfg = hook_config(tmp_path, f"echo $$ > {started}; exec sleep 300")
+    run = launch("--config", cfg, "poll")
+    pid_of(started, reaper)
+    run.signal(signal.SIGTERM)
+    check_clean_exit(run, signal.SIGTERM, timeout=60)
+    assert meta(store, "last_poll_finished_at") == stamp  # the earlier poll's value, not moved
+
+
+def test_a_normal_poll_with_hooks_still_sets_last_poll_finished_at(
+    launch: Launch,  # noqa: F811
+    fake: FakeForgectl,  # noqa: F811
+    store: Any,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    baselined(launch, fake)
+    stamp = meta(store, "last_poll_finished_at")
+    pushed(fake)
+    cfg = hook_config(tmp_path, "exit 0")
+    code, doc = run_to_end(launch, "--config", cfg, "poll")
+    assert code == 0 and doc["hooks"]["run"] == 1
+    assert meta(store, "last_poll_finished_at") != stamp

@@ -1,0 +1,25 @@
+{
+  "detected_at": "2026-10-03T00:00:00.000000Z",
+  "event_id": "ev-aaaaaaaaaaab",
+  "forced": false,
+  "from_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "hook": "on-pushed",
+  "id": "ev-aaaaaaaaaaab",
+  "labels": [
+    "k=v"
+  ],
+  "object_id": "P1",
+  "object_type": "pr",
+  "occurred_at": null,
+  "pr": "example.net/o/r#1",
+  "pr_id": "P1",
+  "repo": "example.net/o/r",
+  "seq": 1,
+  "to_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "tool": "pr-watch",
+  "type": "pushed",
+  "watches": [
+    "w-aaaaaaaaaa"
+  ]
+}

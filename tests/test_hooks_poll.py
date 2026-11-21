@@ -6,12 +6,16 @@ signal and process-group behavior of a real poll is tests/test_hooks_signals.py.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from pr_watch import hooks as hooks_module
 from pr_watch.cli import main
+from pr_watch.forgectl_client import ForgectlClient, ToolMissing
+from pr_watch.state_dir import ensure_hooks_cwd
 from pr_watch.store import Store
 from tests.forgectl_support import FakeForgectl, new_pr, sha
 from tests.harness import assert_valid
@@ -314,3 +318,68 @@ def test_a_hook_is_not_given_the_poll_environment_secrets(
     assert doc["hooks"]["run"] == 1
     text = out.read_text()
     assert "sekrit" not in text and "GH_TOKEN" not in text and "SOME_VAR=shown" in text
+
+
+def test_a_tool_error_still_runs_hooks_of_committed_events_but_no_post_poll_and_no_counts(
+    fake: FakeForgectl,  # noqa: F811
+    state_dir: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a, b = pr(1), pr(2)
+    fake.add(a)
+    fake.add(b)
+    watch_query(capsys)
+    run(capsys, "poll")
+    fake.update(a["pr"], updated_at=LATER, head={"sha": sha(7)})
+    fake.update(b["pr"], updated_at=LATER, head={"sha": sha(8)})
+    marks, post = tmp_path / "marks", tmp_path / "post"
+    cfg = write_config(
+        tmp_path,
+        f"hooks:\n  on-pushed:\n    - cmd: 'echo x >> {marks}'\n"
+        f"  post-poll:\n    - cmd: 'echo x >> {post}'\n",
+    )
+    real = ForgectlClient.snapshot
+
+    def snapshot(self: ForgectlClient, ref: Any) -> Any:
+        if ref.canonical == b["pr"]:  # the tool fails only after a's commit and its hook ran
+            deadline = time.monotonic() + 30
+            while not marks.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            raise ToolMissing("forgectl vanished")
+        return real(self, ref)
+
+    monkeypatch.setattr(ForgectlClient, "snapshot", snapshot)
+    code, doc, _ = run(capsys, "poll", config=cfg)
+    assert code == 12 and doc["error"]["code"] == "tool_missing" and "hooks" not in doc
+    assert marks.read_text() == "x\n"  # the committed event's hook ran (the envelope waited)
+    assert not post.exists()  # no post-poll on a tool error
+    runs = [r for r in log_records(state_dir) if r["event"] == "hook_run"]
+    assert len(runs) == 1 and runs[0]["exit_code"] == 0
+
+
+def test_an_unusable_hooks_cwd_fails_the_hook_is_logged_and_the_poll_exits_zero(
+    pushed: dict[str, Any],
+    state_dir: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_dir = tmp_path / "elsewhere"
+    real_dir.mkdir(mode=0o700)
+
+    def swapped(state: Any) -> Path:  # the directory was replaced after the start check
+        path = state.path_for("hooks-cwd")
+        path.rmdir()
+        path.symlink_to(real_dir)
+        return ensure_hooks_cwd(state)
+
+    monkeypatch.setattr(hooks_module, "ensure_hooks_cwd", swapped)
+    ran = tmp_path / "ran"
+    cfg = write_config(tmp_path, f"hooks:\n  on-pushed:\n    - cmd: 'echo x > {ran}'\n")
+    code, doc, _ = run(capsys, "poll", config=cfg)
+    assert code == 0 and doc["hooks"] == {"run": 1, "skipped": 0, "failed": 1}
+    assert not ran.exists() and list(real_dir.iterdir()) == []
+    (rec,) = [r for r in log_records(state_dir) if r["event"] == "hook_run"]
+    assert rec["exit_code"] is None and "hooks-cwd unavailable" in rec["message"]

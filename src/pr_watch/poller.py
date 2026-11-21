@@ -14,8 +14,9 @@ belongs to no stage: the signal contract, the report, the exit code, the log rec
    state are persisted before any later long phase).
 4. `snapshots.run_snapshots`, with the cycle's start as the `poll.max_duration` clock. Each host's
    state is written the moment its queue ends (`on_host_done`), not at the end of the pool.
-5. `pacing.finish_hosts` (the rest), `pacing.finish_poll` (`meta.last_poll_finished_at`), the
-   report, `poll_end`, and at most once a day `prune.prune`.
+5. `pacing.finish_hosts` (the rest), the hook drain, the report and `post-poll`, then
+   `pacing.finish_poll` (`meta.last_poll_finished_at`, only once the hooks finished uninterrupted),
+   `poll_end`, and at most once a day `prune.prune`.
 
 Signals. SIGTERM, SIGINT and SIGHUP set a stop flag (`_Signals`) and SIGTERM the forgectl process
 groups the poll started (`gateway.signal_live`); the stages poll the flag, so nothing more is
@@ -600,13 +601,6 @@ def _poll(run: _Run) -> int:
     if run.interrupted:  # a signal during `finish_hosts`: nothing more is written
         return _stop_code(run)
     exit_code = 12 if run.res.stop_poll or any(f.poll_exit == 12 for f in run.res.failures) else 0
-    pc.finish_poll(
-        store, run.res, run.pool, now=run.now(), restricted=run.restricted,
-        exit_ok=exit_code == 0, interrupted=run.interrupted,
-        should_stop=lambda: run.interrupted,
-    )  # fmt: skip
-    if run.interrupted:  # a signal during `finish_poll`: no report
-        return _stop_code(run)
     assert run.hooks is not None
     run.hooks.finish()  # the pool drains: every on-<event> hook (queued after its commit) is done
     if run.interrupted:  # a signal while hooks ran: they were stopped, no report
@@ -614,6 +608,14 @@ def _poll(run: _Run) -> int:
     report = build_report(run)
     _run_post_poll(run, report)
     if run.interrupted:
+        return _stop_code(run)
+    # the stamp comes last: a poll signalled while hooks ran never leaves `last_poll_finished_at`
+    pc.finish_poll(
+        store, run.res, run.pool, now=run.now(), restricted=run.restricted,
+        exit_ok=exit_code == 0, interrupted=run.interrupted,
+        should_stop=lambda: run.interrupted,
+    )  # fmt: skip
+    if run.interrupted:  # a signal during `finish_poll`: no stamp, no report
         return _stop_code(run)
     _host_summaries(run, report)
     _stderr_lines(run, exit_code)
