@@ -209,3 +209,23 @@ def test_the_event_validates_against_the_schema(store: Store, backend: str) -> N
     with store.transaction():
         stored = store.append_event(event.to_new_event(labels=(), watches=(WATCH,)))
     assert schema_errors("event", stored.to_json()) == []
+
+
+def test_a_push_that_only_lowers_approvals_at_head_is_silent() -> None:
+    chain = Chain(with_(approved_gh(), approvals_at_head=1))
+    snap = with_(approved_gh(), approvals_at_head=0, head={**gh()["head"], "sha": sha(9)})
+    types = chain.types(snap)
+    assert "pushed" in types
+    assert WITHDRAWN not in types
+
+
+def test_a_dismissal_with_a_push_fires_withdrawn_together_with_pushed() -> None:
+    chain = Chain(with_(approved_gh(), approvals_at_head=1))
+    snap = with_(
+        reviewers(gh(), entry("1002", "dismissed", T2, sha(3))),
+        approvals_at_head=0,
+        head={**gh()["head"], "sha": sha(9)},
+    )
+    types = chain.types(snap)
+    assert "pushed" in types
+    assert WITHDRAWN in types
