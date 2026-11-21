@@ -58,6 +58,12 @@ def default_state_dir(environ: Mapping[str, str] | None = None) -> Path:
     return base / TOOL_DIR
 
 
+def home_dir(environ: Mapping[str, str] | None = None) -> Path:
+    """The home directory as the state directory rule reads it (`HOME` only when absolute, else
+    the password-database home). Raises `StateDirError` when neither is usable."""
+    return _home(os.environ if environ is None else environ)
+
+
 def _home(env: Mapping[str, str]) -> Path:
     home = env.get("HOME", "")
     if home.startswith("/"):

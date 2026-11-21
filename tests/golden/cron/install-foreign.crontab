@@ -1,0 +1,9 @@
+# my backups
+MAILTO=me@example.invalid
+SHELL=/bin/sh
+0 3 * * * /usr/local/bin/backup --all
+@reboot /usr/local/bin/hello
+# pr-watch managed v1 every=5m
+PATH={HOME}/.local/bin:{FORGECTL_DIR}:/usr/local/bin:/usr/bin:/bin
+*/5 * * * * '{PR_WATCH}' poll --quiet
+# pr-watch managed end

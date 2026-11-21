@@ -209,13 +209,6 @@ class Context:
 Handler = Callable[[Context, argparse.Namespace], int]
 
 
-def _stub(issue: int) -> Handler:
-    def handler(ctx: Context, args: argparse.Namespace) -> int:
-        raise CliError("internal", f"not implemented yet (issue #{issue})")
-
-    return handler
-
-
 # Commands that only read state: they open (and so verify) the state directory but write no
 # log record, so a consumer that polls `events` or `list` cannot fill log.jsonl with the same
 # configuration warnings on every call.
@@ -233,8 +226,8 @@ HANDLERS: dict[str, Handler] = {
     "events": lambda ctx, args: _events(ctx, args),
     "show": lambda ctx, args: _show(ctx, args),
     "export": lambda ctx, args: _export(ctx, args),
-    "cron install": _stub(29),  # TODO(#29): cron install
-    "cron uninstall": _stub(29),  # TODO(#29): cron uninstall
+    "cron install": lambda ctx, args: _cron_install(ctx, args),
+    "cron uninstall": lambda ctx, args: _cron_uninstall(ctx, args),
 }
 
 
@@ -266,6 +259,18 @@ def _prune(ctx: Context, args: argparse.Namespace) -> int:
     from .prune import prune_command  # lazy: it imports this module
 
     return prune_command(ctx, args)
+
+
+def _cron_install(ctx: Context, args: argparse.Namespace) -> int:
+    from .cron import install_command  # lazy: it imports this module
+
+    return install_command(ctx, args)
+
+
+def _cron_uninstall(ctx: Context, args: argparse.Namespace) -> int:
+    from .cron import uninstall_command  # lazy: it imports this module
+
+    return uninstall_command(ctx, args)
 
 
 def _poll(ctx: Context, args: argparse.Namespace) -> int:

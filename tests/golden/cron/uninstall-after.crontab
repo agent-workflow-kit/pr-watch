@@ -1,0 +1,3 @@
+0 3 * * * /usr/local/bin/backup
+# jobsctl managed
+* * * * * '/usr/local/bin/jobsctl' run --quiet

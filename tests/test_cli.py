@@ -579,25 +579,6 @@ def test_handler_oserror_is_still_an_internal_error(
     assert code == 1 and envelope_of(out)["code"] == "internal"
 
 
-# --- unimplemented commands --------------------------------------------------------------------
-
-OWNERS = {
-    "cron install": 29, "cron uninstall": 29,
-}  # fmt: skip
-
-
-@pytest.mark.parametrize("name", sorted(OWNERS))
-def test_unimplemented_command_is_an_internal_error_naming_its_issue(
-    name: str, capsys: pytest.CaptureFixture[str]
-) -> None:
-    code, out, err = run(capsys, "--json", *VALID[name])
-    assert code == 1
-    error = envelope_of(out)
-    assert error["code"] == "internal"
-    assert f"#{OWNERS[name]}" in error["message"]
-    assert "Traceback" not in err
-
-
 # --- error envelope and exit codes -------------------------------------------------------------
 
 

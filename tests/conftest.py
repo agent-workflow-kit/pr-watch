@@ -13,11 +13,13 @@ binaries (tests/fakebin) plus a sandbox bin directory. The sandbox bin holds:
 A test that needs forgectl or crontab must put a fake in tests/fakebin. tests/fakebin is first
 on PATH and holds the fake forgectl, so `forgectl` by name resolves to the fake (it exits 98
 without a scenario, and leaves no hit in `hits.log`); the exit-99 `forgectl` stub is reachable
-by its absolute path only. The `crontab` stub is reachable by name. A stub hit fails the test
+by its absolute path only; so is the `crontab` stub, because tests/fakebin/crontab (a fake keeping
+its table in `$HOME/.fake-crontab`) shadows it by name. A stub hit fails the test
 at teardown even if the code under test swallowed the failure, unless the test carries the
 `expect_guard_hit` marker. Because PATH can be bypassed (absolute paths, an explicit `env=`),
 `subprocess.Popen` is also wrapped: launching a `crontab` or `forgectl` binary from outside the
-sandbox bin or tests/fakebin raises.
+sandbox bin or tests/fakebin raises, by name (whatever the PATH order), by path, via `executable=`
+or through a symlink from an allowed directory; only the fake crontab/forgectl pass.
 """
 
 from __future__ import annotations
@@ -169,10 +171,20 @@ def _first_program(args: Any, shell: bool) -> str | None:
 
 
 def forbidden_launch(
-    args: Any, env: Mapping[str, str] | None, shell: bool, allowed_dirs: tuple[Path, ...]
+    args: Any,
+    env: Mapping[str, str] | None,
+    shell: bool,
+    allowed_dirs: tuple[Path, ...],
+    executable: Any = None,
 ) -> str | None:
-    """The offending real path if `args` would start a real crontab/forgectl, else None."""
+    """The offending real path if the launch would start a crontab/forgectl that is not one of
+    the tests' own (a file inside `allowed_dirs`, reached by its real path too), else None.
+
+    Covers a bare name resolved through any PATH ordering (a real binary ahead of the fake, or
+    the fake last), an absolute or relative path, `shell=True` and `executable=`."""
     program = _first_program(args, shell)
+    if executable is not None and not shell:
+        program = os.fsdecode(executable)
     if not program:
         return None
     search = (env if env is not None else os.environ).get("PATH", os.defpath)
@@ -187,7 +199,9 @@ def forbidden_launch(
         if not real.exists() and not found:
             continue
         absolute = Path(os.path.abspath(candidate))
-        if any(absolute.is_relative_to(d) for d in allowed_dirs):
+        if all(
+            any(path.is_relative_to(d) for d in allowed_dirs) for path in (absolute, real)
+        ):  # a symlink from an allowed dir to a real binary is not allowed
             continue
         return str(real)
     return None
@@ -214,7 +228,9 @@ def isolated_env(
     original_init = subprocess.Popen.__init__
 
     def guarded_init(self: Any, args: Any, *a: Any, **kw: Any) -> None:
-        bad = forbidden_launch(args, kw.get("env"), bool(kw.get("shell")), allowed)
+        bad = forbidden_launch(
+            args, kw.get("env"), bool(kw.get("shell")), allowed, kw.get("executable")
+        )
         if bad:
             with hits.open("a", encoding="utf-8") as fh:
                 fh.write(f"popen:{bad}\n")

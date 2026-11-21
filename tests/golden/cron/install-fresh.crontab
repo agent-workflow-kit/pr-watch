@@ -1,0 +1,4 @@
+# pr-watch managed v1 every=5m
+PATH={HOME}/.local/bin:{FORGECTL_DIR}:/usr/local/bin:/usr/bin:/bin
+*/5 * * * * '{PR_WATCH}' poll --quiet
+# pr-watch managed end
