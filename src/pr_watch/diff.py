@@ -35,6 +35,10 @@ Conservative readings (the interface is silent):
 - A part that is not baselined (or any part under `rebaseline`) is silent; `ready` and
   `converted_to_draft` have no part and are silent under `rebaseline` only. A silent `ci` is
   adopted as the stored state with the hold cleared.
+- `approval_withdrawn` fires per reviewer key whose stored state is `approved` and whose new
+  entry is `dismissed` or absent from a complete `reviews` part; `approved` to
+  `changes_requested` is only `changes_requested`. Its `at` and `commit_sha` are the withdrawn
+  approval's (stored), `occurred_at` is null (no host gives the time of a withdrawal).
 - A reviewer whose new state is `unknown` is no `approved` or `changes_requested`; a stored
   `unknown` counts as no entry (a later known verdict fires); a reviewer new to the digest is
   `not approved`. `approved` compares `at` by instant (raw text only when neither parses).
@@ -480,6 +484,34 @@ def _changes_requested(ctx: Ctx) -> list[dict[str, Any]]:
     return _verdicts(ctx, "changes_requested")
 
 
+def _approval_withdrawn(ctx: Ctx) -> list[dict[str, Any]]:
+    """The reviewers whose stored entry is `approved` and whose new entry is `dismissed` or gone.
+    `changes_requested` has its own event, and an unreadable state keeps the stored entry (the
+    digest builder), so neither fires here. A vanished entry counts only because the `reviews`
+    part is complete (an incomplete one never reaches a diff)."""
+    if _quiet(ctx, "reviews"):
+        return []
+    before, after = _reviewer_entries(ctx.old), _reviewer_entries(ctx.new)
+    approvals = ctx.new.get("approvals_at_head")
+    count = approvals if isinstance(approvals, int) and not isinstance(approvals, bool) else None
+    out = []
+    for key in sorted(before):
+        was, now = before[key], after.get(key)
+        if was.get("state") != "approved" or (now is not None and now.get("state") != "dismissed"):
+            continue
+        out.append(
+            {
+                "occurred_at": None,
+                "reviewer": _reviewer_account(ctx, key),
+                "to": None if now is None else "dismissed",
+                "commit_sha": _sha(was.get("commit_sha")),
+                "at": _ts(was.get("at")),
+                "approvals_at_head": count,
+            }
+        )
+    return out
+
+
 def _request_keys(digest: Mapping[str, Any]) -> tuple[set[str], bool]:
     part = _map(digest.get("review_requests"))
     keys = part.get("outstanding")
@@ -689,6 +721,7 @@ RULES: Final[tuple[Rule, ...]] = (
     Rule("review_requested", _review_requested),
     Rule("approved", _approved),
     Rule("changes_requested", _changes_requested),
+    Rule("approval_withdrawn", _approval_withdrawn),
     Rule("ci", _ci),
     Rule("ready", _ready),
     Rule("converted_to_draft", _converted_to_draft),

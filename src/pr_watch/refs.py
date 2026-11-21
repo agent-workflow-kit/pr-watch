@@ -125,6 +125,7 @@ EVENT_TYPES: Final = (
     "review_requested",
     "approved",
     "changes_requested",
+    "approval_withdrawn",
     "ci",
     "ready",
     "converted_to_draft",

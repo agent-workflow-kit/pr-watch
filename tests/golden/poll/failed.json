@@ -38,6 +38,7 @@
     "review_requested": 0,
     "approved": 0,
     "changes_requested": 0,
+    "approval_withdrawn": 0,
     "ci": 0,
     "ready": 0,
     "converted_to_draft": 0,

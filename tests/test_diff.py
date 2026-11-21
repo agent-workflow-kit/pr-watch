@@ -761,6 +761,7 @@ def test_rule_table_follows_the_documented_order() -> None:
         "review_requested",
         "approved",
         "changes_requested",
+        "approval_withdrawn",
         "ci",
         "ready",
         "converted_to_draft",

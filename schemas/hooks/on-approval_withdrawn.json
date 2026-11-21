@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/hooks/on-approval_withdrawn.json",
+  "title": "on-approval_withdrawn hook payload (stdin)",
+  "description": "After the event's transaction committed. At-most-once delivery. Host text fields are untrusted.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "pr-watch"
+    },
+    "hook": {
+      "const": "on-approval_withdrawn"
+    },
+    "object_type": {
+      "const": "pr"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/pr_id"
+    },
+    "event_id": {
+      "$ref": "../defs.json#/$defs/event_id",
+      "description": "Same value as id; the deduplication key."
+    },
+    "id": {
+      "$ref": "../defs.json#/$defs/event_id"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "type": {
+      "const": "approval_withdrawn"
+    },
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "pr_id": {
+      "$ref": "../defs.json#/$defs/pr_id"
+    },
+    "repo": {
+      "$ref": "../defs.json#/$defs/repo_id"
+    },
+    "detected_at": {
+      "$ref": "../defs.json#/$defs/ts"
+    },
+    "occurred_at": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/ts"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "labels": {
+      "$ref": "../defs.json#/$defs/labels"
+    },
+    "head_sha": {
+      "$ref": "../defs.json#/$defs/sha"
+    },
+    "watches": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/watch_id"
+      },
+      "uniqueItems": true
+    },
+    "reviewer": {
+      "$ref": "../defs.json#/$defs/author"
+    },
+    "commit_sha": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/sha"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "at": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/ts"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "to": {
+      "oneOf": [
+        {
+          "const": "dismissed"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The reviewer's new state, null when the entry is gone from the latest_by_reviewer list."
+    },
+    "approvals_at_head": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "event_id",
+    "id",
+    "seq",
+    "type",
+    "pr",
+    "pr_id",
+    "repo",
+    "detected_at",
+    "occurred_at",
+    "labels",
+    "head_sha",
+    "watches",
+    "reviewer",
+    "commit_sha",
+    "at",
+    "to",
+    "approvals_at_head"
+  ]
+}

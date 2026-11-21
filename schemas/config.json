@@ -451,6 +451,34 @@
             ]
           }
         },
+        "on-approval_withdrawn": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^[ \\t\\n]*[^\\u0000-\\u0020\\u007f-\\u009f][^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
+              },
+              "timeout": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 600,
+                "default": 30
+              },
+              "async": {
+                "type": "boolean",
+                "default": true
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "cmd"
+            ]
+          }
+        },
         "on-ci": {
           "type": "array",
           "items": {

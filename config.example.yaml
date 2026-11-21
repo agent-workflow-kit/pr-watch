@@ -53,6 +53,7 @@ hooks:
   # on-review_requested: [{cmd: "my-script", timeout: 30, async: true}]
   # on-approved: [{cmd: "my-script", timeout: 30, async: true}]
   # on-changes_requested: [{cmd: "my-script", timeout: 30, async: true}]
+  # on-approval_withdrawn: [{cmd: "my-script", timeout: 30, async: true}]
   # on-ci: [{cmd: "my-script", timeout: 30, async: true}]
   # on-ready: [{cmd: "my-script", timeout: 30, async: true}]
   # on-converted_to_draft: [{cmd: "my-script", timeout: 30, async: true}]

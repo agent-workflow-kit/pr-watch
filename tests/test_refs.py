@@ -674,7 +674,7 @@ def test_parse_hook() -> None:
     assert parse_hook("on-pushed=echo hi") == ("on-pushed", "echo hi")
     assert parse_hook("post-poll=a=b") == ("post-poll", "a=b")
     assert parse_hook("on-ci=  x\ty\nz") == ("on-ci", "  x\ty\nz")
-    assert len(refs.HOOK_NAMES) == 15
+    assert len(refs.HOOK_NAMES) == 16
     assert "post-poll" in refs.HOOK_NAMES
 
 

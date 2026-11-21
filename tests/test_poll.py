@@ -167,8 +167,8 @@ def test_a_pushed_head_becomes_one_pushed_event_and_is_counted(
     assert events(store) == ["pushed"]
     assert list(doc["events"]) == [
         "opened", "reopened", "pushed", "comment", "review_comment", "review",
-        "review_requested", "approved", "changes_requested", "ci", "ready",
-        "converted_to_draft", "merged", "closed",
+        "review_requested", "approved", "changes_requested", "approval_withdrawn", "ci",
+        "ready", "converted_to_draft", "merged", "closed",
     ]  # fmt: skip
 
 

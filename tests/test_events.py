@@ -63,6 +63,11 @@ def add_event(
         payload = {"from_sha": "b" * 40, "to_sha": "a" * 40, "forced": None, **payload}
     if type_ in ("ready", "converted_to_draft"):
         payload = {"from_blocked_by": [], "blocked_by": [], **payload}
+    if type_ == "approval_withdrawn":
+        payload = {
+            "reviewer": {"id": "1", "login": "a", "is_bot": False}, "to": "dismissed",
+            "commit_sha": None, "at": None, "approvals_at_head": None, **payload,
+        }  # fmt: skip
     if type_ == "review_requested":
         payload = {
             "reviewer": {"id": None, "login": "core", "kind": "team"}, "code_owner": None,
@@ -378,6 +383,17 @@ def test_type_filter_accepts_review_requested_and_converted_to_draft(
     assert code == 0 and [json.loads(x)["type"] for x in out.splitlines()] == ["converted_to_draft"]
 
 
+def test_type_filter_accepts_approval_withdrawn(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    add_event(store, "approval_withdrawn")  # 1
+    add_event(store, "approved")  # 2
+    since = ("--since", cur(store, 0))
+    assert seqs(events(capsys, *since, "--type", "approval_withdrawn")) == [1]
+    code, out, _ = run(capsys, "export", "--type", "approval_withdrawn")
+    assert code == 0 and [json.loads(x)["type"] for x in out.splitlines()] == ["approval_withdrawn"]
+
+
 def test_label_filter_is_and(store: Store, capsys: pytest.CaptureFixture[str]) -> None:
     populate(store)
     since = ("--since", cur(store, 0))
@@ -534,6 +550,10 @@ def test_every_event_type_validates(store: Store, capsys: pytest.CaptureFixture[
             "reviewer": {"id": "7", "login": "core", "kind": "team"}, "code_owner": True,
         },
         "changes_requested": {"reviewer": author, "commit_sha": None, "at": None, "can_push": None},
+        "approval_withdrawn": {
+            "reviewer": author, "to": None, "commit_sha": None, "at": None,
+            "approvals_at_head": None,
+        },
         "ci": {
             "from": "pending", "to": "failing", "checks": [], "counts":
             {"passing": 0, "failing": 1, "pending": 0}, "for_head": "a" * 40,
