@@ -82,5 +82,5 @@ This plan implements [interface.md](interface.md) (the normative spec) and [desi
 
 - **0.x**: stages 0 to 6, in order. Every 0.x release keeps the interface additive.
 - **1.0** when: the live suite has passed on GitHub and on a GitLab server, the GitLab transition shapes are confirmed, a real poll loop has run for a week under cron without a stuck PR or a lost event, forgectl is at a stable version, and the macOS checklist is done.
-- **1.x (additive)**: the candidates listed in design.md under "Not in 0.1" (`opened`, `reopened`, `review_requested`, back-to-draft, approval withdrawn, retarget, rename, unreachable and recovered, a readiness event), a `browse` TUI, a body-free forgectl projection when forgectl offers one, per-owner event filters if consumers need more, and richer pacing.
+- **1.x (additive)**: the candidates listed in design.md under "Not in 0.1" (`opened`, `reopened`, `review_requested`, back-to-draft, approval withdrawn, retarget, rename, unreachable and recovered, a readiness event), a `browse` TUI, an output cap when forgectl offers one, per-owner event filters if consumers need more, and richer pacing.
 - **2.0**: only if the event model changes incompatibly; nothing is planned.
