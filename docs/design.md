@@ -10,7 +10,7 @@ Layer 2 (composite). Watches PRs for changes and exposes them as events and hook
 
 | Tool | Binding | What for |
 |---|---|---|
-| forgectl | A (hard) | `prs`, `snapshot`, `show`, `compare` (read-only, `--json`), `whoami` (host discovery); minimum version `MIN_FORGECTL`, a constant of the release |
+| forgectl | A (hard) | `prs`, `snapshot` (`--no-bodies`), `show`, `compare` (read-only, `--json`), `whoami` (host discovery); minimum version `MIN_FORGECTL`, a constant of the release |
 
 Third parties: none directly (git-host access is forgectl's). Dependencies of the package itself: `pyyaml` (the stdlib cannot read YAML) and `pydantic` (config validation), as the design guide prescribes; nothing else beyond the standard library (`argparse`, `sqlite3`, `subprocess`, `concurrent.futures`).
 
@@ -119,7 +119,7 @@ Classification and its consequences are in [Failures](interface.md#failures). A 
 
 ## Carry-forwards
 
-- forgectl CF-a: a body-free projection of `snapshot` or a cap on its final output; until then pr-watch degrades to `forgectl show` for terminal detection only ([Residual risks](interface.md#residual-risks)).
+- forgectl CF-a (resolved for bodies, 1.x): `snapshot --no-bodies` is used, so comment and review bodies no longer reach the output cap. Still open: forgectl has no cap on the size of its output, so a PR whose own body, title or comment count is extreme still degrades to `forgectl show` for terminal detection only ([Residual risks](interface.md#residual-risks)).
 - forgectl CF-h: `show` or `prs` item fields that would let a listing detect a repo rename.
 - awkit-ci and the harness: the `awkit cron install` writer produces pr-watch's golden block with its end line ([`cron`](interface.md#cron)).
 - review-respond and ticket-work: label watches with `consumer=<name>`, select events with `events --label` and keep a set of handled comment ids ([Consumer notes](interface.md#consumer-notes)).

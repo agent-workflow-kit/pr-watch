@@ -77,6 +77,42 @@ def run(store: Store, config: Config | None = None, **kw: Any) -> Any:
     return cycle(store, config, client=capped_client(), **kw)
 
 
+# --- body-free snapshot: padded comments no longer reach the cap ---
+
+
+def padded_note(cid: str, text: str) -> dict[str, Any]:
+    return {
+        "author": {"id": "1004", "is_bot": False, "login": "user-4"},
+        "body": text, "created_at": "2026-10-02T10:45:00Z", "id": cid, "minimized": False,
+        "reply_to": None, "review_id": None, "updated_at": "2026-10-02T10:45:00Z",
+    }  # fmt: skip
+
+
+def test_a_pr_padded_with_comment_bodies_still_produces_events(
+    store: Store, fake: FakeForgectl
+) -> None:
+    snap = pr(1)
+    pr_id = baseline(store, fake, snap)
+    cid = "gh:ic:IC_padded0001"
+    thread = {
+        "comments": [padded_note(cid, "x" * (3 * CAP))], "commit_sha": None, "id": cid,
+        "line": None, "outdated": False, "path": None, "resolvable": False, "resolved": False,
+        "side": None, "start_line": None,
+    }  # fmt: skip
+    fake.update(
+        snap["pr"],
+        threads=[*snap["threads"], thread],
+        reviews=[{**r, "body": "y" * (3 * CAP)} for r in snap["reviews"]],
+        updated_at="2026-10-02T11:00:00Z",
+    )
+    store.conn.execute("UPDATE prs SET listed_updated_at = '2026-10-02T11:00:00.000000Z'")
+    store.conn.commit()
+    out, res = run(store)
+    assert events(store)[-1]["type"] == "comment" and events(store)[-1]["comment_id"] == cid
+    assert len(fake.calls("show")) == 0 and res.failures == []
+    assert col(store, pr_id, "failure_count") == 0 and out.host(HOST).snapshots == 1
+
+
 # --- over the cap: still open ---
 
 
