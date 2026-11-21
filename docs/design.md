@@ -30,7 +30,7 @@ Third parties: none directly (git-host access is forgectl's). Dependencies of th
 | D-10 | Query scope by repeatable `--host` and `--repo` filters; enumeration per host; config keys with per-host and per-repo overrides | One shared `--limit` across hosts cut one host's list (spike B) | [Config](interface.md#config) |
 | D-11 | `watch add <pr>` baselines synchronously with one `snapshot` (`--no-baseline` for the per-PR form only); a query `watch add` never baselines, its first `poll` does | A typo should fail at add time; no command that behaves differently under cron | [`watch add`](interface.md#watch-add) |
 | D-12 | No audit log; `export` prints events | pr-watch takes no external action | [Audit and log](interface.md#audit-and-log) |
-| D-13 | Query enumeration lists the open set each cycle; "changed" is `listed_updated_at > snap_updated_at`; a reopen sets a persisted re-baseline flag (silent except `pushed`, `merged` and `closed`) | Removes windows, clocks and the baseline hole | [Poll cycle](interface.md#poll-cycle), [PR status](interface.md#pr-status) |
+| D-13 | Query enumeration lists the open set each cycle; "changed" is `listed_updated_at > snap_updated_at`; a reopen sets a persisted re-baseline flag (silent except `reopened`, `pushed`, `merged` and `closed`) | Removes windows, clocks and the baseline hole | [Poll cycle](interface.md#poll-cycle), [PR status](interface.md#pr-status) |
 | D-14 | Membership: enumeration adds and marks (`left_count`, two consecutive complete listings), only a snapshot commit removes a source | a merged member must keep its source so its event is stored; no enumeration-time removal | [Watches, owners and members](interface.md#watches-owners-and-members) |
 | D-15 | Deviations from the design guide are recorded in Hooks and Labels of the interface | one place for the differences | [Hooks](interface.md#hooks), [Labels](interface.md#labels) |
 
@@ -53,7 +53,7 @@ The seeded text in this repo's older README and design said "binding TBD"; it is
 
 ## Not in 0.1
 
-No extra event types in 0.1: the events a PR can lack are documented as non-events in [Consumer notes](interface.md#consumer-notes), and consumers re-read forgectl for state. Candidates for 1.x: `opened` (needs `created_at` from forgectl `prs`), `reopened`, `review_requested`, back-to-draft, `approval_withdrawn` or `review_dismissed`, `retargeted`, `renamed`, `unreachable` and `recovered`, a mergeability or readiness event.
+No extra event types in 0.1: the events a PR can lack are documented as non-events in [Consumer notes](interface.md#consumer-notes), and consumers re-read forgectl for state. Done in 1.x: `opened` and `reopened` (#34; forgectl v0.55.3 `prs` and snapshot carry `created_at`). Candidates for 1.x: `review_requested`, back-to-draft, `approval_withdrawn` or `review_dismissed`, `retargeted`, `renamed`, `unreachable` and `recovered`, a mergeability or readiness event.
 
 ## Live verification
 

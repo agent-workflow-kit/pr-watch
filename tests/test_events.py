@@ -347,6 +347,19 @@ def test_type_filter_is_or(store: Store, capsys: pytest.CaptureFixture[str]) -> 
     assert seqs(events(capsys, *since, "--type", "pushed", "--type", "ready")) == [2, 3, 4]
 
 
+def test_type_filter_accepts_the_new_types(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    add_event(store, "opened")  # 1
+    add_event(store, "reopened")  # 2
+    add_event(store, "pushed")  # 3
+    since = ("--since", cur(store, 0))
+    assert seqs(events(capsys, *since, "--type", "opened")) == [1]
+    assert seqs(events(capsys, *since, "--type", "reopened", "--type", "opened")) == [1, 2]
+    code, out, _ = run(capsys, "export", "--type", "reopened")
+    assert code == 0 and [json.loads(line)["type"] for line in out.splitlines()] == ["reopened"]
+
+
 def test_label_filter_is_and(store: Store, capsys: pytest.CaptureFixture[str]) -> None:
     populate(store)
     since = ("--since", cur(store, 0))
@@ -486,6 +499,8 @@ def test_events_json_golden(store: Store, capsys: pytest.CaptureFixture[str]) ->
 def test_every_event_type_validates(store: Store, capsys: pytest.CaptureFixture[str]) -> None:
     author = {"id": "u", "login": "l", "is_bot": None}
     extras: dict[str, dict[str, Any]] = {
+        "opened": {},
+        "reopened": {},
         "pushed": {"from_sha": "b" * 40, "to_sha": "a" * 40, "forced": True},
         "comment": {"comment_id": "gh:ic:1", "thread_id": None, "author": author},
         "review_comment": {

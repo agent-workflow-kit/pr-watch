@@ -23,7 +23,9 @@ here:
   stored digest, status and terminal columns; only the counters, `rebaseline`, `last_polled_at`
   and `failure_count` change.
 - **Reopen.** A reactivated row (flag) or a stored `closed` shown `open` is re-baselined silently
-  by `diff` (only `pushed`, `merged` and `closed` fire).
+  by `diff` (only `reopened`, `pushed`, `merged` and `closed` fire).
+- **Opened.** `row.opened_since` (a hint the poll sets for a first-seen query member) lets `diff`
+  emit `opened` at first sight; it is ignored when the row has a stored digest.
 - **Rename.** A row is keyed on `pr_id`: `pr` and `repo` are refreshed from the snapshot only
   when both are well formed (at most 256 characters), `pr` is `repo#N`, and the host equals the
   row's host; otherwise both stored values are kept. Events carry the snapshot's `pr`.
@@ -77,6 +79,9 @@ class RowState:
     rebaseline: bool = False
     incomplete: str = "{}"
     baselined_at: str | None = None
+    # Not a column: the creation time of the oldest query watch that holds the row, set by the
+    # poll for a first-seen member (`opened`, docs/interface.md); None for everything else.
+    opened_since: str | None = None
 
 
 @dataclass(frozen=True)
@@ -158,7 +163,7 @@ def plan_snapshot(
     reopened = stored is not None and stored.get("state") == "closed"
     new = build_digest(snap, stored, rebaseline=row.rebaseline)
     result = diff(stored, new, snap, rebaseline=row.rebaseline, forced=forced,
-                  settle_polls=settle_polls)  # fmt: skip
+                  settle_polls=settle_polls, opened_since=row.opened_since)  # fmt: skip
     digest = result.digest
     if stored is not None and stored.get("state") == "merged":
         # merged is final at row level: keep the stored digest and status columns

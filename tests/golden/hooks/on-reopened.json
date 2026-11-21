@@ -1,0 +1,22 @@
+{
+  "detected_at": "2026-10-03T00:00:00.000000Z",
+  "event_id": "ev-aaaaaaaaaaab",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "hook": "on-reopened",
+  "id": "ev-aaaaaaaaaaab",
+  "labels": [
+    "k=v"
+  ],
+  "object_id": "P1",
+  "object_type": "pr",
+  "occurred_at": null,
+  "pr": "example.net/o/r#1",
+  "pr_id": "P1",
+  "repo": "example.net/o/r",
+  "seq": 1,
+  "tool": "pr-watch",
+  "type": "reopened",
+  "watches": [
+    "w-aaaaaaaaaa"
+  ]
+}

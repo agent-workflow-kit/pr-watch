@@ -29,6 +29,8 @@
     "incomplete": 0
   },
   "events": {
+    "opened": 0,
+    "reopened": 0,
     "pushed": 0,
     "comment": 0,
     "review_comment": 0,

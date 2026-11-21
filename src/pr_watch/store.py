@@ -81,6 +81,8 @@ TS_RE: Final = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{
 
 EVENT_TYPES: Final = frozenset(
     {
+        "opened",
+        "reopened",
         "pushed",
         "review",
         "comment",

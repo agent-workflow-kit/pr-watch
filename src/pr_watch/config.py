@@ -212,6 +212,8 @@ class Hooks(_Model):
     max_per_pr_per_poll: int = Field(default=10, ge=1, le=1000)
     concurrency: int = Field(default=4, ge=1, le=32)
     env_allow: list[EnvAllowName] = Field(default_factory=list)
+    on_opened: list[HookCmd] = Field(default_factory=list, alias="on-opened")
+    on_reopened: list[HookCmd] = Field(default_factory=list, alias="on-reopened")
     on_pushed: list[HookCmd] = Field(default_factory=list, alias="on-pushed")
     on_comment: list[HookCmd] = Field(default_factory=list, alias="on-comment")
     on_review_comment: list[HookCmd] = Field(default_factory=list, alias="on-review_comment")

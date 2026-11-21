@@ -166,8 +166,8 @@ def test_a_pushed_head_becomes_one_pushed_event_and_is_counted(
     assert doc["prs"]["snapshotted"] == 1 and doc["prs"]["unchanged"] == 0
     assert events(store) == ["pushed"]
     assert list(doc["events"]) == [
-        "pushed", "comment", "review_comment", "review", "approved", "changes_requested",
-        "ci", "ready", "merged", "closed",
+        "opened", "reopened", "pushed", "comment", "review_comment", "review", "approved",
+        "changes_requested", "ci", "ready", "merged", "closed",
     ]  # fmt: skip
 
 
@@ -333,7 +333,7 @@ def store_path(store: Store) -> Path:
     return Path(store.path).parent
 
 
-def test_closed_and_reopened_prs_are_reactivated_silently(
+def test_closed_and_reopened_prs_are_reactivated_with_one_reopened_event(
     fake: FakeForgectl, store: Store, state_dir: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     snap = pr(7)
@@ -345,7 +345,8 @@ def test_closed_and_reopened_prs_are_reactivated_silently(
     fake.update(snap["pr"], state="open", closed_at=None, updated_at=LATEST)
     _, doc = poll(capsys)
     assert col(store, snap["pr_id"], "status") == "active"
-    assert sum(doc["events"].values()) == 0 and events(store) == ["closed"]  # a reopen is silent
+    assert doc["events"]["reopened"] == 1 and sum(doc["events"].values()) == 1
+    assert events(store) == ["closed", "reopened"]
     statuses = [(r["from"], r["to"]) for r in log_records(state_dir) if r["event"] == "pr_status"]
     assert ("terminal", "active") in statuses
 
@@ -690,7 +691,8 @@ def test_pr_poll_reactivates_a_closed_row_that_is_open_again(
     fake.update(snap["pr"], state="open", closed_at=None, updated_at=LATEST)
     _, doc = poll(capsys, "--pr", snap["pr"])
     assert doc["polled"] is True and col(store, snap["pr_id"], "status") == "active"
-    assert sum(doc["events"].values()) == 0 and events(store) == ["closed"]
+    assert doc["events"]["reopened"] == 1 and sum(doc["events"].values()) == 1
+    assert events(store) == ["closed", "reopened"]
     assert ("terminal", "active") in [
         (r["from"], r["to"]) for r in log_records(state_dir) if r["event"] == "pr_status"
     ]

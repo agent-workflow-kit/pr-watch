@@ -672,6 +672,17 @@ def test_the_on_pushed_payload_golden() -> None:
     check_golden("on-pushed", payload)
 
 
+@pytest.mark.parametrize("kind", ["opened", "reopened"])
+def test_the_on_opened_and_on_reopened_payload_goldens(kind: str) -> None:
+    event = ev(1, kind)
+    if kind == "opened":
+        event.payload.update(occurred_at="2026-10-02T09:00:00.000000Z")
+    payload = hooks.event_payload(event)
+    assert_valid(f"hooks/on-{kind}", payload)
+    assert payload["hook"] == f"on-{kind}" and payload["type"] == kind
+    check_golden(f"on-{kind}", payload)
+
+
 def test_the_post_poll_payload_golden() -> None:
     rep = report(
         [
