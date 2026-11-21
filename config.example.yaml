@@ -20,18 +20,18 @@ hosts: {}                     # per-host overrides: full_every and concurrency
   # example.com: {full_every: 12, concurrency: 2}
 
 retention:
-  events: 30d                 # whole days, at least 30d
+  events: 30d                 # how long events are kept: whole days, at least 30d
 
 expiry:
-  after_terminal: 7d
+  after_terminal: 7d          # a merged or closed PR's state is dropped this long after (up to a day later, in prune)
 
 failures:
-  unreachable_after: 5
+  unreachable_after: 5        # consecutive per-PR failures before a PR is unreachable (1 to 1000)
 
 detect_force_push: false      # call forgectl compare to fill `forced`
 
 ci:
-  settle_polls: 1
+  settle_polls: 1             # extra snapshots a CI change to or from none is held before its ci event (0 to 10)
   pending_max_age: 6h         # an unsettled PR is snapshotted every cycle for at most this long
 
 forgectl:
@@ -39,16 +39,16 @@ forgectl:
   max_output_mib: 32          # MiB read from one forgectl call (1 to 256)
 
 hooks:
-  max_per_poll: 50            # 0: no hook runs
+  max_per_poll: 50            # hook runs started per poll; 0: no hook runs (0 to 100000)
   max_per_pr_per_poll: 10     # 1 to 1000
   concurrency: 4              # hook workers, 1 to 32
-  env_allow: []
+  env_allow: []               # extra environment names hooks may see; hooks get a clean environment otherwise
   # on-pushed, on-comment, on-review_comment, on-review, on-approved, on-changes_requested,
   # on-ci, on-ready, on-merged, on-closed and post-poll each take a list:
   # on-approved: [{cmd: "my-script", timeout: 30, async: true}]   # timeout in seconds, 1 to 600
 
 cron:
-  env_file: null
+  env_file: null              # absolute path of a 0600 file the cron entry sources (for forgectl tokens); null: none
 
 repos: {}                     # per-repo overrides: detect_force_push, ci.settle_polls, failures.unreachable_after
   # example.com/group/project: {detect_force_push: true, ci: {settle_polls: 2}, failures: {unreachable_after: 8}}
