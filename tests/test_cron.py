@@ -133,6 +133,8 @@ def test_install_into_no_crontab_writes_the_golden_block(
         "previous_every": None,
         "lines": env.golden("install-fresh.crontab").decode().splitlines(),
         "warnings": [],
+        "dry_run": False,
+        "block": env.golden("install-fresh.crontab").decode().splitlines(),
     }
 
 
@@ -207,7 +209,11 @@ def test_uninstall_removes_only_the_block(env: Env, capsys: pytest.CaptureFixtur
     code, out, _ = run(capsys, "--json", "cron", "uninstall")
     doc = json.loads(out)
     assert_valid("cli/cron-uninstall", doc)
-    assert (code, doc) == (0, {"installed": False, "changed": True})
+    assert (code, {k: doc[k] for k in ("installed", "changed", "dry_run")}) == (
+        0,
+        {"installed": False, "changed": True, "dry_run": False},
+    )
+    assert doc["block"][0].startswith("# pr-watch managed v1")
     assert env.table() == env.golden("uninstall-after.crontab")
 
 
@@ -226,7 +232,10 @@ def test_uninstall_without_a_block_is_a_no_op(
     if before is not None:
         env.set_table(before)
     code, out, _ = run(capsys, "--json", "cron", "uninstall")
-    assert (code, json.loads(out)) == (0, {"installed": False, "changed": False})
+    assert (code, json.loads(out)) == (
+        0,
+        {"installed": False, "changed": False, "dry_run": False, "block": None},
+    )
     assert env.table() == before
 
 
@@ -1151,3 +1160,192 @@ def test_install_through_the_real_entry_point(env: Env) -> None:
     doc = json.loads(proc.stdout)
     assert_valid("cli/cron-install", doc)
     assert env.table() == env.golden("install-fresh.crontab")
+
+
+# --- --dry-run --------------------------------------------------------------------------------
+
+
+def dry(capsys: pytest.CaptureFixture[str], command: str, *argv: str) -> dict[str, Any]:
+    code, out, err = run(capsys, "--json", "cron", command, "--dry-run", *argv)
+    assert code == 0, (out, err)
+    doc = json.loads(out)
+    assert_valid(f"cli/cron-{command}", doc)
+    assert doc["dry_run"] is True
+    return doc
+
+
+def real(capsys: pytest.CaptureFixture[str], command: str, *argv: str) -> dict[str, Any]:
+    code, out, err = run(capsys, "--json", "cron", command, *argv)
+    assert code == 0, (out, err)
+    doc = json.loads(out)
+    assert_valid(f"cli/cron-{command}", doc)
+    assert doc["dry_run"] is False
+    return doc
+
+
+def _same_but_dry_run(preview: dict[str, Any], actual: dict[str, Any]) -> None:
+    assert {k: v for k, v in preview.items() if k != "dry_run"} == {
+        k: v for k, v in actual.items() if k != "dry_run"
+    }
+
+
+INSTALL_BEFORES = {
+    "no_crontab": None,
+    "empty": b"",
+    "foreign": b"0 3 * * * /bin/backup\n",
+    "foreign_no_newline": b"0 3 * * * /bin/backup",
+    "other_interval": "reinstall-before.crontab",
+    "identical": "install-fresh.crontab",
+}
+
+
+@pytest.mark.parametrize("name", list(INSTALL_BEFORES))
+def test_install_dry_run_reports_what_the_real_run_then_does(
+    env: Env, capsys: pytest.CaptureFixture[str], name: str
+) -> None:
+    before = INSTALL_BEFORES[name]
+    if isinstance(before, str):
+        before = env.golden(before)
+    if before is not None:
+        env.set_table(before)
+    preview = dry(capsys, "install")
+    assert env.table() == before  # the dry run wrote nothing
+    actual = real(capsys, "install")
+    _same_but_dry_run(preview, actual)
+    assert preview["block"] == (preview["lines"] if preview["changed"] else None)
+
+
+def test_install_dry_run_with_every_and_env_file(
+    env: Env, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env_file = make_env_file(tmp_path)
+    write_config(env, f"cron:\n  env_file: {env_file}\n")
+    preview = dry(capsys, "install", "--every", "2h")
+    assert preview["every"] == "2h" and ". '" in preview["lines"][2]
+    assert env.table() is None
+    _same_but_dry_run(preview, real(capsys, "install", "--every", "2h"))
+
+
+def test_install_dry_run_of_an_identical_block_is_unchanged_with_a_null_block(
+    env: Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    installed(capsys)
+    doc = dry(capsys, "install")
+    assert (doc["changed"], doc["replaced"], doc["block"]) == (False, True, None)
+
+
+def test_uninstall_dry_run_names_the_block_a_real_run_removes(
+    env: Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    before = env.golden("reinstall-before.crontab")
+    env.set_table(before)
+    preview = dry(capsys, "uninstall")
+    assert env.table() == before
+    assert preview["changed"] is True and preview["installed"] is False
+    assert preview["block"][0].startswith("# pr-watch managed")
+    assert preview["block"][-1] == "# pr-watch managed end"
+    actual = real(capsys, "uninstall")
+    _same_but_dry_run(preview, actual)
+    assert not any(line in (env.table() or b"").decode() for line in preview["block"])
+
+
+@pytest.mark.parametrize("before", [None, b"", b"0 3 * * * /bin/backup\n"])
+def test_uninstall_dry_run_without_a_block_is_unchanged_with_a_null_block(
+    env: Env, capsys: pytest.CaptureFixture[str], before: bytes | None
+) -> None:
+    if before is not None:
+        env.set_table(before)
+    doc = dry(capsys, "uninstall")
+    assert (doc["changed"], doc["block"]) == (False, None)
+    assert env.table() == before
+
+
+@pytest.mark.parametrize("command", ["install", "uninstall"])
+@pytest.mark.parametrize(
+    "table",
+    [
+        b"# pr-watch managed v1 every=5m\n0 3 * * * /bin/x\n",
+        b"# pr-watch managed end\n",
+        b"# pr-watch managed\n# pr-watch managed end\n# pr-watch managed\n# pr-watch managed end\n",
+    ],
+)
+def test_dry_run_refuses_a_malformed_crontab_like_the_real_run(
+    env: Env, capsys: pytest.CaptureFixture[str], command: str, table: bytes
+) -> None:
+    env.set_table(table)
+    status, out, _ = run(capsys, "--json", "cron", command, "--dry-run")
+    real_status, real_out, _ = run(capsys, "--json", "cron", command)
+    assert status == real_status == 2
+    assert json.loads(out) == json.loads(real_out)
+    assert json.loads(out)["error"]["details"]["kind"] == "malformed_crontab"
+    assert env.table() == table
+
+
+def test_dry_run_still_refuses_a_bad_env_file_and_a_bad_every(
+    env: Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    refused_doc = refused(capsys, "cron", "install", "--dry-run", "--every", "7m")
+    assert refused_doc["code"] == "usage"
+    write_config(env, "cron:\n  env_file: relative.env\n")
+    refused(capsys, "cron", "install", "--dry-run", code="config_invalid")
+    assert env.table() is None
+
+
+@pytest.mark.parametrize("command", ["install", "uninstall"])
+def test_dry_run_never_writes_takes_no_lock_and_creates_nothing(
+    env: Env, backend: Backend, capsys: pytest.CaptureFixture[str], command: str
+) -> None:
+    backend.table = env.golden("reinstall-before.crontab")
+    state = env.home / ".local" / "state" / "pr-watch"
+    assert not state.exists()
+    dry(capsys, command)
+    assert [c.argv for c in backend.calls] == [("crontab", "-l")]
+    assert backend.table == env.golden("reinstall-before.crontab")
+    assert not state.exists()  # no state directory, so no cron.lock either
+
+
+def test_dry_run_does_not_wait_for_a_held_cron_lock(
+    env: Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    installed(capsys)
+    state = open_state_dir()
+    try:
+        fd = os.open(cron.CRON_LOCK, os.O_RDWR | os.O_CREAT, 0o600, dir_fd=state.fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            started = time.monotonic()
+            doc = dry(capsys, "install")
+            assert time.monotonic() - started < cron.LOCK_WAIT / 2
+            assert doc["changed"] is False
+        finally:
+            os.close(fd)
+    finally:
+        state.close()
+
+
+def test_dry_run_still_warns_on_stderr(env: Env, capsys: pytest.CaptureFixture[str]) -> None:
+    env.set_table(b"*/5 * * * * /usr/bin/pr-watch poll\n")
+    code, out, err = run(capsys, "--json", "cron", "install", "--dry-run")
+    assert code == 0 and "poll entry outside" in err
+    assert json.loads(out)["warnings"]
+
+
+def test_dry_run_human_output_says_it_would(env: Env, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, _ = run(capsys, "cron", "install", "--dry-run")
+    assert code == 0 and out.startswith("dry run: would install the pr-watch cron block (every 5m)")
+    assert "# pr-watch managed end" in out
+    env.set_table(env.golden("install-fresh.crontab"))
+    out = run(capsys, "cron", "uninstall", "--dry-run")[1]
+    assert out.startswith("dry run: would remove the pr-watch cron block")
+    assert "# pr-watch managed end" in out
+    assert env.table() == env.golden("install-fresh.crontab")
+
+
+def test_real_runs_report_dry_run_false_and_the_block(
+    env: Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    doc = real(capsys, "install")
+    assert doc["block"] == doc["lines"]
+    assert real(capsys, "install")["block"] is None
+    assert real(capsys, "uninstall")["block"] == doc["lines"]
+    assert real(capsys, "uninstall")["block"] is None

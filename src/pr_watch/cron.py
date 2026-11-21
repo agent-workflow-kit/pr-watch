@@ -30,7 +30,10 @@ Judgment calls where the interface is silent (the conservative reading in each c
 - An unreadable, failing or timed out `crontab` is `internal` (exit 1); so is a lock held for more
   than `LOCK_WAIT` seconds.
 - An empty result is installed with `crontab -r`, not as an empty table.
-- `--dry-run` is not part of the interface for these commands (the schemas have no `dry_run`).
+- `--dry-run` runs the same read and the same `compute` as a real run and skips only the write:
+  it reads the crontab once through `crontab -l`, takes no `cron.lock` (it writes nothing, and one
+  `crontab -l` is a consistent snapshot) and creates no state directory. `dry_run` and `block`
+  are in the result of real runs too (`dry_run` false), so one document serves both.
 """
 
 from __future__ import annotations
@@ -322,16 +325,16 @@ def splice(table: bytes | None, block: list[str]) -> Spliced:
                    _has_poll(outside))  # fmt: skip
 
 
-def remove_block(table: bytes | None) -> tuple[bytes, bool]:
-    """`table` without the block, and whether there was one."""
+def remove_block(table: bytes | None) -> tuple[bytes, list[bytes] | None]:
+    """`table` without the block, and the block's lines (None when there was none)."""
     raw = table or b""
     _check_size(raw)
     lines = _split(raw)
     where = _locate(lines)
     if where is None:
-        return raw, False
+        return raw, None
     rest = lines[: where[0]] + lines[where[1] + 1 :]
-    return (b"\n".join(rest) + b"\n" if rest else b""), True
+    return (b"\n".join(rest) + b"\n" if rest else b""), lines[where[0] : where[1] + 1]
 
 
 def _has_poll(lines: list[bytes]) -> bool:
@@ -417,6 +420,13 @@ def _commit[T](
         os.close(lock_fd)  # the only descriptor this process has on the lock file
 
 
+def _preview[T](compute: Callable[[bytes | None], tuple[bytes, T]]) -> tuple[bool, T]:
+    """`--dry-run`: one read and the same `compute`; returns whether a real run would write."""
+    before = _read()
+    after, info = compute(before)
+    return not _same(before, after), info
+
+
 def _acquire_lock(state: StateDir) -> int:
     """Open `cron.lock` once (never followed if a symlink, checked first with `lstat` so no second
     descriptor is opened on it) and take an exclusive `flock`, waiting at most `LOCK_WAIT`."""
@@ -478,7 +488,10 @@ def install_command(ctx: Context, args: argparse.Namespace) -> int:
             raise CliError("usage", str(exc), details={"kind": "malformed_crontab"}) from None
         return spliced.data, spliced
 
-    changed, spliced = _commit(_state(ctx), compute)
+    if args.dry_run:
+        changed, spliced = _preview(compute)
+    else:
+        changed, spliced = _commit(_state(ctx), compute)
     if spliced.outside_poll:
         warnings.append(
             "the crontab has a pr-watch poll entry outside the managed block; remove it so "
@@ -487,8 +500,15 @@ def install_command(ctx: Context, args: argparse.Namespace) -> int:
     warnings = [one_line(w, 1024) for w in warnings]
     for warning in warnings:
         _stderr_line(f"{PROG}: warning: {warning}\n")  # never silenced by --quiet
-    if changed:
-        head = f"{'updated' if spliced.replaced else 'installed'} the pr-watch cron block"
+    verb = "updated" if spliced.replaced else "installed"
+    if args.dry_run:
+        head = (
+            f"dry run: would {'update' if spliced.replaced else 'install'} the pr-watch cron block"
+            if changed
+            else "dry run: the pr-watch cron block is already current"
+        )
+    elif changed:
+        head = f"{verb} the pr-watch cron block"
     else:
         head = "the pr-watch cron block is already current"
     ctx.emit(
@@ -500,22 +520,40 @@ def install_command(ctx: Context, args: argparse.Namespace) -> int:
             "previous_every": spliced.previous_every,
             "lines": block,
             "warnings": warnings,
+            "dry_run": args.dry_run,
+            "block": block if changed else None,
         },
         human="\n".join([f"{head} (every {every})", *block]),
     )
     return 0
 
 
+def _text(lines: list[bytes]) -> list[str]:
+    return [line.decode("utf-8", "replace") for line in lines]
+
+
 def uninstall_command(ctx: Context, args: argparse.Namespace) -> int:
-    def compute(table: bytes | None) -> tuple[bytes, bool]:
+    def compute(table: bytes | None) -> tuple[bytes, list[bytes] | None]:
         try:
             return remove_block(table)
         except MalformedCrontab as exc:
             raise CliError("usage", str(exc), details={"kind": "malformed_crontab"}) from None
 
-    changed, _ = _commit(_state(ctx), compute)
+    if args.dry_run:
+        changed, removed = _preview(compute)
+    else:
+        changed, removed = _commit(_state(ctx), compute)
+    block = _text(removed) if changed and removed else None
+    if args.dry_run:
+        head = (
+            "dry run: would remove the pr-watch cron block"
+            if changed
+            else "dry run: no pr-watch cron block to remove"
+        )
+    else:
+        head = "removed the pr-watch cron block" if changed else "no pr-watch cron block to remove"
     ctx.emit(
-        {"installed": False, "changed": changed},
-        human="removed the pr-watch cron block" if changed else "no pr-watch cron block to remove",
+        {"installed": False, "changed": changed, "dry_run": args.dry_run, "block": block},
+        human="\n".join([head, *block]) if args.dry_run and block else head,
     )
     return 0

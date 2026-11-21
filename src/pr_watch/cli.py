@@ -234,6 +234,7 @@ HANDLERS: dict[str, Handler] = {
 # --- watch remove, label add, label remove -----------------------------------------------------
 
 # Commands that never read or write state.db: they must not fail on a bad or newer database.
+DRY_RUN_COMMANDS = frozenset({"prune", "cron install", "cron uninstall"})
 NO_STORE_COMMANDS = frozenset({"cron install", "cron uninstall"})
 
 
@@ -571,7 +572,9 @@ def build_parser() -> argparse.ArgumentParser:
     cron = _group(sub, "cron", "install or remove the crontab entry")
     p = _command(cron, "install", "cron install", "write the tagged crontab block")
     p.add_argument("--every", metavar="D", help="interval, e.g. 5m or 1h")
-    _command(cron, "uninstall", "cron uninstall", "remove the tagged crontab block")
+    p.add_argument("--dry-run", action="store_true", help="report only")
+    p = _command(cron, "uninstall", "cron uninstall", "remove the tagged crontab block")
+    p.add_argument("--dry-run", action="store_true", help="report only")
 
     p = _command(sub, "export", "export", "print stored events as JSON lines")
     p.add_argument("--since", metavar="D", help="events detected within the last D")
@@ -853,8 +856,11 @@ def _execute(argv: Sequence[str]) -> int:
             )
         except RefError as exc:
             raise ref_error_to_cli(exc, leaf.format_usage()) from None
-    # `prune --dry-run` is the one read-only form of a mutating command: it opens `mode=ro`.
-    read_only = args.command in READ_ONLY_COMMANDS or (args.command == "prune" and args.dry_run)
+    # `--dry-run` of `prune` and `cron install|uninstall` is the read-only form of a mutating
+    # command: it creates nothing (`prune` opens `mode=ro`; the cron commands take no lock).
+    read_only = args.command in READ_ONLY_COMMANDS or (
+        args.command in DRY_RUN_COMMANDS and args.dry_run
+    )
     try:
         # Read-only commands create nothing: a missing state directory or state.db is an empty
         # store (`ctx.state` / `ctx.store` None); an existing one is checked as usual.
