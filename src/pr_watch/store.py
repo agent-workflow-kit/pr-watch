@@ -90,6 +90,7 @@ EVENT_TYPES: Final = frozenset(
         "review_requested",
         "approved",
         "changes_requested",
+        "approval_withdrawn",
         "ci",
         "ready",
         "converted_to_draft",

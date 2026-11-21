@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "pr-watch/event.json",
   "title": "pr-watch event",
-  "description": "One detected difference on a PR. Fixed in-snapshot order: opened, reopened, pushed, review, comment, review_comment, review_requested, approved, changes_requested, ci, ready, converted_to_draft, merged, closed. Closed shape of this version; consumers must ignore unknown fields and types and must not validate strictly.",
+  "description": "One detected difference on a PR. Fixed in-snapshot order: opened, reopened, pushed, review, comment, review_comment, review_requested, approved, changes_requested, approval_withdrawn, ci, ready, converted_to_draft, merged, closed. Closed shape of this version; consumers must ignore unknown fields and types and must not validate strictly.",
   "oneOf": [
     {
       "type": "object",
@@ -771,6 +771,120 @@
         "commit_sha",
         "at",
         "can_push"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "approval_withdrawn"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "repo": {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        "detected_at": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "occurred_at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "$ref": "defs.json#/$defs/labels"
+        },
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "watches": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/watch_id"
+          },
+          "uniqueItems": true
+        },
+        "reviewer": {
+          "$ref": "defs.json#/$defs/author"
+        },
+        "commit_sha": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "to": {
+          "oneOf": [
+            {
+              "const": "dismissed"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The reviewer's new state, null when the entry is gone from the latest_by_reviewer list."
+        },
+        "approvals_at_head": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "seq",
+        "type",
+        "pr",
+        "pr_id",
+        "repo",
+        "detected_at",
+        "occurred_at",
+        "labels",
+        "head_sha",
+        "watches",
+        "reviewer",
+        "commit_sha",
+        "at",
+        "to",
+        "approvals_at_head"
       ]
     },
     {

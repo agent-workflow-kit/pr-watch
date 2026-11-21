@@ -174,9 +174,9 @@ def test_approved_after_changes_requested_and_back() -> None:
     ]
 
 
-def test_dismissal_is_no_event_and_a_later_approval_fires() -> None:
+def test_dismissal_is_no_changes_requested_and_a_later_approval_fires() -> None:
     chain = Chain(reviewers(gh(), entry(state="approved", at=T0)))
-    assert chain.types(reviewers(gh(), entry(state="dismissed", at=T1))) == []
+    assert chain.types(reviewers(gh(), entry(state="dismissed", at=T1))) == ["approval_withdrawn"]
     assert chain.types(reviewers(gh(), entry(state="approved", at=T2))) == ["approved"]
 
 

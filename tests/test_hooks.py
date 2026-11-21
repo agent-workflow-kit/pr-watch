@@ -700,6 +700,21 @@ def test_the_new_event_hook_payload_goldens(kind: str) -> None:
     check_golden(f"on-{kind}", payload)
 
 
+def test_the_on_approval_withdrawn_payload_golden() -> None:
+    event = ev(1, "approval_withdrawn")
+    event.payload.update(
+        reviewer={"id": "77", "login": "reviewer-1", "is_bot": False},
+        to="dismissed",
+        commit_sha="a" * 40,
+        at="2026-10-02T09:00:00.000000Z",
+        approvals_at_head=None,
+    )
+    payload = hooks.event_payload(event)
+    assert_valid("hooks/on-approval_withdrawn", payload)
+    assert payload["hook"] == "on-approval_withdrawn" and payload["type"] == "approval_withdrawn"
+    check_golden("on-approval_withdrawn", payload)
+
+
 def test_the_post_poll_payload_golden() -> None:
     rep = report(
         [
