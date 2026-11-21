@@ -533,13 +533,17 @@ class _Pool:
         )  # fmt: skip
 
     def _opened_since(self, pr_id: str) -> str | None:
-        """The creation time of the oldest query watch that holds the PR, for `opened`; None when
-        none does, or when a per-PR watch names the PR (the caller named it: never `opened`)."""
+        """The creation time of the oldest query watch that holds the PR, for `opened`. None when
+        none does, when a per-PR watch names the PR (the caller named it: never `opened`), or when
+        the events table still holds any event for the PR (a returning row: its `opened` or later
+        events are retained, so a leave-and-rejoin or a new row for a closed PR emits no second).
+        `events_by_pr` (pr_id, seq) makes the lookup an index probe."""
         row = self.store.conn.execute(
             "SELECT min(w.created_at) FROM sources s JOIN watches w ON w.id = s.watch_id "
             "WHERE s.pr_id = ? AND w.kind = 'query' "
-            "AND NOT EXISTS (SELECT 1 FROM watches p WHERE p.kind = 'pr' AND p.key = ?)",
-            (pr_id, pr_id),
+            "AND NOT EXISTS (SELECT 1 FROM watches p WHERE p.kind = 'pr' AND p.key = ?) "
+            "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.pr_id = ?)",
+            (pr_id, pr_id, pr_id),
         ).fetchone()
         return None if row is None or row[0] is None else str(row[0])
 

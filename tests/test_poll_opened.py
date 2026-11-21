@@ -259,3 +259,48 @@ def test_a_new_member_already_merged_at_first_sight_emits_opened_then_merged(
     assert doc["events"]["opened"] == 1 and doc["events"]["merged"] == 1
     assert events(store) == ["opened", "merged"]
     assert col(store, snap["pr_id"], "status") == "terminal"
+
+
+def drop_row(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str], snap: dict[str, Any]
+) -> None:
+    """Make the PR leave the listing while its snapshot says open, until the row is deleted."""
+    fake.add(snap, listing={"state": "closed"})
+    for _ in range(4):
+        poll(capsys)
+    assert col(store, snap["pr_id"], "status") is None
+
+
+def test_a_member_that_leaves_and_rejoins_gets_one_opened(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    watch_query(capsys)
+    poll(capsys)
+    snap = pr(2, created_at=FUTURE)
+    fake.add(snap)
+    poll(capsys)
+    drop_row(fake, store, capsys, snap)
+    fake.add(snap)
+    poll(capsys)
+    poll(capsys)
+    assert events(store) == ["opened"]
+
+
+def test_a_closed_member_dropped_and_reopened_as_a_new_row_gets_no_second_opened(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    watch_query(capsys)
+    poll(capsys)
+    snap = pr(2, created_at=FUTURE)
+    fake.add(snap)
+    poll(capsys)
+    fake.update(snap["pr"], state="closed", closed_at=LATER, updated_at=LATER)
+    poll(capsys, "--pr", snap["pr"])
+    for _ in range(4):  # a closed PR is not in the open listing: the source goes, then the row
+        poll(capsys)
+    store.conn.execute("DELETE FROM prs WHERE pr_id = ?", (snap["pr_id"],))
+    store.conn.commit()
+    fake.update(snap["pr"], state="open", closed_at=None, updated_at=LATEST)
+    poll(capsys)
+    poll(capsys)
+    assert events(store)[:2] == ["opened", "closed"] and events(store).count("opened") == 1
