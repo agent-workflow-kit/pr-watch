@@ -23,13 +23,18 @@ Conservative readings (the interface is silent):
 - `opened` fires at first sight only, when the caller passes `opened_since` and the snapshot's
   `created_at` is at or after it. `reopened` fires for a stored `closed` shown `open` (never
   from `merged`, never at first sight) and comes before `pushed`; `occurred_at` is null.
+- `review_requested` fires for a request key (`user:` or `team:` plus the reviewer key) that is
+  in the new digest's outstanding set and not the stored one: a re-request after a review (the
+  request left the set, or GitLab's `reviewed` returned to `outstanding`) fires again, an
+  instance change under a steady request does not. The requester is not in a snapshot, so the
+  event has none. `converted_to_draft` is `ready`'s inverse (`draft` false to true).
 - A null or unknown value is never a change: an unreadable state, head or reviewer is no event.
 - A stored `state` that is null (never readable) counts as first sight for `merged` and `closed`.
 - `review` is emitted for GitHub-backed PRs only (the snapshot url is a `pull` url).
 - `merged` is final: nothing is emitted for a PR whose stored state is `merged`.
-- A part that is not baselined (or any part under `rebaseline`) is silent; `ready` has no part
-  and is silent under `rebaseline` only. A silent `ci` is adopted as the stored state with the
-  hold cleared.
+- A part that is not baselined (or any part under `rebaseline`) is silent; `ready` and
+  `converted_to_draft` have no part and are silent under `rebaseline` only. A silent `ci` is
+  adopted as the stored state with the hold cleared.
 - A reviewer whose new state is `unknown` is no `approved` or `changes_requested`; a stored
   `unknown` counts as no entry (a later known verdict fires); a reviewer new to the digest is
   `not approved`. `approved` compares `at` by instant (raw text only when neither parses).
@@ -60,6 +65,7 @@ from .digest import (
     counted_checks,
     incomplete_parts,
     instant,
+    request_key,
     reviewer_key,
     winning_reviewer_item,
 )
@@ -474,6 +480,62 @@ def _changes_requested(ctx: Ctx) -> list[dict[str, Any]]:
     return _verdicts(ctx, "changes_requested")
 
 
+def _request_keys(digest: Mapping[str, Any]) -> tuple[set[str], bool]:
+    part = _map(digest.get("review_requests"))
+    keys = part.get("outstanding")
+    found = {k for k in keys if isinstance(k, str)} if isinstance(keys, list) else set()
+    return found, part.get("teams_known") is True
+
+
+def _request_item(snap: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    """The outstanding `review_requests` item for `key` (the latest `requested_at`, then the
+    larger login, so the choice never depends on input order); empty when there is none."""
+    best: tuple[tuple[datetime, str], Mapping[str, Any]] | None = None
+    items = snap.get("review_requests")
+    for item in items if isinstance(items, list) else ():
+        if request_key(item) != key or _map(item).get("state") != "outstanding":
+            continue
+        who = _map(_map(item).get("reviewer"))
+        rank = (instant(_map(item).get("requested_at")) or _FIRST, str(who.get("login")))
+        if best is None or rank > best[0]:
+            best = (rank, _map(item))
+    return best[1] if best else {}
+
+
+def _review_requested(ctx: Ctx) -> list[dict[str, Any]]:
+    """Keys in the new digest's outstanding set and not in the stored one. Silent until the part
+    is baselined; a team key needs both digests to have seen teams (`teams_known`), else the
+    snapshot could not have told a new request from one that was never visible."""
+    if _quiet(ctx, "review_requests"):
+        return []
+    before, was_known = _request_keys(ctx.old)
+    after, now_known = _request_keys(ctx.new)
+    out = []
+    for key in sorted(after - before):
+        if key.startswith("team:") and not (was_known and now_known):
+            continue
+        item = _request_item(ctx.snap, key)
+        who = _map(item.get("reviewer"))
+        ident = who.get("id")
+        code_owner = item.get("code_owner")
+        out.append(
+            {
+                "occurred_at": _ts(item.get("requested_at")),
+                "reviewer": {
+                    "id": ident
+                    if isinstance(ident, str) and _ACCOUNT_ID.fullmatch(ident)
+                    else None,
+                    "login": None
+                    if key.startswith(("user:login:#", "team:login:#"))
+                    else _text(who.get("login")),
+                    "kind": key.split(":", 1)[0],
+                },
+                "code_owner": code_owner if isinstance(code_owner, bool) else None,
+            }
+        )
+    return out
+
+
 def _check_changes(old: object, new: object) -> list[dict[str, Any]]:
     """Checks whose key appears, disappears or changes state, ordered by (name, key)."""
     before, after = _map(old), _map(new)
@@ -535,6 +597,18 @@ def _ci(ctx: Ctx) -> list[dict[str, Any]]:
 
 def _ready(ctx: Ctx) -> list[dict[str, Any]]:
     if ctx.rebaseline or ctx.old.get("draft") is not True or ctx.new.get("draft") is not False:
+        return []
+    return [
+        {
+            "occurred_at": None,
+            "from_blocked_by": _blocked(ctx.old),
+            "blocked_by": _blocked(ctx.new),
+        }
+    ]
+
+
+def _converted_to_draft(ctx: Ctx) -> list[dict[str, Any]]:
+    if ctx.rebaseline or ctx.old.get("draft") is not False or ctx.new.get("draft") is not True:
         return []
     return [
         {
@@ -607,10 +681,12 @@ RULES: Final[tuple[Rule, ...]] = (
     Rule("review", _review),
     Rule("comment", _comment),
     Rule("review_comment", _review_comment),
+    Rule("review_requested", _review_requested),
     Rule("approved", _approved),
     Rule("changes_requested", _changes_requested),
     Rule("ci", _ci),
     Rule("ready", _ready),
+    Rule("converted_to_draft", _converted_to_draft),
     Rule("merged", _merged, on_first_sight=True),
     Rule("closed", _closed, on_first_sight=True),
 )

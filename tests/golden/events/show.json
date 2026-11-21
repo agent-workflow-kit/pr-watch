@@ -2,6 +2,7 @@
   "approvals_at_head": 1,
   "baselined": {
     "ci": true,
+    "review_requests": false,
     "reviews": true,
     "threads": true
   },

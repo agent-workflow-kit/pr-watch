@@ -581,7 +581,7 @@ def test_ready_only_for_true_to_false(before: Any, after: Any) -> None:
     snap = with_(gh(), draft=after)
     if before is None or after is None:
         snap = with_(gh(), draft=after if after is not None else "x")
-    assert chain.types(snap) == []
+    assert "ready" not in chain.types(snap)
 
 
 def test_ready_with_unreadable_new_draft_keeps_old_and_fires_nothing() -> None:

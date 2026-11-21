@@ -169,7 +169,7 @@ def test_github_digest_fields() -> None:
     assert d["merge_commit_sha"] == sha(4)
     assert d["review_decision"] == "approved"
     assert d["approvals_at_head"] == 1
-    assert d["baselined"] == {"reviews": True, "threads": True, "ci": True}
+    assert d["baselined"] == {"reviews": True, "threads": True, "ci": True, "review_requests": True}
     assert d["ci"]["state"] == "passing"
     assert d["ci"]["head_sha"] == snap["ci"]["head_sha"]
     assert d["ci"]["hold"] == 0
@@ -184,7 +184,7 @@ def test_digest_has_exactly_the_documented_keys() -> None:
     assert set(d) == {
         "head_sha", "state", "draft", "mergeable", "blocked_by", "ci", "review_decision",
         "approvals_at_head", "reviewers", "seen", "pushed_at", "merged_head_sha",
-        "merge_commit_sha", "baselined",
+        "merge_commit_sha", "baselined", "review_requests",
     }  # fmt: skip
     assert set(d["seen"]) == {"comments", "reviews"}
     assert set(d["ci"]) == {"state", "head_sha", "hold", "hold_to", "checks", "checks_more"}
@@ -630,9 +630,9 @@ def test_complete_snapshot_has_no_incomplete_parts() -> None:
     assert incomplete_parts(gl()) == frozenset()
 
 
-def test_incomplete_parts_lists_only_the_parts_pr_watch_uses() -> None:
-    snap = gh(complete=False, incomplete=["review_requests", "threads", "bogus", 5])
-    assert incomplete_parts(snap) == frozenset({"threads"})
+def test_incomplete_parts_lists_only_the_parts_pr_watch_knows() -> None:
+    snap = gh(complete=False, incomplete=["review_requests", "threads", "bogus", 5])  # fmt: skip
+    assert incomplete_parts(snap) == frozenset({"threads", "review_requests"})
 
 
 def test_ci_with_an_incomplete_check_list_counts_as_incomplete() -> None:
@@ -680,9 +680,10 @@ def test_incomplete_ci_is_carried_over_including_hold() -> None:
 
 
 def test_incomplete_part_without_previous_is_empty_and_unbaselined() -> None:
-    snap = gh(incomplete=["reviews", "threads", "ci"], complete=False)
+    snap = gh(incomplete=["reviews", "threads", "ci", "review_requests"], complete=False)
     d = build_digest(snap)
-    assert d["baselined"] == {"reviews": False, "threads": False, "ci": False}
+    assert d["baselined"] == dict.fromkeys(PARTS, False)
+    assert d["review_requests"] == {"outstanding": [], "teams_known": False}
     assert d["seen"] == {"comments": [], "reviews": []}
     assert d["reviewers"] == {} and d["review_decision"] is None and d["approvals_at_head"] is None
     assert d["ci"] == EMPTY_CI
@@ -833,7 +834,7 @@ def test_non_dict_snapshot_is_an_all_unknown_digest(snap: Any) -> None:
     d = build_digest(snap)
     digest_to_json(d)
     assert d["head_sha"] is None and d["state"] is None
-    assert d["baselined"] == {"reviews": False, "threads": False, "ci": False}
+    assert d["baselined"] == dict.fromkeys(PARTS, False)
     assert incomplete_parts(snap) == frozenset(PARTS)
 
 
@@ -842,7 +843,9 @@ def test_rebaseline_unbaselines_incomplete_parts_only() -> None:
     snap = gh(incomplete=["threads"], complete=False)
     assert build_digest(snap, previous)["baselined"]["threads"] is True
     d = build_digest(snap, previous, rebaseline=True)
-    assert d["baselined"] == {"reviews": True, "threads": False, "ci": True}
+    assert d["baselined"] == {
+        "reviews": True, "threads": False, "ci": True, "review_requests": True
+    }  # fmt: skip
     assert d["seen"]["comments"] == previous["seen"]["comments"]  # old data is kept
     assert build_digest(gh(), d, rebaseline=True)["baselined"]["threads"] is True
 

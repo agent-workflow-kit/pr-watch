@@ -44,7 +44,7 @@ MAX_INT: Final = 2**53
 # treated as incomplete instead.
 MAX_SEEN: Final = 10_000
 MAX_FIELD_CHARS: Final = 256
-PARTS: Final = ("reviews", "threads", "ci")
+PARTS: Final = ("reviews", "threads", "ci", "review_requests")
 
 _BAD: Final = object()
 _SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -222,6 +222,41 @@ def reviewer_key(entry: object) -> str | None:
     return "login:#" + hashlib.sha256(full.encode("utf-8")).hexdigest()[:32]
 
 
+REQUEST_KINDS: Final = ("user", "team")
+_REQUEST_STATES = ("outstanding", "reviewed")
+_REQUEST_KEY = re.compile(r"(?:user|team):[A-Za-z0-9:/_=#.@+-]{1,300}")
+
+
+def request_key(item: object) -> str | None:
+    """`user:` or `team:` plus the reviewer key of a `review_requests` item; null when the item
+    has no readable kind or reviewer. A team and a user of one name never share a key."""
+    who = _dict(_dict(item).get("reviewer"))
+    kind = who.get("kind")
+    key = reviewer_key(who)
+    if not isinstance(kind, str) or kind not in REQUEST_KINDS or key is None:
+        return None
+    return f"{kind}:{key}"
+
+
+def requested_keys(snapshot: Mapping[str, Any]) -> dict[str, str] | None:
+    """Key -> state (`outstanding`, `reviewed` or `unknown`) of the snapshot's review requests;
+    null when the list cannot be read or has more than MAX_REVIEWERS distinct keys. When one key
+    is listed more than once `outstanding` wins."""
+    items = snapshot.get("review_requests")
+    if not isinstance(items, list):
+        return None
+    found: dict[str, str] = {}
+    for item in items:
+        key = request_key(item)
+        if key is None:
+            continue
+        state = _dict(item).get("state")
+        state = state if isinstance(state, str) and state in _REQUEST_STATES else "unknown"
+        if found.get(key) != "outstanding":
+            found[key] = state
+    return found if len(found) <= MAX_REVIEWERS else None
+
+
 # --- parts -----------------------------------------------------------------------------------
 
 
@@ -241,8 +276,8 @@ def _reviewer_count(snapshot: Mapping[str, Any]) -> int:
 
 def incomplete_parts(snapshot: Mapping[str, Any]) -> frozenset[str]:
     """The parts (`reviews`, `threads`, `ci`) this snapshot cannot be compared or stored for:
-    the ones forgectl lists in `incomplete` (`review_requests` and unknown names are ignored), and
-    the ones whose data cannot be read or is over the cap (see the module docstring)."""
+    the ones forgectl lists in `incomplete` (unknown names are ignored), and the ones whose data
+    cannot be read or is over the cap (see the module docstring)."""
     snapshot = _dict(snapshot)
     listed = snapshot.get("incomplete")
     out = {p for p in (listed if isinstance(listed, list) else ()) if p in PARTS}
@@ -256,6 +291,8 @@ def incomplete_parts(snapshot: Mapping[str, Any]) -> frozenset[str]:
         out.add("threads")
     if not _ci_readable(snapshot.get("ci")):
         out.add("ci")
+    if requested_keys(snapshot) is None:
+        out.add("review_requests")
     return frozenset(out)
 
 
@@ -455,6 +492,39 @@ def _reviewers(snapshot: Mapping[str, Any], previous: Mapping[str, Any]) -> dict
     return out
 
 
+def _empty_requests() -> dict[str, Any]:
+    return {"outstanding": [], "teams_known": False}
+
+
+def _previous_requests(previous: Mapping[str, Any]) -> dict[str, Any]:
+    """The previous digest's `review_requests` if it has the expected shape, else the empty one."""
+    value = previous.get("review_requests")
+    if not isinstance(value, dict) or set(value) != {"outstanding", "teams_known"}:
+        return _empty_requests()
+    keys, known = value["outstanding"], value["teams_known"]
+    if not isinstance(known, bool) or not isinstance(keys, list) or len(keys) > MAX_REVIEWERS:
+        return _empty_requests()
+    if not all(isinstance(k, str) and _REQUEST_KEY.fullmatch(k) for k in keys):
+        return _empty_requests()
+    return {"outstanding": sorted(set(keys)), "teams_known": known}
+
+
+def _requests(snapshot: Mapping[str, Any], previous: Mapping[str, Any]) -> dict[str, Any]:
+    """The outstanding request keys. A key whose state is not readable keeps its previous
+    membership. Without `teams_visible: true` the snapshot says nothing about teams, so the
+    previous team keys are kept and `teams_known` is false."""
+    old = _previous_requests(previous)
+    states = requested_keys(snapshot) or {}
+    before = set(old["outstanding"])
+    out = {k for k, s in states.items() if s == "outstanding"}
+    out |= {k for k, s in states.items() if s == "unknown" and k in before}
+    known = snapshot.get("teams_visible") is True
+    if not known:
+        out = {k for k in out if not k.startswith("team:")}
+        out |= {k for k in before if k.startswith("team:")}
+    return {"outstanding": sorted(out), "teams_known": known}
+
+
 def _previous_list(previous: Mapping[str, Any], key: str) -> list[str]:
     value = _dict(previous.get("seen")).get(key)
     return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
@@ -527,6 +597,11 @@ def build_digest(
         digest["ci"] = _previous_ci(old)
     else:
         digest["ci"] = _ci(_dict(snapshot.get("ci")))
+
+    if "review_requests" in incomplete:
+        digest["review_requests"] = _previous_requests(old)
+    else:
+        digest["review_requests"] = _requests(snapshot, old)
 
     digest["baselined"] = {
         part: (old_baselined.get(part) is True and not rebaseline) if part in incomplete else True

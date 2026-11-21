@@ -61,8 +61,13 @@ def add_event(
     payload: dict[str, Any] = {**BASE, **extra}
     if type_ == "pushed":
         payload = {"from_sha": "b" * 40, "to_sha": "a" * 40, "forced": None, **payload}
-    if type_ == "ready":
+    if type_ in ("ready", "converted_to_draft"):
         payload = {"from_blocked_by": [], "blocked_by": [], **payload}
+    if type_ == "review_requested":
+        payload = {
+            "reviewer": {"id": None, "login": "core", "kind": "team"}, "code_owner": None,
+            **payload,
+        }  # fmt: skip
     with store.transaction():
         return store.append_event(NewEvent(type_, pr_id, pr, payload, labels), detected).seq
 
@@ -360,6 +365,19 @@ def test_type_filter_accepts_the_new_types(
     assert code == 0 and [json.loads(line)["type"] for line in out.splitlines()] == ["reopened"]
 
 
+def test_type_filter_accepts_review_requested_and_converted_to_draft(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    add_event(store, "review_requested")  # 1
+    add_event(store, "converted_to_draft")  # 2
+    add_event(store, "ready")  # 3
+    since = ("--since", cur(store, 0))
+    assert seqs(events(capsys, *since, "--type", "review_requested")) == [1]
+    assert seqs(events(capsys, *since, "--type", "converted_to_draft", "--type", "ready")) == [2, 3]
+    code, out, _ = run(capsys, "export", "--type", "converted_to_draft")
+    assert code == 0 and [json.loads(x)["type"] for x in out.splitlines()] == ["converted_to_draft"]
+
+
 def test_label_filter_is_and(store: Store, capsys: pytest.CaptureFixture[str]) -> None:
     populate(store)
     since = ("--since", cur(store, 0))
@@ -512,12 +530,16 @@ def test_every_event_type_validates(store: Store, capsys: pytest.CaptureFixture[
             "reviewer": author, "commit_sha": None, "at": None, "can_push": True,
             "approvals_at_head": 1,
         },
+        "review_requested": {
+            "reviewer": {"id": "7", "login": "core", "kind": "team"}, "code_owner": True,
+        },
         "changes_requested": {"reviewer": author, "commit_sha": None, "at": None, "can_push": None},
         "ci": {
             "from": "pending", "to": "failing", "checks": [], "counts":
             {"passing": 0, "failing": 1, "pending": 0}, "for_head": "a" * 40,
         },
         "ready": {"from_blocked_by": [{"code": "draft"}], "blocked_by": []},
+        "converted_to_draft": {"from_blocked_by": [], "blocked_by": [{"code": "draft"}]},
         "merged": {"merged_head_sha": None, "merge_commit_sha": None},
         "closed": {},
     }  # fmt: skip

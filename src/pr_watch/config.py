@@ -218,10 +218,14 @@ class Hooks(_Model):
     on_comment: list[HookCmd] = Field(default_factory=list, alias="on-comment")
     on_review_comment: list[HookCmd] = Field(default_factory=list, alias="on-review_comment")
     on_review: list[HookCmd] = Field(default_factory=list, alias="on-review")
+    on_review_requested: list[HookCmd] = Field(default_factory=list, alias="on-review_requested")
     on_approved: list[HookCmd] = Field(default_factory=list, alias="on-approved")
     on_changes_requested: list[HookCmd] = Field(default_factory=list, alias="on-changes_requested")
     on_ci: list[HookCmd] = Field(default_factory=list, alias="on-ci")
     on_ready: list[HookCmd] = Field(default_factory=list, alias="on-ready")
+    on_converted_to_draft: list[HookCmd] = Field(
+        default_factory=list, alias="on-converted_to_draft"
+    )
     on_merged: list[HookCmd] = Field(default_factory=list, alias="on-merged")
     on_closed: list[HookCmd] = Field(default_factory=list, alias="on-closed")
     post_poll: list[HookCmd] = Field(default_factory=list, alias="post-poll")

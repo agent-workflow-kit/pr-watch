@@ -122,10 +122,12 @@ EVENT_TYPES: Final = (
     "comment",
     "review_comment",
     "review",
+    "review_requested",
     "approved",
     "changes_requested",
     "ci",
     "ready",
+    "converted_to_draft",
     "merged",
     "closed",
 )

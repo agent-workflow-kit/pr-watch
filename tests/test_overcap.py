@@ -195,7 +195,9 @@ def test_a_merged_over_cap_pr_gets_one_merged_event_and_a_minimal_digest(
     digest = json.loads(col(store, pr_id, "digest"))
     assert digest["state"] == "merged"
     assert (digest["merged_head_sha"], digest["merge_commit_sha"]) == (sha(3), sha(4))
-    assert digest["baselined"] == {"reviews": False, "threads": False, "ci": False}
+    assert digest["baselined"] == {
+        "reviews": False, "threads": False, "ci": False, "review_requests": False,
+    }  # fmt: skip
     assert digest["head_sha"] is None and digest["reviewers"] == {}
     assert out.host(HOST).snapshots == 1 and log.of("snapshot_failed") == []
 

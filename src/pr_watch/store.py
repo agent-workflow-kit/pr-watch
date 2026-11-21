@@ -87,10 +87,12 @@ EVENT_TYPES: Final = frozenset(
         "review",
         "comment",
         "review_comment",
+        "review_requested",
         "approved",
         "changes_requested",
         "ci",
         "ready",
+        "converted_to_draft",
         "merged",
         "closed",
     }
