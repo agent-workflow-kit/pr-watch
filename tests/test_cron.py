@@ -1369,12 +1369,15 @@ def test_dry_run_fails_on_an_unreadable_crontab_like_the_real_run(
     env: Env,
     backend: Backend,
     capsys: pytest.CaptureFixture[str],
+    state_dir: Path,
     command: str,
     result: Result,
 ) -> None:
     backend.read_result = result
-    real_status, real_out, _ = run(capsys, "--json", "cron", command)
     dry_status, dry_out, _ = run(capsys, "--json", "cron", command, "--dry-run")
+    assert not state_dir.exists()  # a failed dry run creates no state dir or cron.lock
+    assert backend.writes() == []
+    real_status, real_out, _ = run(capsys, "--json", "cron", command)
     assert real_status == 1 and dry_status == real_status
     assert _envelope(dry_out) == _envelope(real_out)
     assert backend.writes() == []
@@ -1387,11 +1390,17 @@ def test_dry_run_fails_on_an_unreadable_crontab_like_the_real_run(
     ids=["nul", "oversized"],
 )
 def test_dry_run_refuses_a_nul_or_oversized_crontab_like_the_real_run(
-    env: Env, capsys: pytest.CaptureFixture[str], command: str, table: bytes
+    env: Env,
+    capsys: pytest.CaptureFixture[str],
+    state_dir: Path,
+    command: str,
+    table: bytes,
 ) -> None:
     env.set_table(table)
-    real_status, real_out, _ = run(capsys, "--json", "cron", command)
     dry_status, dry_out, _ = run(capsys, "--json", "cron", command, "--dry-run")
+    assert not state_dir.exists()  # a refused dry run creates no state dir or cron.lock
+    assert env.table() == table
+    real_status, real_out, _ = run(capsys, "--json", "cron", command)
     assert real_status == 1 and dry_status == real_status
     assert _envelope(dry_out) == _envelope(real_out)
     assert env.table() == table
