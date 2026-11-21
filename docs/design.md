@@ -1,6 +1,6 @@
 # pr-watch: design
 
-Status: designed, 2026-11-10 (interface 0.1.0-design). The rules are in [interface.md](interface.md), the single normative source; this document records the decisions, the structure and the test strategy and links to the headings there instead of restating them.
+Status: implemented, pre-1.0 (current version 0.25.0). The rules are in [interface.md](interface.md), the single normative source; this document records the decisions, the structure and the test strategy and links to the headings there instead of restating them.
 
 ## Role and layer
 

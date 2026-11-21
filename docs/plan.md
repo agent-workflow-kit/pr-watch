@@ -34,49 +34,49 @@ This plan implements [interface.md](interface.md) (the normative spec) and [desi
 **Goal**: A package that parses its commands, loads and validates config, and emits the error envelope and exit codes, with the gateway and test harness in place.
 **Success Criteria**: `pr-watch --version` and `--help` work; every command exists and exits 2 on bad usage; config validates against the schema and fails fast naming the key; `make verify` and CI are green.
 **Tests**: config defaults, drop-in merge, per-host and per-repo overrides, env overrides, invalid values; exit-code and envelope golden files; gateway fake plumbing.
-**Status**: Not Started
+**Status**: Complete
 
 ## Stage 1: forgectl client and reference handling
 
 **Goal**: Call forgectl safely and classify every result.
 **Success Criteria**: version check against the declared minimum with an install message; stdout read under a byte cap and a call deadline; every failure class mapped as in the failure table; user values validated before they reach argv; offline reference parsing works.
 **Tests**: failure matrix against the fake (rate limit with and without `retry_after`, network error, 404, 403, auth, timeout, partial `prs` results, oversized output, contract violation); argv injection cases; `--version` parsing; spike C regressions.
-**Status**: Not Started
+**Status**: Complete
 
 ## Stage 2: State store, watches and the commit protocol
 
 **Goal**: The SQLite state, watches with owners, labels and members, leases and the compare-and-set commit.
 **Success Criteria**: migrations create and upgrade the schema; `watch add` for a per-PR watch resolves and baselines through the client; `watch remove`, `label` and `list` behave as specified and idempotently; a lease is taken over when its holder is dead or expired; a commit that lost its source or its revision is discarded; `prune` applies retention and expiry.
 **Tests**: owner and label semantics, watch keys, member rules, expiry, takeover (PID reuse, boot id), concurrent `watch add` and `poll`, kill during commit leaves no partial state, newer-database refusal.
-**Status**: Not Started
+**Status**: Complete
 
 ## Stage 3: Digest and diff
 
 **Goal**: Turn a snapshot into a digest and two digests into ordered events.
 **Success Criteria**: every event rule in [Events](interface.md#events) holds, including the baseline, the CI hold, incomplete parts, GitLab differences, per-reviewer approval keys, reopen re-baseline and rename by `pr_id`; text fields are bounded and sanitized.
 **Tests**: a table-driven diff test per rule; GitHub and GitLab recorded snapshots (spike data without private content); determinism; first-sight and terminal-at-add cases; `forced` with `compare` fakes.
-**Status**: Not Started
+**Status**: Complete
 
 ## Stage 4: Poll cycle
 
 **Goal**: `poll` end to end: enumeration, snapshot selection, pools, pacing, failures, budgets and the report.
 **Success Criteria**: query watches list the open set and per-PR repos use the windowed listing as specified; changed, unsettled and full-pass PRs are chosen; per-host backoff and budgets hold; oversized snapshots fall back to `show`; events and the digest commit in one transaction; the report matches its schema; signals leave nothing partial.
 **Tests**: scripted multi-cycle scenarios on the fake (first poll with many members, pending CI storm, full pass deferral, host pause, `auth_required` host failure, unreachable PRs, closed and reopened PRs, rename); two concurrent polls; SIGTERM mid-poll; `live` cost and trigger tests.
-**Status**: Not Started
+**Status**: Complete
 
 ## Stage 5: Events command and hooks
 
 **Goal**: `events`, `show` and `export`, and the `on-<event>` and `post-poll` hooks.
 **Success Criteria**: cursors, gaps, filters and limits behave as specified; hooks run in the bounded pool after commit with the specified payload, environment, stdio and timeouts; the caps and the exemptions hold; every hook run is logged.
 **Tests**: cursor grammar and gap cases (retention, reset, future), filter combinations, hook payload goldens and schema validation, timeout and process-group kill, flood against the caps, an unkillable hook, a hook that closes stdin.
-**Status**: Not Started
+**Status**: Complete
 
 ## Stage 6: Cron, docs and live suite
 
 **Goal**: `cron install|uninstall`, the README and the `live` suite.
 **Success Criteria**: the managed block matches the golden text and replaces the harness's block; the live tests pass against GitHub and a GitLab server; README and `config.example.yaml` match the interface.
 **Tests**: golden crontab for install, reinstall, uninstall and foreign entries; GitLab transition shapes (the still-to-verify item); macOS checklist.
-**Status**: Not Started
+**Status**: In Progress (live suite against GitHub/GitLab and the macOS checklist are human-gated)
 
 ## Version roadmap
 
