@@ -325,3 +325,68 @@ def test_order_of_a_busy_snapshot() -> None:
     new = with_(requests(gh(), rr("a", "1"), rr("b", "2")), draft=True)
     assert types(run(old, new)) == ["review_requested", "converted_to_draft"]
     assert copy.deepcopy(new) == new
+
+
+# --- review fixes (round 1) --------------------------------------------------------------------
+
+
+def test_a_login_with_brackets_survives_the_incomplete_and_unknown_state_paths() -> None:
+    known = requests(gh(), rr("octo[bot]", None))
+    stored = build_digest(known)
+    assert stored["review_requests"]["outstanding"] == ["user:login:octo[bot]"]
+    # incomplete path: the stored part is kept, then compared against, with no burst
+    incomplete = requests(gh(), rr("octo[bot]", None))
+    incomplete["incomplete"] = ["review_requests"]
+    kept = build_digest(incomplete, stored)
+    assert kept["review_requests"]["outstanding"] == ["user:login:octo[bot]"]
+    assert events(kept, requests(gh(), rr("octo[bot]", None))) == []
+    # unknown-state path keeps the previous membership
+    odd = requests(gh(), rr("octo[bot]", None, state="weird"))
+    again = build_digest(odd, stored)
+    assert again["review_requests"]["outstanding"] == ["user:login:octo[bot]"]
+    assert events(again, requests(gh(), rr("octo[bot]", None))) == []
+
+
+def test_a_login_with_a_space_is_a_valid_stored_key() -> None:
+    stored = build_digest(requests(gh(), rr("a b", None)))
+    again = build_digest(requests(gh(), rr("a b", None)), stored)
+    assert again["review_requests"]["outstanding"] == ["user:login:a b"]
+
+
+def test_same_key_with_a_different_instance_and_head_fires_nothing() -> None:
+    old = requests(gh(), rr("alice", "100", instance="r1"))
+    new = requests(gh(), rr("alice", "100", instance="r2"))
+    new["head_sha"] = "b" * 40
+    assert events(old, new) == []
+
+
+def test_many_items_and_users_diff_quickly(monkeypatch: pytest.MonkeyPatch) -> None:
+    import pr_watch.diff as d
+
+    calls = 0
+    real = d.request_key
+
+    def counting(item: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        return real(item)
+
+    monkeypatch.setattr(d, "request_key", counting)
+    items = [rr(f"u{i % 500}", str(1000 + i % 500)) for i in range(5000)]
+    old = requests(gh())
+    new = requests(gh(), *items)
+    out = events(old, new)
+    assert len(out) == 500
+    assert calls <= 2 * len(items)
+
+
+def test_case_only_duplicate_logins_collapse_deterministically() -> None:
+    a = rr("Alice", None, at=T1)
+    b = rr("alice", None, at=T1)
+    old = requests(gh())
+    (first,) = events(old, requests(gh(), a, b))
+    (second,) = events(old, requests(gh(), b, a))
+    assert first.payload == second.payload
+    later = rr("alice", None, at=T2)
+    (third,) = events(old, requests(gh(), a, later))
+    assert third.payload["reviewer"]["login"] == "alice"

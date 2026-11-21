@@ -487,19 +487,23 @@ def _request_keys(digest: Mapping[str, Any]) -> tuple[set[str], bool]:
     return found, part.get("teams_known") is True
 
 
-def _request_item(snap: Mapping[str, Any], key: str) -> Mapping[str, Any]:
-    """The outstanding `review_requests` item for `key` (the latest `requested_at`, then the
-    larger login, so the choice never depends on input order); empty when there is none."""
-    best: tuple[tuple[datetime, str], Mapping[str, Any]] | None = None
+def _request_items(snap: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    """Request key -> its outstanding `review_requests` item, built in one pass. The best item is
+    the latest `requested_at`, then the larger raw login, so the choice never depends on input
+    order (case-only duplicate logins share a key; one spelling is reported)."""
+    best: dict[str, tuple[tuple[datetime, str], Mapping[str, Any]]] = {}
     items = snap.get("review_requests")
     for item in items if isinstance(items, list) else ():
-        if request_key(item) != key or _map(item).get("state") != "outstanding":
+        if _map(item).get("state") != "outstanding":
+            continue
+        key = request_key(item)
+        if key is None:
             continue
         who = _map(_map(item).get("reviewer"))
         rank = (instant(_map(item).get("requested_at")) or _FIRST, str(who.get("login")))
-        if best is None or rank > best[0]:
-            best = (rank, _map(item))
-    return best[1] if best else {}
+        if key not in best or rank > best[key][0]:
+            best[key] = (rank, _map(item))
+    return {key: item for key, (_, item) in best.items()}
 
 
 def _review_requested(ctx: Ctx) -> list[dict[str, Any]]:
@@ -511,10 +515,11 @@ def _review_requested(ctx: Ctx) -> list[dict[str, Any]]:
     before, was_known = _request_keys(ctx.old)
     after, now_known = _request_keys(ctx.new)
     out = []
+    by_key = _request_items(ctx.snap) if after - before else {}
     for key in sorted(after - before):
         if key.startswith("team:") and not (was_known and now_known):
             continue
-        item = _request_item(ctx.snap, key)
+        item = by_key.get(key, {})
         who = _map(item.get("reviewer"))
         ident = who.get("id")
         code_owner = item.get("code_owner")

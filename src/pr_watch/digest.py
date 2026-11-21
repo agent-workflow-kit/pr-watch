@@ -224,7 +224,15 @@ def reviewer_key(entry: object) -> str | None:
 
 REQUEST_KINDS: Final = ("user", "team")
 _REQUEST_STATES = ("outstanding", "reviewed")
-_REQUEST_KEY = re.compile(r"(?:user|team):[A-Za-z0-9:/_=#.@+-]{1,300}")
+_REQUEST_KEY = re.compile(r"(?:user|team):.{1,300}", re.DOTALL)
+
+
+def _valid_request_key(value: object) -> bool:
+    """A stored request key: `user:`/`team:` plus one line of printable text (the shape
+    `reviewer_key` produces, so logins with brackets or spaces are kept)."""
+    return (
+        isinstance(value, str) and _REQUEST_KEY.fullmatch(value) is not None and value.isprintable()
+    )
 
 
 def request_key(item: object) -> str | None:
@@ -275,9 +283,9 @@ def _reviewer_count(snapshot: Mapping[str, Any]) -> int:
 
 
 def incomplete_parts(snapshot: Mapping[str, Any]) -> frozenset[str]:
-    """The parts (`reviews`, `threads`, `ci`) this snapshot cannot be compared or stored for:
-    the ones forgectl lists in `incomplete` (unknown names are ignored), and the ones whose data
-    cannot be read or is over the cap (see the module docstring)."""
+    """The parts (`reviews`, `threads`, `ci`, `review_requests`) this snapshot cannot be compared
+    or stored for: the ones forgectl lists in `incomplete` (unknown names are ignored), and the
+    ones whose data cannot be read or is over the cap (see the module docstring)."""
     snapshot = _dict(snapshot)
     listed = snapshot.get("incomplete")
     out = {p for p in (listed if isinstance(listed, list) else ()) if p in PARTS}
@@ -504,7 +512,7 @@ def _previous_requests(previous: Mapping[str, Any]) -> dict[str, Any]:
     keys, known = value["outstanding"], value["teams_known"]
     if not isinstance(known, bool) or not isinstance(keys, list) or len(keys) > MAX_REVIEWERS:
         return _empty_requests()
-    if not all(isinstance(k, str) and _REQUEST_KEY.fullmatch(k) for k in keys):
+    if not all(_valid_request_key(k) for k in keys):
         return _empty_requests()
     return {"outstanding": sorted(set(keys)), "teams_known": known}
 
