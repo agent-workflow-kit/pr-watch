@@ -20,7 +20,7 @@ packages = ["src/pr_watch"]
 [dependency-groups]
 dev = [
     "pytest>=8",
-    "ruff>=0.6",
+    "ruff>=0.17.4",
     "pyright>=1.1.380",
     "pymarkdownlnt>=0.9.41",
     "jsonschema>=4.23",
