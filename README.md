@@ -72,7 +72,7 @@ Events: `pushed`, `comment`, `review_comment`, `review` (GitHub only), `approved
 
 `pr-watch events` never changes state, so every consumer keeps its own opaque cursor:
 
-1. On a fresh store, take your starting cursor from the `cursor` of the first `watch add` result (`events --json` before any watch exists returns `"gap": true`). Once the store has data, `events` without `--since` returns no events and a cursor for "from now".
+1. On a fresh store, take your starting cursor from the `cursor` of the first `watch add` result (a cursor taken from an empty store, which has a placeholder `store_id`, reports `"gap": true` after the first `watch add`). Once the store has data, `events` without `--since` returns no events and a cursor for "from now".
 2. Call `events --since <cursor>` and store the `cursor` it returns. While `more` is true, call again.
 3. Keep a set of the comment ids you have handled, and match PRs on `pr_id` (the `pr` name can change).
 4. When a result has `"gap": true` (the cursor is too old, pruned, or from another store), the events returned may be incomplete: re-sync current state through forgectl, then reset your cursor.

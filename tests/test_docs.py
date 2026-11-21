@@ -71,10 +71,17 @@ def test_example_names_every_config_key() -> None:
 
 
 def test_example_check_fails_when_a_key_line_is_removed() -> None:
-    key = next(iter(_leaf_keys(load_schema("config"))))
-    stripped = "\n".join(
-        line for line in EXAMPLE.splitlines() if not re.match(rf"^\s*#?\s*{re.escape(key)}:", line)
+    def pattern(key: str) -> str:
+        return rf"^\s*#?\s*{re.escape(key)}:"
+
+    # A key whose line appears exactly once, so removing it removes the only definition.
+    key = next(
+        k
+        for k in _leaf_keys(load_schema("config"))
+        if len(re.findall(pattern(k), EXAMPLE, flags=re.M)) == 1
     )
+    assert _defines_key(EXAMPLE, key)
+    stripped = "\n".join(line for line in EXAMPLE.splitlines() if not re.match(pattern(key), line))
     assert not _defines_key(stripped, key)
 
 
