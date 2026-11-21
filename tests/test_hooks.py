@@ -160,7 +160,8 @@ def test_a_hook_gets_the_payload_on_stdin_only_and_runs_in_hooks_cwd(
                if "=" in line)  # fmt: skip
     assert env["PR_WATCH_HOOK"] == "on-pushed" and env["PR_WATCH_ID"] == "P1"
     assert env["PR_WATCH_EVENT_ID"] == event.id and env["PR_WATCH_OBJECT_TYPE"] == "pr"
-    assert not any("example.net" in v or "a" * 40 in v for v in env.values())  # no payload text
+    assert not set(env.values()) & {event.pr, event.payload["repo"]}  # no payload host text
+    assert not any("a" * 40 in v for v in env.values())  # no payload sha text
     assert set(env) <= {
         "PATH", "HOME", "PWD", "OLDPWD", "_", "SHLVL", "PR_WATCH_HOOK", "PR_WATCH_ID",
         "PR_WATCH_EVENT_ID", "PR_WATCH_OBJECT_TYPE",
