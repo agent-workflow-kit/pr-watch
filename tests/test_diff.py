@@ -626,6 +626,109 @@ def test_malformed_old_digest_counts_as_first_sight() -> None:
         assert diff(bad, new, new_snap) == []  # type: ignore[arg-type]
 
 
+# --- reopened and opened (1.x, #34) ----------------------------------------------------------
+
+
+def test_reopened_fires_when_a_stored_closed_pr_is_open_again() -> None:
+    (event,) = run(with_(gh(), state="closed"), gh())
+    assert event.type == "reopened"
+    assert event.payload["head_sha"] == gh()["head"]["sha"]
+    assert event.payload["occurred_at"] is None
+
+
+def test_reopened_under_rebaseline_flag_fires_too() -> None:
+    assert types(run(with_(gh(), state="closed"), gh(), rebaseline=True)) == ["reopened"]
+
+
+def test_reopened_comes_before_pushed_and_the_rest_stays_silent() -> None:
+    closed = with_(gh(), state="closed")
+    new = plus_threads(gh(head={"sha": sha(2)}), general())
+    assert types(run(closed, new)) == ["reopened", "pushed"]
+
+
+@pytest.mark.parametrize("stored", ["open", "merged"])
+def test_reopened_never_from_open_or_merged(stored: str) -> None:
+    assert "reopened" not in types(run(with_(gh(), state=stored), gh()))
+
+
+def test_reopened_not_for_closed_to_closed_merged_or_unreadable() -> None:
+    closed = with_(gh(), state="closed")
+    assert types(run(closed, closed)) == []
+    assert types(run(closed, merged_snap(gh()))) == ["merged"]
+    assert types(run(closed, with_(gh(), state=None))) == []
+
+
+def test_reopened_not_on_first_sight() -> None:
+    assert types(run(None, gh())) == []
+
+
+SINCE_OLD = "2026-09-30T00:00:00Z"  # before the golden PR's created_at (2026-10-01T09:00:00Z)
+SINCE_NEW = "2026-10-02T00:00:00Z"
+
+
+def test_opened_fires_at_first_sight_when_created_after_the_watch() -> None:
+    (event,) = run(None, gh(), opened_since=SINCE_OLD)
+    assert event.type == "opened"
+    assert event.payload["occurred_at"] == "2026-10-01T09:00:00.000000Z"
+
+
+def test_opened_boundary_is_inclusive() -> None:
+    assert types(run(None, gh(), opened_since="2026-10-01T09:00:00.000000Z")) == ["opened"]
+    assert types(run(None, gh(), opened_since="2026-10-01T09:00:00.000001Z")) == []
+
+
+def test_opened_not_for_a_pr_older_than_the_watch() -> None:
+    assert types(run(None, gh(), opened_since=SINCE_NEW)) == []
+
+
+def test_opened_needs_the_hint() -> None:
+    assert types(run(None, gh())) == []
+    assert types(run(None, gh(), opened_since=None)) == []
+
+
+@pytest.mark.parametrize("created", [None, "", "yesterday", 5, "2026-10-01T09:00:00"])
+def test_opened_never_from_an_unreadable_created_at(created: Any) -> None:
+    assert types(run(None, with_(gh(), created_at=created), opened_since=SINCE_OLD)) == []
+
+
+@pytest.mark.parametrize("since", ["", "garbage", 7])
+def test_opened_never_from_an_unreadable_hint(since: Any) -> None:
+    assert types(run(None, gh(), opened_since=since)) == []
+
+
+def test_opened_only_at_first_sight() -> None:
+    assert types(run(gh(), gh(), opened_since=SINCE_OLD)) == []
+    assert types(run(with_(gh(), state="closed"), gh(), opened_since=SINCE_OLD)) == ["reopened"]
+
+
+def test_opened_precedes_a_terminal_event_of_the_same_snapshot() -> None:
+    merged = merged_snap(gh())
+    assert types(run(None, merged, opened_since=SINCE_OLD)) == ["opened", "merged"]
+    closed = with_(gh(), state="closed", closed_at=T3)
+    assert types(run(None, closed, opened_since=SINCE_OLD)) == ["opened", "closed"]
+
+
+def test_opened_dropped_without_a_valid_head() -> None:
+    result = run(None, with_(gh(), head={"sha": "nope"}), opened_since=SINCE_OLD)
+    assert types(result) == []
+    assert result.dropped == (Drop("opened", "invalid_head_sha"),)
+
+
+def test_opened_and_reopened_validate_against_the_event_schema(store: Store) -> None:
+    pairs = [
+        (None, gh(), {"opened_since": SINCE_OLD}),
+        (with_(gh(), state="closed"), gh(head={"sha": sha(2)}), {}),
+    ]
+    seen: set[str] = set()
+    for old, new, kw in pairs:
+        with store.transaction():
+            for ev in run(old, new, **kw):
+                stored = store.append_event(ev.to_new_event(labels=("k=v",), watches=(WATCH,)))
+                assert schema_errors("event", stored.to_json()) == []
+                seen.add(ev.type)
+    assert seen == {"opened", "reopened", "pushed"}
+
+
 # --- ordering, determinism, purity -------------------------------------------------------------
 
 
@@ -649,6 +752,8 @@ def test_fixed_type_order_in_one_snapshot() -> None:
 
 def test_rule_table_follows_the_documented_order() -> None:
     documented = [
+        "opened",
+        "reopened",
         "pushed",
         "review",
         "comment",

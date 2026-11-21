@@ -105,6 +105,8 @@
     },
     "event_type": {
       "enum": [
+        "opened",
+        "reopened",
         "pushed",
         "comment",
         "review_comment",

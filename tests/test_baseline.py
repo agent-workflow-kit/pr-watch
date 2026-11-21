@@ -252,14 +252,14 @@ def busy(base: dict[str, Any], head: int | None = None) -> dict[str, Any]:
     return out
 
 
-def test_reopen_with_new_comments_reviews_and_ci_emits_nothing() -> None:
+def test_reopen_with_new_comments_reviews_and_ci_emits_reopened_only() -> None:
     base = gh()
     sim = Sim(base)
     assert types(sim.step(closed(base))) == ["closed"]
     sim.reactivate()
     before = sim.row["baselined_at"]
     plan = sim.step(busy(base))
-    assert types(plan) == []
+    assert types(plan) == ["reopened"]
     assert sim.row["rebaseline"] == 0
     assert sim.row["status"] == "active" and sim.row["terminal_kind"] is None
     assert sim.row["baselined_at"] != before
@@ -269,14 +269,14 @@ def test_reopen_with_new_comments_reviews_and_ci_emits_nothing() -> None:
     assert types(plan) == ["comment"]
 
 
-def test_reopen_with_a_new_head_emits_pushed_only() -> None:
+def test_reopen_with_a_new_head_emits_reopened_then_pushed() -> None:
     base = gh()
     sim = Sim(base)
     sim.step(closed(base))
     sim.reactivate()
     plan = sim.step(busy(base, head=2))
-    assert types(plan) == ["pushed"]
-    assert plan.events[0].payload["from_sha"] == base["head"]["sha"]
+    assert types(plan) == ["reopened", "pushed"]
+    assert plan.events[1].payload["from_sha"] == base["head"]["sha"]
 
 
 def test_reopen_without_the_flag_is_detected_from_the_stored_state() -> None:
@@ -284,7 +284,7 @@ def test_reopen_without_the_flag_is_detected_from_the_stored_state() -> None:
     sim = Sim(base)
     sim.step(closed(base))
     plan = sim.step(busy(base, head=2))  # no reactivate(): closed then open
-    assert types(plan) == ["pushed"]
+    assert types(plan) == ["reopened", "pushed"]
     assert sim.digest()["baselined"] == {"reviews": True, "threads": True, "ci": True}
 
 
@@ -306,7 +306,7 @@ def test_reopen_then_merged_emits_merged() -> None:
     sim.reactivate()
     merged = busy(base, head=2)
     merged.update(state="merged", merged_at="2026-10-03T11:00:00Z")
-    assert types(sim.step(merged)) == ["pushed", "merged"]
+    assert types(sim.step(merged)) == ["pushed", "merged"]  # no `reopened`: it ended merged
 
 
 def test_reopen_with_an_incomplete_part_baselines_it_silently_later() -> None:
@@ -314,7 +314,7 @@ def test_reopen_with_an_incomplete_part_baselines_it_silently_later() -> None:
     sim = Sim(base)
     sim.step(closed(base))
     plan = sim.step(incomplete(busy(base), "threads"))  # implicit reopen, threads incomplete
-    assert types(plan) == []
+    assert types(plan) == ["reopened"]
     assert sim.digest()["baselined"]["threads"] is False
     plan = sim.step(busy(base))
     assert types(plan) == []

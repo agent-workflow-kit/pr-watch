@@ -20,6 +20,9 @@ Conservative readings (the interface is silent):
 - The common `head_sha` is the new digest's head when valid, else the stored digest's head;
   with neither valid the events other than `pushed` are dropped (`invalid_head_sha`). `pushed`
   needs both heads valid and is otherwise suppressed (a null or unknown value is not a change).
+- `opened` fires at first sight only, when the caller passes `opened_since` and the snapshot's
+  `created_at` is at or after it. `reopened` fires for a stored `closed` shown `open` (never
+  from `merged`, never at first sight) and comes before `pushed`; `occurred_at` is null.
 - A null or unknown value is never a change: an unreadable state, head or reviewer is no event.
 - A stored `state` that is null (never readable) counts as first sight for `merged` and `closed`.
 - `review` is emitted for GitHub-backed PRs only (the snapshot url is a `pull` url).
@@ -146,6 +149,8 @@ class Ctx:
     forced: ForcedCheck | None
     drops: list[Drop]
     ci_plan: CiPlan
+    first: bool = False
+    opened_since: object = None
 
 
 @dataclass(frozen=True)
@@ -216,6 +221,26 @@ def _order(item: Mapping[str, Any], when: object) -> tuple[datetime, str]:
 
 
 # --- rules -------------------------------------------------------------------------------------
+
+
+def _opened(ctx: Ctx) -> list[dict[str, Any]]:
+    """First sight of a PR created at or after `opened_since` (the creation time of the query
+    watch that gained it; the caller passes None for any other way a PR is first seen). A
+    `created_at` or hint that is not a timestamp with a zone is no event."""
+    if not ctx.first:
+        return []
+    since, created = instant(ctx.opened_since), instant(ctx.snap.get("created_at"))
+    if since is None or created is None or created < since:
+        return []
+    return [{"occurred_at": _ts(ctx.snap.get("created_at"))}]
+
+
+def _reopened_rule(ctx: Ctx) -> list[dict[str, Any]]:
+    """A stored `closed` that the snapshot shows `open`, flagged for re-baseline or not. The
+    time of the reopen is not in a snapshot, so `occurred_at` is null."""
+    if ctx.first or not _reopened(ctx.old, ctx.new):
+        return []
+    return [{"occurred_at": None}]
 
 
 def _pushed(ctx: Ctx) -> list[dict[str, Any]]:
@@ -576,6 +601,8 @@ def plan_ci(
 
 # The documented in-snapshot order.
 RULES: Final[tuple[Rule, ...]] = (
+    Rule("opened", _opened, on_first_sight=True),
+    Rule("reopened", _reopened_rule),
     Rule("pushed", _pushed),
     Rule("review", _review),
     Rule("comment", _comment),
@@ -607,6 +634,7 @@ def diff(
     forced: ForcedCheck | None = None,
     settle_polls: int = 1,
     only: frozenset[str] | None = None,
+    opened_since: object = None,
 ) -> DiffResult:
     """The ordered events of one snapshot, with the drops in `.dropped`.
 
@@ -617,6 +645,8 @@ def diff(
     digest to store is `result.digest`: `new` with the CI hold applied (a copy; inputs are never
     modified). `only` limits the rules to those event types (the over-cap fallback runs `merged`
     and `closed` alone; the CI hold is then not planned and `digest["ci"]` is `new`'s).
+    `opened_since` is the creation time of the query watch that gained a first-seen PR (None: no
+    `opened`); see `_opened`.
     """
     snap = _map(snapshot)
     repo, pr, pr_id = snap.get("repo"), snap.get("pr"), snap.get("pr_id")
@@ -651,7 +681,7 @@ def diff(
     else:
         plan = CiPlan(_map(new.get("ci")), False)
     result.digest["ci"] = copy.deepcopy(dict(plan.ci))
-    ctx = Ctx(before, new, snap, rebaseline, forced, drops, plan)
+    ctx = Ctx(before, new, snap, rebaseline, forced, drops, plan, first, opened_since)
     found: list[DiffEvent] = []
     for rule in RULES:
         if first and not rule.on_first_sight:

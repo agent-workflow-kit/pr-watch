@@ -525,11 +525,23 @@ class _Pool:
             rebaseline=bool(r[6]),
             incomplete=str(r[7]),
             baselined_at=r[8],
+            opened_since=self._opened_since(task.pr_id) if r[2] is None else None,
         )
         return RowStart(
             state, int(r[9]), r[10], r[11], int(r[12]), r[13], settings.settle_polls,
             settings.unreachable_after, settings.detect_force_push,
         )  # fmt: skip
+
+    def _opened_since(self, pr_id: str) -> str | None:
+        """The creation time of the oldest query watch that holds the PR, for `opened`; None when
+        none does, or when a per-PR watch names the PR (the caller named it: never `opened`)."""
+        row = self.store.conn.execute(
+            "SELECT min(w.created_at) FROM sources s JOIN watches w ON w.id = s.watch_id "
+            "WHERE s.pr_id = ? AND w.kind = 'query' "
+            "AND NOT EXISTS (SELECT 1 FROM watches p WHERE p.kind = 'pr' AND p.key = ?)",
+            (pr_id, pr_id),
+        ).fetchone()
+        return None if row is None or row[0] is None else str(row[0])
 
     def _renew(self) -> None:
         for host in self.hosts.values():

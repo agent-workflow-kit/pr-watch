@@ -53,7 +53,7 @@ The seeded text in this repo's older README and design said "binding TBD"; it is
 
 ## Not in 0.1
 
-No extra event types in 0.1: the events a PR can lack are documented as non-events in [Consumer notes](interface.md#consumer-notes), and consumers re-read forgectl for state. Candidates for 1.x: `opened` (needs `created_at` from forgectl `prs`), `reopened`, `review_requested`, back-to-draft, `approval_withdrawn` or `review_dismissed`, `retargeted`, `renamed`, `unreachable` and `recovered`, a mergeability or readiness event.
+No extra event types in 0.1: the events a PR can lack are documented as non-events in [Consumer notes](interface.md#consumer-notes), and consumers re-read forgectl for state. Done in 1.x: `opened` and `reopened` (#34; forgectl v0.55.3 `prs` and snapshot carry `created_at`). Candidates for 1.x: `review_requested`, back-to-draft, `approval_withdrawn` or `review_dismissed`, `retargeted`, `renamed`, `unreachable` and `recovered`, a mergeability or readiness event.
 
 ## Live verification
 

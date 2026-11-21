@@ -1,0 +1,217 @@
+"""`opened` and `reopened` through `poll` against the fake forgectl (#34): multi-poll sequences."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from pr_watch.state_dir import open_state_dir
+from pr_watch.store import Store, open_store
+from tests.forgectl_support import FakeForgectl, sha
+from tests.harness import assert_valid, schema_errors
+from tests.test_poll import (
+    HOST,
+    LATER,
+    LATEST,
+    events,
+    poll,
+    pr,
+    run,
+    watch_pr,
+    watch_query,
+)
+
+FUTURE = "2099-01-01T00:00:00Z"  # after any watch created while the suite runs
+OLD = "2026-10-01T09:00:00Z"
+
+
+@pytest.fixture
+def store(state_dir: Path) -> Iterator[Store]:
+    with open_state_dir(state_dir) as state, open_store(state) as s:
+        yield s
+
+
+@pytest.fixture
+def fake(fake_forgectl: FakeForgectl) -> FakeForgectl:
+    return fake_forgectl.host(HOST, me="user-1")
+
+
+def cursor(store: Store) -> str:
+    return f"v1.{store.store_id}.0"
+
+
+def stored(store: Store) -> list[dict[str, Any]]:
+    return [
+        {"type": r[0], "pr": r[1], "payload": json.loads(r[2])}
+        for r in store.conn.execute("SELECT type, pr, payload FROM events ORDER BY seq")
+    ]
+
+
+def test_first_enumeration_emits_no_opened_even_for_a_fresh_pr(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake.add(pr(1, created_at=OLD))
+    watch_query(capsys)
+    _, doc = poll(capsys)
+    assert sum(doc["events"].values()) == 0 and events(store) == []
+
+
+def test_a_pr_created_after_the_watch_emits_one_opened_then_baselines(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake.add(pr(1, created_at=OLD))
+    watch_query(capsys)
+    poll(capsys)
+    new = pr(2, created_at=FUTURE)
+    fake.add(new)
+    _, doc = poll(capsys)
+    assert doc["events"]["opened"] == 1 and events(store) == ["opened"]
+    (event,) = stored(store)
+    assert event["pr"] == new["pr"] and event["payload"]["head_sha"] == new["head"]["sha"]
+    assert event["payload"]["occurred_at"] == "2099-01-01T00:00:00.000000Z"
+    # the baseline is silent and a later poll repeats nothing
+    fake.update(new["pr"], updated_at=LATEST)
+    _, doc = poll(capsys)
+    assert sum(doc["events"].values()) == 0 and events(store) == ["opened"]
+    _, doc = poll(capsys)
+    assert events(store) == ["opened"]
+
+
+def test_opened_payload_validates_and_names_the_watch(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    watch_query(capsys)
+    poll(capsys)
+    fake.add(pr(2, created_at=FUTURE))
+    poll(capsys)
+    code, out, _ = run(capsys, "--json", "events", "--since", cursor(store))
+    assert code == 0
+    (event,) = json.loads(out)["events"]
+    assert schema_errors("event", event) == [] and event["type"] == "opened"
+    assert len(event["watches"]) == 1
+
+
+def test_an_old_pr_that_newly_matches_the_watch_emits_no_opened(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    watch_query(capsys, "--repo", f"{HOST}/example-org/widgets")
+    poll(capsys)
+    # an older PR of the account appears in the watch later (its repo filter now matches)
+    fake.add(pr(3, created_at=OLD))
+    _, doc = poll(capsys)
+    assert doc["prs"]["snapshotted"] == 1 and sum(doc["events"].values()) == 0
+    assert events(store) == []
+
+
+def test_a_per_pr_watch_never_gets_opened(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    snap = pr(5, created_at=FUTURE)
+    fake.add(snap)
+    watch_pr(capsys, snap["pr"])
+    fake.update(snap["pr"], updated_at=LATEST)
+    _, doc = poll(capsys)
+    assert sum(doc["events"].values()) == 0 and events(store) == []
+
+
+def test_a_member_named_by_a_per_pr_watch_before_its_first_snapshot_gets_no_opened(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    watch_query(capsys)
+    poll(capsys)
+    snap = pr(6, created_at=FUTURE)
+    fake.add(snap)
+    # `watch add` of the PR takes its first snapshot now: the caller named it
+    watch_pr(capsys, snap["pr"])
+    fake.update(snap["pr"], updated_at=LATEST)
+    poll(capsys)
+    assert events(store) == []
+
+
+def test_a_pr_named_by_a_per_pr_watch_without_a_baseline_gets_no_opened(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    snap = pr(6, created_at=FUTURE)
+    fake.add(snap)
+    code, out, _ = run(
+        capsys, "--json", "watch", "add", snap["pr"], "--owner", "human:a", "--no-baseline"
+    )
+    assert code == 0, out
+    watch_query(capsys)
+    poll(capsys)  # the first snapshot of a PR that a per-PR watch names
+    assert events(store) == []
+
+
+def test_reopened_from_closed_emits_one_reopened_and_pushed_when_the_head_moved(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    snap = pr(7)
+    fake.add(snap)
+    watch_pr(capsys, snap["pr"])
+    fake.update(snap["pr"], state="closed", closed_at=LATER, updated_at=LATER)
+    poll(capsys)
+    fake.update(snap["pr"], state="open", closed_at=None, updated_at=LATEST, head={"sha": sha(9)})
+    _, doc = poll(capsys)
+    assert doc["events"]["reopened"] == 1 and doc["events"]["pushed"] == 1
+    assert events(store) == ["closed", "reopened", "pushed"]
+    _, doc = poll(capsys)
+    assert events(store) == ["closed", "reopened", "pushed"]
+
+
+def test_reopened_without_a_head_change_is_alone(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    snap = pr(7)
+    fake.add(snap)
+    watch_pr(capsys, snap["pr"])
+    fake.update(snap["pr"], state="closed", closed_at=LATER, updated_at=LATER)
+    poll(capsys)
+    fake.update(snap["pr"], state="open", closed_at=None, updated_at=LATEST)
+    poll(capsys, "--pr", snap["pr"])
+    assert events(store) == ["closed", "reopened"]
+    (event,) = [e for e in stored(store) if e["type"] == "reopened"]
+    assert event["payload"]["occurred_at"] is None
+    assert event["payload"]["head_sha"] == snap["head"]["sha"]
+
+
+def test_a_merged_pr_is_never_reopened(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    snap = pr(7)
+    fake.add(snap)
+    watch_pr(capsys, snap["pr"])
+    fake.update(snap["pr"], state="merged", merged_at=LATER, updated_at=LATER)
+    poll(capsys)
+    fake.update(snap["pr"], state="open", merged_at=None, updated_at=LATEST)
+    poll(capsys)
+    assert events(store) == ["merged"]
+
+
+def test_a_query_member_that_closes_and_reopens_emits_reopened_not_opened(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    watch_query(capsys)
+    poll(capsys)
+    snap = pr(2, created_at=FUTURE)
+    fake.add(snap)
+    poll(capsys)
+    fake.update(snap["pr"], state="closed", closed_at=LATER, updated_at=LATER)
+    poll(capsys, "--pr", snap["pr"])
+    fake.update(snap["pr"], state="open", closed_at=None, updated_at=LATEST)
+    poll(capsys)
+    assert events(store) == ["opened", "closed", "reopened"]
+
+
+def test_the_report_counts_and_the_poll_schema_accept_the_new_types(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    watch_query(capsys)
+    poll(capsys)
+    fake.add(pr(2, created_at=FUTURE))
+    _, doc = poll(capsys)
+    assert_valid("cli/poll", doc)
+    assert doc["events"]["opened"] == 1 and sum(doc["events"].values()) == 1

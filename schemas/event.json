@@ -2,8 +2,136 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "pr-watch/event.json",
   "title": "pr-watch event",
-  "description": "One detected difference on a PR. Fixed in-snapshot order: pushed, review, comment, review_comment, approved, changes_requested, ci, ready, merged, closed. Closed shape of this version; consumers must ignore unknown fields and types and must not validate strictly.",
+  "description": "One detected difference on a PR. Fixed in-snapshot order: opened, reopened, pushed, review, comment, review_comment, approved, changes_requested, ci, ready, merged, closed. Closed shape of this version; consumers must ignore unknown fields and types and must not validate strictly.",
   "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "opened"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "repo": {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        "detected_at": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "occurred_at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "$ref": "defs.json#/$defs/labels"
+        },
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "watches": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/watch_id"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "seq",
+        "type",
+        "pr",
+        "pr_id",
+        "repo",
+        "detected_at",
+        "occurred_at",
+        "labels",
+        "head_sha",
+        "watches"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "reopened"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "repo": {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        "detected_at": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "occurred_at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "$ref": "defs.json#/$defs/labels"
+        },
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "watches": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/watch_id"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "seq",
+        "type",
+        "pr",
+        "pr_id",
+        "repo",
+        "detected_at",
+        "occurred_at",
+        "labels",
+        "head_sha",
+        "watches"
+      ]
+    },
     {
       "type": "object",
       "properties": {
