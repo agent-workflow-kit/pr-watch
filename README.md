@@ -68,7 +68,7 @@ A watch has owners (it ends when its last owner removes its reference) and label
 
 ## Events and the consumer cursor
 
-Events: `opened`, `reopened`, `pushed`, `comment`, `review_comment`, `review` (GitHub only), `approved`, `changes_requested`, `ci`, `ready`, `merged`, `closed`. Each carries metadata and ids, never comment text, titles or descriptions: read text through forgectl by id. The rule for each type is in [Events](docs/interface.md#events).
+Events: `opened`, `reopened`, `pushed`, `comment`, `review_comment`, `review` (GitHub only), `review_requested`, `approved`, `changes_requested`, `ci`, `ready`, `converted_to_draft`, `merged`, `closed`. Each carries metadata and ids, never comment text, titles or descriptions: read text through forgectl by id. The rule for each type is in [Events](docs/interface.md#events).
 
 `pr-watch events` never changes state, so every consumer keeps its own opaque cursor:
 
@@ -99,7 +99,7 @@ Details: [`cron`](docs/interface.md#cron).
 
 ## Hooks
 
-`on-opened`, `on-reopened`, `on-pushed`, `on-comment`, `on-review_comment`, `on-review`, `on-approved`, `on-changes_requested`, `on-ci`, `on-ready`, `on-merged`, `on-closed` and `post-poll` run a command with a JSON payload on stdin. They are post-hooks: best-effort, at-most-once, capped per poll, and unable to veto anything. A consumer that must not miss an event reads `events` with its cursor; the hook is an early nudge.
+`on-opened`, `on-reopened`, `on-pushed`, `on-comment`, `on-review_comment`, `on-review`, `on-review_requested`, `on-approved`, `on-changes_requested`, `on-ci`, `on-ready`, `on-converted_to_draft`, `on-merged`, `on-closed` and `post-poll` run a command with a JSON payload on stdin. They are post-hooks: best-effort, at-most-once, capped per poll, and unable to veto anything. A consumer that must not miss an event reads `events` with its cursor; the hook is an early nudge.
 
 ```yaml
 # ~/.config/pr-watch/config.yaml

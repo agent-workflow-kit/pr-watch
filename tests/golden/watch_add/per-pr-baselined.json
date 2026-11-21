@@ -8,6 +8,7 @@
   "pr": {
     "baselined": {
       "ci": true,
+      "review_requests": true,
       "reviews": true,
       "threads": true
     },

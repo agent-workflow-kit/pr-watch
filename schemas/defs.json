@@ -111,10 +111,12 @@
         "comment",
         "review_comment",
         "review",
+        "review_requested",
         "approved",
         "changes_requested",
         "ci",
         "ready",
+        "converted_to_draft",
         "merged",
         "closed"
       ]
@@ -152,7 +154,8 @@
       "enum": [
         "reviews",
         "threads",
-        "ci"
+        "ci",
+        "review_requests"
       ],
       "description": "A forgectl snapshot part that can be listed in incomplete."
     },
@@ -537,13 +540,17 @@
                 },
                 "ci": {
                   "type": "boolean"
+                },
+                "review_requests": {
+                  "type": "boolean"
                 }
               },
               "additionalProperties": false,
               "required": [
                 "reviews",
                 "threads",
-                "ci"
+                "ci",
+                "review_requests"
               ]
             },
             {
@@ -598,6 +605,37 @@
       ],
       "additionalProperties": false,
       "description": "state, draft, ci_state, ci_head_sha and head_sha and last_polled_at are null until the first snapshot (watch add --no-baseline). ci_state is null while a CI hold keeps a stale state (ci_stale true)."
+    },
+    "requested_reviewer": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/account_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "login": {
+          "$ref": "#/$defs/login"
+        },
+        "kind": {
+          "enum": [
+            "user",
+            "team"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "login",
+        "kind"
+      ],
+      "description": "The reviewer a review request names. A team's login is its slug; kind tells it from a user of the same name."
     }
   }
 }

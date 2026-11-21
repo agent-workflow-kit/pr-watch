@@ -166,8 +166,9 @@ def test_a_pushed_head_becomes_one_pushed_event_and_is_counted(
     assert doc["prs"]["snapshotted"] == 1 and doc["prs"]["unchanged"] == 0
     assert events(store) == ["pushed"]
     assert list(doc["events"]) == [
-        "opened", "reopened", "pushed", "comment", "review_comment", "review", "approved",
-        "changes_requested", "ci", "ready", "merged", "closed",
+        "opened", "reopened", "pushed", "comment", "review_comment", "review",
+        "review_requested", "approved", "changes_requested", "ci", "ready",
+        "converted_to_draft", "merged", "closed",
     ]  # fmt: skip
 
 

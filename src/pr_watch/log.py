@@ -76,7 +76,7 @@ PATTERNS: Final[dict[str, str]] = {
 _COMPILED: Final = {key: re.compile(pattern) for key, pattern in PATTERNS.items()}
 _MAX_PATTERN_CHARS: Final = 4096
 ENUMS: Final[dict[str, tuple[str, ...]]] = {
-    "part": ("reviews", "threads", "ci"),
+    "part": ("reviews", "threads", "ci", "review_requests"),
     "from": ("active", "terminal", "unreachable"),
     "to": ("active", "terminal", "unreachable"),
 }

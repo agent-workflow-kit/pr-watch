@@ -144,7 +144,12 @@ def test_persistent_parts_are_reported_once_at_the_threshold() -> None:
 def test_incomplete_part_never_produces_events_and_completes_silently() -> None:
     base = gh()
     sim = Sim(incomplete(base, "threads"))
-    assert sim.digest()["baselined"] == {"reviews": True, "threads": False, "ci": True}
+    assert sim.digest()["baselined"] == {
+        "reviews": True,
+        "threads": False,
+        "ci": True,
+        "review_requests": True,
+    }
     assert sim.row["baselined_at"] == "2026-10-03T12:01:00.000000Z"
     # a comment arrives while the part is incomplete: nothing, the old seen is kept
     plan = sim.step(incomplete(plus_threads(base, general("gh:ic:IC_a")), "threads"))
@@ -285,7 +290,12 @@ def test_reopen_without_the_flag_is_detected_from_the_stored_state() -> None:
     sim.step(closed(base))
     plan = sim.step(busy(base, head=2))  # no reactivate(): closed then open
     assert types(plan) == ["reopened", "pushed"]
-    assert sim.digest()["baselined"] == {"reviews": True, "threads": True, "ci": True}
+    assert sim.digest()["baselined"] == {
+        "reviews": True,
+        "threads": True,
+        "ci": True,
+        "review_requests": True,
+    }
 
 
 def test_reopen_then_closed_again_before_the_snapshot_emits_closed_once() -> None:
