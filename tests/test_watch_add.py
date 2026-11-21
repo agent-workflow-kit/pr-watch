@@ -157,6 +157,13 @@ def test_baseline_on_a_settled_pr_leaves_unsettled_since_null(
     assert row(store)["unsettled_since"] is None
 
 
+def test_the_baseline_snapshot_asks_forgectl_to_leave_out_the_bodies(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ok(capsys, PR)
+    assert fake.argvs("snapshot")[0][:3] == ["snapshot", PR, "--no-bodies"]
+
+
 @pytest.mark.parametrize("state", ["merged", "closed"])
 def test_new_terminal_pr_stores_its_one_event_after_the_cursor(
     fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str], state: str

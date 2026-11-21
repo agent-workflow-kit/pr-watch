@@ -2,7 +2,8 @@
 
 What this module does (docs/interface.md: Failures, Version rule, Resolution):
 
-- Builds argv for `prs`, `snapshot`, `show`, `compare` and `whoami` from validated values only:
+- Builds argv for `prs`, `snapshot` (always `--no-bodies`), `show`, `compare` and `whoami` from
+  validated values only:
   a `refs.PrRef` (its `canonical` form, re-validated here), a host or repo id that round-trips
   through `refs.parse_host`/`parse_repo`, an aware datetime, a 40-hex sha, a fixed state set.
   Options are `--option=value`, a positional always starts with a host (never `-`), and `--` is
@@ -347,7 +348,10 @@ def prs_argv(
 
 
 def snapshot_argv(ref: PrRef, timeout_ms: int) -> list[str]:
-    return ["snapshot", _canonical(ref), *_tail(timeout_ms)]
+    """`snapshot --no-bodies`: the digest, the diff and every event payload read only ids,
+    authors, states, shas and times, so the bodies of reviews and comments (the part an author
+    can pad past the output cap) are left out. The PR's own `body` stays (forgectl keeps it)."""
+    return ["snapshot", _canonical(ref), "--no-bodies", *_tail(timeout_ms)]
 
 
 def show_argv(ref: PrRef, timeout_ms: int) -> list[str]:

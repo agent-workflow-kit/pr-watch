@@ -301,8 +301,9 @@ def test_constructor_requires_an_absolute_executable() -> None:
 
 def test_argv_snapshot_show() -> None:
     assert fc.snapshot_argv(REF, 1500) == [
-        "snapshot", PR, "--json", "--timeout=1500ms",
+        "snapshot", PR, "--no-bodies", "--json", "--timeout=1500ms",
     ]  # fmt: skip
+    assert "--no-bodies" not in fc.show_argv(REF, 1500)  # `show` rejects the flag
     assert fc.show_argv(REF, 1500)[:2] == ["show", PR]
 
 
@@ -423,7 +424,7 @@ def test_timeout_must_be_a_positive_int_of_ms(bad: Any) -> None:
 def test_the_call_reaches_forgectl_with_the_built_argv(fake: FakeForgectl, client) -> None:
     fake.add(new_pr())
     ok(client.snapshot(REF), "snapshot")
-    assert fake.argvs("snapshot") == [["snapshot", PR, "--json", "--timeout=5000ms"]]
+    assert fake.argvs("snapshot") == [["snapshot", PR, "--no-bodies", "--json", "--timeout=5000ms"]]
 
 
 def test_the_child_gets_exactly_the_given_environment(fake: FakeForgectl) -> None:
