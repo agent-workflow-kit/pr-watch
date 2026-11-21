@@ -13,7 +13,8 @@ binaries (tests/fakebin) plus a sandbox bin directory. The sandbox bin holds:
 A test that needs forgectl or crontab must put a fake in tests/fakebin. tests/fakebin is first
 on PATH and holds the fake forgectl, so `forgectl` by name resolves to the fake (it exits 98
 without a scenario, and leaves no hit in `hits.log`); the exit-99 `forgectl` stub is reachable
-by its absolute path only. The `crontab` stub is reachable by name. A stub hit fails the test
+by its absolute path only; so is the `crontab` stub, because tests/fakebin/crontab (a fake keeping
+its table in `$HOME/.fake-crontab`) shadows it by name. A stub hit fails the test
 at teardown even if the code under test swallowed the failure, unless the test carries the
 `expect_guard_hit` marker. Because PATH can be bypassed (absolute paths, an explicit `env=`),
 `subprocess.Popen` is also wrapped: launching a `crontab` or `forgectl` binary from outside the

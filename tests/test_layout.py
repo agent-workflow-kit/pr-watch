@@ -151,15 +151,6 @@ def test_guard_stubs_exit_99_by_absolute_path(tool: str, sandbox_bin: Path) -> N
     assert "tests must not run the real" in proc.stderr
 
 
-@pytest.mark.expect_guard_hit
-def test_crontab_by_name_is_the_exit_99_stub() -> None:
-    proc = subprocess.run(
-        ["crontab", "-l"], capture_output=True, text=True, timeout=15, check=False
-    )
-    assert proc.returncode == GUARD_EXIT
-    assert "tests must not run the real" in proc.stderr
-
-
 def test_forgectl_by_name_is_the_fake_and_leaves_no_stub_hit(sandbox_bin: Path) -> None:
     # tests/fakebin/forgectl shadows the stub: with no scenario it refuses (98), and the stub's
     # hit log stays empty, so the test needs no `expect_guard_hit`
@@ -237,11 +228,15 @@ def test_a_swallowed_stub_hit_fails_the_test(
         pytester,
         monkeypatch,
         """
+        import os
         import subprocess
+
+        # `crontab` by name is the fake (tests/fakebin); the exit-99 stub is the second PATH entry
+        STUB = os.environ["PATH"].split(os.pathsep)[1] + "/crontab"
 
         def test_swallows():
             try:
-                subprocess.run(["crontab", "-l"], check=True)
+                subprocess.run([STUB, "-l"], check=True)
             except subprocess.CalledProcessError:
                 pass
         """,
@@ -257,12 +252,15 @@ def test_expect_guard_hit_marker_allows_the_hit_and_resets_the_log(
         pytester,
         monkeypatch,
         """
+        import os
         import subprocess
         import pytest
 
+        STUB = os.environ["PATH"].split(os.pathsep)[1] + "/crontab"
+
         @pytest.mark.expect_guard_hit
         def test_marked():
-            subprocess.run(["crontab", "-l"], check=False)
+            subprocess.run([STUB, "-l"], check=False)
 
         def test_clean_after():
             pass
