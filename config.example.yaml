@@ -43,9 +43,18 @@ hooks:
   max_per_pr_per_poll: 10     # 1 to 1000
   concurrency: 4              # hook workers, 1 to 32
   env_allow: []               # extra environment names hooks may see; hooks get a clean environment otherwise
-  # on-pushed, on-comment, on-review_comment, on-review, on-approved, on-changes_requested,
-  # on-ci, on-ready, on-merged, on-closed and post-poll each take a list:
-  # on-approved: [{cmd: "my-script", timeout: 30, async: true}]   # timeout in seconds, 1 to 600
+  # Each hook name takes a list of {cmd, timeout (seconds, 1 to 600), async}; uncomment to use:
+  # on-pushed: [{cmd: "my-script", timeout: 30, async: true}]
+  # on-comment: [{cmd: "my-script", timeout: 30, async: true}]
+  # on-review_comment: [{cmd: "my-script", timeout: 30, async: true}]
+  # on-review: [{cmd: "my-script", timeout: 30, async: true}]
+  # on-approved: [{cmd: "my-script", timeout: 30, async: true}]
+  # on-changes_requested: [{cmd: "my-script", timeout: 30, async: true}]
+  # on-ci: [{cmd: "my-script", timeout: 30, async: true}]
+  # on-ready: [{cmd: "my-script", timeout: 30, async: true}]
+  # on-merged: [{cmd: "my-script", timeout: 30, async: true}]
+  # on-closed: [{cmd: "my-script", timeout: 30, async: true}]
+  # post-poll: [{cmd: "my-script", timeout: 30, async: true}]
 
 cron:
   env_file: null              # absolute path of a 0600 file the cron entry sources (for forgectl tokens); null: none

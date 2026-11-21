@@ -36,16 +36,15 @@ For development, clone the repository and run `uv sync`, then `uv run pr-watch .
 Use `--json` whenever a script reads the output; the human text has no stability guarantee. The hosts and repositories below are placeholders.
 
 ```sh
-# 1. Take a cursor for "from now" before you add anything.
-pr-watch events --json
-# 2. Watch one PR (it is baselined at once; --owner is required outside a terminal).
-pr-watch watch add example.com/group/project#42 --owner my-tool --label consumer=my-tool
-# 3. Or watch every open PR you authored, on every host forgectl has a credential for.
+# 1. Watch one PR (it is baselined at once; --owner is required outside a terminal).
+#    On a fresh store, take your "from now" cursor from the `cursor` in this result.
+pr-watch watch add example.com/group/project#42 --owner my-tool --label consumer=my-tool --json
+# 2. Or watch every open PR you authored, on every host forgectl has a credential for.
 pr-watch watch add --mine --open --owner my-tool
-# 4. Poll (the only command that contacts a host), then read what changed.
+# 3. Poll (the only command that contacts a host), then read what changed.
 pr-watch poll
 pr-watch events --since <cursor> --label consumer=my-tool --json
-# 5. Run the poll every 5 minutes from cron.
+# 4. Run the poll every 5 minutes from cron.
 pr-watch cron install
 ```
 
@@ -73,7 +72,7 @@ Events: `pushed`, `comment`, `review_comment`, `review` (GitHub only), `approved
 
 `pr-watch events` never changes state, so every consumer keeps its own opaque cursor:
 
-1. Without `--since` you get no events and a cursor for "from now". Store it before you `watch add` (or take the `cursor` of the `watch add` result).
+1. On a fresh store, take your starting cursor from the `cursor` of the first `watch add` result (`events --json` before any watch exists returns `"gap": true`). Once the store has data, `events` without `--since` returns no events and a cursor for "from now".
 2. Call `events --since <cursor>` and store the `cursor` it returns. While `more` is true, call again.
 3. Keep a set of the comment ids you have handled, and match PRs on `pr_id` (the `pr` name can change).
 4. When a result has `"gap": true` (the cursor is too old, pruned, or from another store), the events returned may be incomplete: re-sync current state through forgectl, then reset your cursor.
@@ -130,11 +129,11 @@ State lives in `~/.local/state/pr-watch/` (`state.db`, `log.jsonl`); see [Files]
 | 1 | unexpected or internal error |
 | 2 | usage error (bad flag, bad cursor, invalid PR reference, invalid config, owner required) |
 | 10 | not found (PR not stored or not watched, no watch to label, PR missing on the host) |
-| 12 | failed for a reportable reason (a whole host failed, forgectl missing or too old, a forgectl contract violation, store too new, state unsafe) |
+| 12 | failed for a reportable reason (a whole host failed, forgectl missing or too old, a forgectl contract violation in a direct command's single call (during a poll, a per-PR failure with exit 0), store too new, state unsafe) |
 | 20 | refused (a forgectl refusal passed through) |
 | 128+N | ended by signal N (SIGINT, SIGTERM, SIGHUP), quietly |
 
-Codes 11, 13 to 19 and 21 are unused. A poll that exits 12 still prints its report, and any other non-zero exit prints an error envelope on stdout ([Exit codes](docs/interface.md#exit-codes)).
+Codes 11, 13 to 19 and 21 are unused. A poll that exits 12 prints its normal report, except when the cause is forgectl missing or too old, a store too new or unsafe state: that prints the error envelope. Any other non-zero exit prints an error envelope on stdout ([Output by exit code](docs/interface.md#output-by-exit-code)).
 
 ## Safety
 

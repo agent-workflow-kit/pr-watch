@@ -1,6 +1,6 @@
 # pr-watch: interface
 
-Status: designed, 2026-11-10 (interface 0.1.0-design). This document is the single normative source for pr-watch's rules. `design.md` records the decisions and the internal structure and links to the headings here instead of restating them; the README, the architecture and the schemas follow it. Machine-readable shapes are in `schemas/`.
+Status: implemented, pre-1.0 (current version 0.25.0). This document is the single normative source for pr-watch's rules. `design.md` records the decisions and the internal structure and links to the headings here instead of restating them; the README, the architecture and the schemas follow it. Machine-readable shapes are in `schemas/`.
 
 ## Concepts
 
@@ -316,7 +316,7 @@ Prints the stored events oldest first as JSON lines (each `schemas/event.json`),
 | 1 | unexpected or internal error |
 | 2 | usage error (bad flag, bad cursor, invalid PR reference, invalid config, owner required) |
 | 10 | not found (PR not stored or not watched, no watch to label, PR missing on the host) |
-| 12 | failed for a reportable reason (host unreachable or failing and a whole host failed leaving scopes unlisted, forgectl missing or too old, a forgectl result violating the contract in a single call, store too new, state unsafe) |
+| 12 | failed for a reportable reason (host unreachable or failing and a whole host failed leaving scopes unlisted, forgectl missing or too old, a forgectl result violating the contract in a direct command's single call (during a poll the same violation is a per-PR failure, exit 0; Failures), store too new, state unsafe) |
 | 20 | refused (a forgectl refusal passed through, for example `unknown_host`, with its `reason` and `lower_error`) |
 
 Codes 11, 13 to 19 and 21 are unused: pr-watch has no pre-hooks, no pending store and no session. A signal ends the process with 128 plus its number, for every command, with no traceback (Signals). A closed or failing stdout (a closed pipe, `/dev/full`, a closed fd 1) is exit 1 with one stderr line `cannot write to stdout` and no envelope: the one exception to the envelope rule above, since there is nowhere to print it. The command's writes had already committed.
@@ -344,7 +344,7 @@ The result objects of `watch add`, `watch remove`, `label add|remove`, `prune`, 
 - `events`: counts by type, zero-filled over all ten types in the event order. `hooks`: `run`, `skipped` (hooks skipped by a cap or by the drain bound), `failed` (runs that exited non-zero, timed out or failed to spawn). `failed`: the PRs, scopes or hosts left unchecked, each with the failure code; `ref` is as defined in Failures. `full_pass` is true when any host did a full pass. `truncated` is true when `poll.max_duration` or `poll.max_snapshots` stopped new snapshots, and `deferred` counts the snapshots not started because of either bound. `polled` is whether the `--pr` PR was refreshed. With `already_running` only `prs.skipped_locked` can be non-zero: `deferred` is 0 and `truncated` and `full_pass` are false. A host named in `failed` (a failed `whoami` that names no host has `ref` `whoami`) can have no entry in `hosts`.
 - `list` and `show` rows carry `last_polled_at` (a row's last committed snapshot) and `last_full_at` (the host's, copied).
 
-Exit codes are as in Failures. Golden poll reports are part of the test suite.
+Exit codes are in [Exit codes](#exit-codes) (what a poll does with each outcome is in [Failures](#failures)). Golden poll reports are part of the test suite.
 
 ## Hooks
 
