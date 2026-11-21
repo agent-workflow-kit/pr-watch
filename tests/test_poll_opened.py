@@ -17,6 +17,7 @@ from tests.test_poll import (
     HOST,
     LATER,
     LATEST,
+    col,
     events,
     poll,
     pr,
@@ -107,15 +108,25 @@ def test_an_old_pr_that_newly_matches_the_watch_emits_no_opened(
     assert events(store) == []
 
 
+def watch_pr_unbaselined(capsys: pytest.CaptureFixture[str], ref: str) -> None:
+    """Name `ref` with no first snapshot, so that poll takes it (it is also a query member)."""
+    code, out, _ = run(capsys, "--json", "watch", "add", ref, "--owner", "human:a", "--no-baseline")
+    assert code == 0, out
+
+
 def test_a_per_pr_watch_never_gets_opened(
     fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    watch_query(capsys)
+    poll(capsys)
     snap = pr(5, created_at=FUTURE)
     fake.add(snap)
-    watch_pr(capsys, snap["pr"])
-    fake.update(snap["pr"], updated_at=LATEST)
+    # the query watch lists PR 5 as a new member, and a per-PR watch also names it; the first
+    # snapshot happens in the poll below, where only the per-PR exclusion keeps `opened` out
+    watch_pr_unbaselined(capsys, snap["pr"])
     _, doc = poll(capsys)
-    assert sum(doc["events"].values()) == 0 and events(store) == []
+    assert doc["prs"]["snapshotted"] == 1 and sum(doc["events"].values()) == 0
+    assert events(store) == []
 
 
 def test_a_member_named_by_a_per_pr_watch_before_its_first_snapshot_gets_no_opened(
@@ -125,8 +136,7 @@ def test_a_member_named_by_a_per_pr_watch_before_its_first_snapshot_gets_no_open
     poll(capsys)
     snap = pr(6, created_at=FUTURE)
     fake.add(snap)
-    # `watch add` of the PR takes its first snapshot now: the caller named it
-    watch_pr(capsys, snap["pr"])
+    watch_pr_unbaselined(capsys, snap["pr"])
     fake.update(snap["pr"], updated_at=LATEST)
     poll(capsys)
     assert events(store) == []
@@ -215,3 +225,37 @@ def test_the_report_counts_and_the_poll_schema_accept_the_new_types(
     _, doc = poll(capsys)
     assert_valid("cli/poll", doc)
     assert doc["events"]["opened"] == 1 and sum(doc["events"].values()) == 1
+
+
+def test_two_query_watches_use_the_oldest_watch_time_for_opened(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    watch_query(capsys)
+    watch_query(capsys, "--repo", f"{HOST}/example-org/widgets")
+    old, new = (r[0] for r in store.conn.execute("SELECT id FROM watches ORDER BY created_at, id"))
+    store.conn.execute(
+        "UPDATE watches SET created_at = ? WHERE id = ?", ("2026-10-01T00:00:00.000000Z", old)
+    )
+    store.conn.execute(
+        "UPDATE watches SET created_at = ? WHERE id = ?", ("2026-10-03T00:00:00.000000Z", new)
+    )
+    store.conn.commit()
+    poll(capsys)
+    # created between the two watches: after the older, before the newer; both list it
+    fake.add(pr(2, created_at="2026-10-02T00:00:00Z"))
+    _, doc = poll(capsys)
+    assert doc["events"]["opened"] == 1 and events(store) == ["opened"]
+
+
+def test_a_new_member_already_merged_at_first_sight_emits_opened_then_merged(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    watch_query(capsys)
+    poll(capsys)
+    snap = pr(2, created_at=FUTURE, state="merged", merged_at=LATER, updated_at=LATER)
+    # a stale index still lists it open, so it joins as a member and its first snapshot is merged
+    fake.add(snap, listing={"state": "open"})
+    _, doc = poll(capsys)
+    assert doc["events"]["opened"] == 1 and doc["events"]["merged"] == 1
+    assert events(store) == ["opened", "merged"]
+    assert col(store, snap["pr_id"], "status") == "terminal"
