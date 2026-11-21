@@ -15,9 +15,10 @@ Judgment calls where the interface is silent (the conservative reading in each c
 - A crontab whose block is not exactly one start line followed by one end line (a missing end, a
   second start inside, an end with no start, a second block) is refused untouched, exit 2 `usage`
   (`details.kind: malformed_crontab`), by both commands; the message names the shape.
-- A block line longer than 1000 bytes (vixie cron's limit) is refused: `config_invalid` for a
-  `cron.env_file` that makes the entry too long, `usage` (`unsafe_path`) otherwise. A `:` in a
-  directory of `PATH=` leaves that directory out with a warning (it would split the line).
+- A block line longer than 999 bytes (cron reads a line into a 1000-byte buffer with its
+  terminator) is refused: `config_invalid` for a `cron.env_file` that makes the entry too long,
+  `usage` (`unsafe_path`) otherwise. A `:` in a directory of `PATH=` leaves that directory out
+  with a warning (it would split the line).
 - The text of `crontab`'s stderr is never put in an error (it can echo crontab lines).
 - `PATH=` holds `<home>/.local/bin`, the directory of `forgectl` and `/usr/local/bin:/usr/bin:/bin`
   (a crontab `PATH` replaces cron's own, and hooks need the system tools). A directory that is
@@ -62,7 +63,8 @@ _ATTEMPTS: Final = 3
 
 START: Final = b"# pr-watch managed"
 END: Final = b"# pr-watch managed end"
-MAX_LINE_BYTES: Final = 1000  # vixie cron's line limit; the schemas allow 4096
+# vixie/cronie read a line into a 1000-byte buffer with its terminator; the schemas allow 4096
+MAX_LINE_BYTES: Final = 999
 SYSTEM_DIRS: Final = ("/usr/local/bin", "/usr/bin", "/bin")
 # Characters a path may not hold on top of whitespace and control characters: shell, cron and
 # quote metacharacters. Paths are also single-quoted, but the interface refuses them outright.
@@ -214,11 +216,11 @@ def build_block(every: str, dirs: list[str], binary: str, env_file: str | None) 
 
 
 def _check_line_lengths(block: list[str], env_file: str | None) -> None:
-    """Refuse a block line cron could not read (vixie cron's limit is 1000 bytes)."""
+    """Refuse a block line cron could not read (vixie cron's limit is 999 bytes)."""
     if len(block[1].encode()) > MAX_LINE_BYTES:
         raise CliError(
             "usage",
-            "the PATH line of the cron block would be longer than 1000 bytes",
+            "the PATH line of the cron block would be longer than 999 bytes",
             details={"kind": "unsafe_path"},
         )
     if len(block[2].encode()) > MAX_LINE_BYTES:
@@ -226,7 +228,7 @@ def _check_line_lengths(block: list[str], env_file: str | None) -> None:
             raise _env_file_error("is too long for a crontab line")
         raise CliError(
             "usage",
-            "the cron entry would be longer than 1000 bytes (the path of pr-watch is too long)",
+            "the cron entry would be longer than 999 bytes (the path of pr-watch is too long)",
             details={"kind": "unsafe_path"},
         )
 

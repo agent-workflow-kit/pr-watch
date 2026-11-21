@@ -581,6 +581,23 @@ def test_a_block_line_over_1000_bytes_is_refused(
     assert env.table() == b"# keep\n"
 
 
+def test_the_longest_block_line_is_999_bytes() -> None:
+    every = "15m"
+    dirs = ["/usr/bin"]
+    probe = cron.build_block(every, dirs, "/bin/pr-watch", "x")[2].encode()
+    overhead = len(probe) - 1  # the entry without the env file path itself
+    exact = "x" * (cron.MAX_LINE_BYTES - overhead)
+    block = cron.build_block(every, dirs, "/bin/pr-watch", exact)
+    assert len(block[2].encode()) == 999
+    cron._check_line_lengths(block, exact)  # accepted
+    too_long = exact + "x"
+    block = cron.build_block(every, dirs, "/bin/pr-watch", too_long)
+    assert len(block[2].encode()) == 1000
+    with pytest.raises(CliError) as caught:
+        cron._check_line_lengths(block, too_long)
+    assert caught.value.code == "config_invalid"
+
+
 def test_a_long_pr_watch_path_or_path_line_is_refused(
     env: Env, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -846,6 +863,27 @@ def children() -> Iterator[list[subprocess.Popen[bytes]]]:
         proc.communicate()
 
 
+def _wait_until_child_has_opened(proc: subprocess.Popen[bytes], name: str) -> None:
+    """Wait (at most 5 s) until `proc` has `name` open: it then has reached the lock wait, so the
+    checks after this call cannot pass just because the child was still starting. Without /proc
+    (macOS) there is no such evidence and a fixed 1 s wait stands in for it."""
+    fd_dir = Path(f"/proc/{proc.pid}/fd")
+    if not fd_dir.is_dir():
+        time.sleep(1.0)
+        return
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        assert proc.poll() is None, "the child exited instead of waiting for the lock"
+        for entry in fd_dir.iterdir():
+            try:
+                if os.readlink(entry).endswith("/" + name):
+                    return
+            except OSError:
+                continue
+        time.sleep(0.02)
+    raise AssertionError(f"the child never opened {name}")
+
+
 def test_install_waits_for_the_cron_lock_and_then_writes(
     env: Env, children: list[subprocess.Popen[bytes]], state_dir: Path
 ) -> None:
@@ -855,7 +893,8 @@ def test_install_waits_for_the_cron_lock_and_then_writes(
             fcntl.flock(fd, fcntl.LOCK_EX)
             proc = _child("install")
             children.append(proc)
-            for _ in range(10):  # a bounded wait, checked at every tick
+            _wait_until_child_has_opened(proc, "cron.lock")
+            for _ in range(6):  # then a few ticks of the child's poll loop, checked at every tick
                 time.sleep(0.05)
                 assert proc.poll() is None  # blocked on the lock
                 assert env.table() is None  # and wrote nothing
