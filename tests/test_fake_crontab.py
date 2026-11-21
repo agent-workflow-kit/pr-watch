@@ -42,9 +42,17 @@ def test_list_with_no_table_is_exit_1_and_the_cron_message() -> None:
 
 
 def test_install_from_stdin_then_list_is_byte_exact() -> None:
-    table = b"MAILTO=x\r\n* * * * * echo \xff\xfe\n# c"
+    table = b"MAILTO=x\r\n* * * * * echo \xff\xfe\n# c\n"
     assert crontab("-", stdin=table)[0] == 0
     assert crontab("-l")[1] == table
+
+
+def test_a_table_without_a_final_newline_is_refused_and_the_table_is_kept() -> None:
+    crontab("-", stdin=b"# keep\n")
+    code, _, err = crontab("-", stdin=b"# a\n* * * * * x")
+    assert code == 1
+    assert err == "new crontab file is missing newline before EOF, can't install.\n"
+    assert crontab("-l")[1] == b"# keep\n"
 
 
 def test_empty_stdin_installs_an_empty_table() -> None:

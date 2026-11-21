@@ -190,6 +190,60 @@ def test_explicit_env_path_cannot_reach_a_real_crontab(tmp_path: Path) -> None:
         subprocess.run(["crontab", "-l"], env=env, check=False)
 
 
+def _real_crontab_in(directory: Path) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    fake = directory / "crontab"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+    return fake
+
+
+def test_the_launch_guard_refuses_a_non_fake_crontab_at_any_path_position(
+    tmp_path: Path, sandbox_bin: Path
+) -> None:
+    # Nothing is executed: the guard function is asked about launches of a stand-in "real" binary.
+    from tests.conftest import FAKEBIN, forbidden_launch
+
+    real = _real_crontab_in(tmp_path / "real")
+    allowed = (sandbox_bin.resolve(), FAKEBIN)
+    sep = os.pathsep
+    for path in (
+        f"{real.parent}{sep}{FAKEBIN}",  # real first
+        f"{FAKEBIN}{sep}{real.parent}",  # fake first: the fake wins, see below
+        f"{sandbox_bin}{sep}{real.parent}",  # only the exit-99 stub shadows it
+    ):
+        found = forbidden_launch(["crontab", "-l"], {"PATH": path}, False, allowed)
+        first = path.split(sep)[0]
+        assert (found is None) == (first != str(real.parent)), path
+    assert forbidden_launch([str(real), "-l"], {"PATH": str(FAKEBIN)}, False, allowed)
+    assert forbidden_launch(f"{real} -l", None, True, allowed)
+    assert forbidden_launch(["x", "-l"], None, False, allowed, executable=str(real))
+    assert forbidden_launch([str(FAKEBIN / "crontab"), "-l"], None, False, allowed) is None
+    assert forbidden_launch(["crontab", "-l"], None, False, allowed) is None  # the test PATH
+
+
+def test_the_launch_guard_refuses_a_symlink_from_an_allowed_dir_to_a_real_crontab(
+    tmp_path: Path,
+) -> None:
+    from tests.conftest import forbidden_launch
+
+    real = _real_crontab_in(tmp_path / "real")
+    allowed_dir = tmp_path / "allowed"
+    allowed_dir.mkdir()
+    (allowed_dir / "crontab").symlink_to(real)
+    (allowed_dir / "alias").symlink_to(real)
+    for name in ("crontab", "alias"):
+        launch = [str(allowed_dir / name), "-l"]
+        assert forbidden_launch(launch, None, False, (allowed_dir.resolve(),))
+
+
+@pytest.mark.expect_guard_hit
+def test_popen_executable_cannot_reach_a_real_crontab(tmp_path: Path) -> None:
+    real = _real_crontab_in(tmp_path / "real")
+    with pytest.raises(AssertionError, match="must not run the real crontab"):
+        subprocess.run(["anything", "-l"], executable=str(real), check=False)
+
+
 def test_allowlisted_python_and_tools_resolve_and_run(sandbox_bin: Path) -> None:
     py = subprocess.run(
         ["python3", "-c", "import json, sys; print(sys.version_info[0])"],

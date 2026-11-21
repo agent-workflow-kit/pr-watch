@@ -10,7 +10,9 @@ Argv grammar (the parts pr-watch uses, as in cronie and vixie cron):
 
 - `crontab -l`   print the table byte for byte; with no table: stderr `no crontab for <user>`,
                  exit 1.
-- `crontab -`    replace the table with stdin (empty stdin gives an empty table, as cronie does).
+- `crontab -`    replace the table with stdin (empty stdin gives an empty table, as cronie does;
+                 non-empty stdin without a final newline is refused: `new crontab file is missing
+                 newline before EOF, can't install.`, exit 1, as cronie and vixie cron do).
                  The text is checked line by line like cron does: a malformed line makes the
                  install fail with exit 1 and `errors in crontab file, can't install.`, the stored
                  table unchanged.
@@ -144,6 +146,9 @@ def main(argv: list[str] | None = None) -> int:
         data = sys.stdin.buffer.read()
         if _writes_fail():
             sys.stderr.write("fake-crontab: write refused\n")
+            return 1
+        if data and not data.endswith(b"\n"):
+            sys.stderr.write("new crontab file is missing newline before EOF, can't install.\n")
             return 1
         text = data.decode("utf-8", "surrogateescape")
         if b"\0" in data or not all(_valid_line(line) for line in text.split("\n")):

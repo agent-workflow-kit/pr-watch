@@ -2,7 +2,10 @@
 
 The block is four lines (header with `v1 every=D`, a `PATH=` line, one entry, the end line). All
 text outside it is kept byte for byte (CRLF, bytes that are not UTF-8); the one change to it is a
-newline added when the block is appended after a final line that lacks one. The read-modify-write
+final newline when the written table would not end in one (cron refuses such a table): when the
+block is appended after a final line that lacks one, or a foreign last line that lacked one
+follows the block. An install then an uninstall therefore cannot restore a missing final newline;
+that byte is the only difference. The read-modify-write
 runs under an exclusive `flock` on `<state dir>/cron.lock` and re-reads the crontab before writing,
 and the written table is read back and compared. `crontab` runs only through `gateway.run`, with
 the table on stdin (`crontab -`) and `crontab -r` when nothing is left.
@@ -11,7 +14,11 @@ Judgment calls where the interface is silent (the conservative reading in each c
 
 - A crontab whose block is not exactly one start line followed by one end line (a missing end, a
   second start inside, an end with no start, a second block) is refused untouched, exit 2 `usage`
-  (`details.kind: malformed_crontab`), by both commands.
+  (`details.kind: malformed_crontab`), by both commands; the message names the shape.
+- A block line longer than 1000 bytes (vixie cron's limit) is refused: `config_invalid` for a
+  `cron.env_file` that makes the entry too long, `usage` (`unsafe_path`) otherwise. A `:` in a
+  directory of `PATH=` leaves that directory out with a warning (it would split the line).
+- The text of `crontab`'s stderr is never put in an error (it can echo crontab lines).
 - `PATH=` holds `<home>/.local/bin`, the directory of `forgectl` and `/usr/local/bin:/usr/bin:/bin`
   (a crontab `PATH` replaces cron's own, and hooks need the system tools). A directory that is
   unsafe (not owned by the user or root, group- or world-writable, or with characters that cannot
@@ -55,13 +62,14 @@ _ATTEMPTS: Final = 3
 
 START: Final = b"# pr-watch managed"
 END: Final = b"# pr-watch managed end"
+MAX_LINE_BYTES: Final = 1000  # vixie cron's line limit; the schemas allow 4096
 SYSTEM_DIRS: Final = ("/usr/local/bin", "/usr/bin", "/bin")
 # Characters a path may not hold on top of whitespace and control characters: shell, cron and
 # quote metacharacters. Paths are also single-quoted, but the interface refuses them outright.
 _REFUSED_CHARS: Final = frozenset("'\"`%;\\$&|<>(){}[]*?!#^")
 _REFUSED_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zs", "Zl", "Zp", "Cs"})
 _POLL_LINE: Final = re.compile(
-    rb"(?<![\w.-])pr-watch['\"]?\s+(?:-\S+\s+(?:[^-\s]\S*\s+)?)*poll(?![\w-])"
+    rb"(?<![\w.-])pr-watch['\"]?\s+(?:-\S+\s+(?:[^-\s]\S*\s+)?)*poll(?=\s|$)"
 )
 _geteuid = os.geteuid  # seam: tests patch this name, not the shared `os` module
 
@@ -117,6 +125,8 @@ def locate_binary(argv0: str, path_env: str) -> str:
 def _dir_problem(path: str) -> str | None:
     if not _plain(path):
         return "its path has characters that cannot go in a crontab"
+    if ":" in path:
+        return "its path has a ':' that would split the PATH line"
     try:
         info = os.stat(path)
     except FileNotFoundError:
@@ -150,8 +160,13 @@ def path_dirs(home: Path, path_env: str) -> tuple[list[str], list[str]]:
             "forgectl was not found on PATH; cron will not find it unless its directory is on "
             "the crontab PATH"
         )
+    elif not os.path.isabs(forgectl):
+        warnings.append(
+            "forgectl was found only through a relative PATH entry; its directory is left out "
+            "of the crontab PATH"
+        )
     else:
-        add(os.path.dirname(os.path.abspath(forgectl)), "forgectl")
+        add(os.path.dirname(forgectl), "forgectl")
     for system in SYSTEM_DIRS:
         if system not in dirs:
             dirs.append(system)
@@ -198,6 +213,24 @@ def build_block(every: str, dirs: list[str], binary: str, env_file: str | None) 
     ]
 
 
+def _check_line_lengths(block: list[str], env_file: str | None) -> None:
+    """Refuse a block line cron could not read (vixie cron's limit is 1000 bytes)."""
+    if len(block[1].encode()) > MAX_LINE_BYTES:
+        raise CliError(
+            "usage",
+            "the PATH line of the cron block would be longer than 1000 bytes",
+            details={"kind": "unsafe_path"},
+        )
+    if len(block[2].encode()) > MAX_LINE_BYTES:
+        if env_file:
+            raise _env_file_error("is too long for a crontab line")
+        raise CliError(
+            "usage",
+            "the cron entry would be longer than 1000 bytes (the path of pr-watch is too long)",
+            details={"kind": "unsafe_path"},
+        )
+
+
 # --- the crontab text -------------------------------------------------------------------------
 
 
@@ -230,9 +263,16 @@ def _locate(lines: list[bytes]) -> tuple[int, int] | None:
         return None
     if len(starts) == 1 and len(ends) == 1 and starts[0] < ends[0]:
         return starts[0], ends[0]
+    if not ends:
+        problem = "has a '# pr-watch managed' line but no '# pr-watch managed end' line"
+    elif not starts:
+        problem = "has a '# pr-watch managed end' line with no '# pr-watch managed' start line"
+    elif len(starts) > 1 or len(ends) > 1:
+        problem = "has more than one '# pr-watch managed' block (a second start or end line)"
+    else:
+        problem = "has a '# pr-watch managed end' line before its start line"
     raise MalformedCrontab(
-        "the crontab has a '# pr-watch managed' block that is not closed by exactly one "
-        "'# pr-watch managed end' line; the crontab is unchanged, remove the block by hand"
+        f"the crontab {problem}; the crontab is unchanged, repair or remove the block by hand"
     )
 
 
@@ -324,8 +364,8 @@ def _crontab(args: list[str], stdin: bytes | None = None) -> gateway.Result:
 
 
 def _failure(result: gateway.Result) -> str:
-    text = one_line(result.stderr.strip(), 150)
-    return f"exit {result.returncode}" + (f": {text}" if text else "")
+    """The exit code only: crontab's stderr can echo crontab lines (which may hold secrets)."""
+    return f"exit {result.returncode}; run `crontab -l` by hand to see why"
 
 
 def _read() -> bytes | None:
@@ -342,8 +382,9 @@ def _read() -> bytes | None:
 
 def _write(data: bytes) -> None:
     """Install `data`, or remove the crontab when `data` is empty."""
-    result = _crontab(["-r"] if data == b"" else ["-"], None if data == b"" else data)
-    if result.returncode != 0 and "no crontab for" not in result.stderr:
+    removing = data == b""
+    result = _crontab(["-r"] if removing else ["-"], None if removing else data)
+    if result.returncode != 0 and not (removing and "no crontab for" in result.stderr):
         raise _fail(f"the crontab command failed; your crontab is unchanged ({_failure(result)})")
 
 
@@ -367,7 +408,7 @@ def _commit[T](
                 continue  # edited meanwhile: compute again from what is there now
             _write(after)
             if not _same(_read(), after):
-                raise _fail("the crontab does not read back as written; run the command again")
+                raise _fail("the crontab changed while it was being written; check it by hand")
             return True, info
         raise _fail("the crontab keeps changing under us; run the command again")
     finally:
@@ -426,6 +467,7 @@ def install_command(ctx: Context, args: argparse.Namespace) -> int:
         raise CliError("state_unsafe", str(exc)) from None
     dirs, warnings = path_dirs(home, path_env)
     block = build_block(every, dirs, binary, env_file)
+    _check_line_lengths(block, env_file)
 
     def compute(table: bytes | None) -> tuple[bytes, Spliced]:
         try:

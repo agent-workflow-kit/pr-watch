@@ -163,6 +163,24 @@ def test_odd_foreign_bytes_survive(env: Env, capsys: pytest.CaptureFixture[str])
     assert env.table() == before + b"\n"
 
 
+def test_a_foreign_tail_without_a_final_newline_gains_only_that_newline(
+    env: Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # cron refuses a table that does not end in a newline, so the written table always does: the
+    # one byte added to foreign text. Nothing else about the tail changes.
+    block = env.golden("install-fresh.crontab")
+    env.set_table(block + b"0 1 * * * tail\r\n# last")
+    installed(capsys, "--every", "10m")
+    assert (
+        env.table()
+        == env.golden("install-fresh.crontab").replace(b"5m", b"10m").replace(b"*/5", b"*/10")
+        + b"0 1 * * * tail\r\n# last\n"
+    )
+    env.set_table(block + b"# last")
+    run(capsys, "cron", "uninstall")
+    assert env.table() == b"# last\n"
+
+
 def test_reinstall_replaces_the_block_in_place_and_keeps_neighbours(
     env: Env, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -276,25 +294,37 @@ MALFORMED = {
 }
 
 
+SHAPE_MESSAGES = {
+    "no-end": "but no '# pr-watch managed end' line",
+    "no-end-bare": "but no '# pr-watch managed end' line",
+    "end-only": "with no '# pr-watch managed' start line",
+    "two-blocks": "more than one '# pr-watch managed' block",
+    "start-inside": "more than one '# pr-watch managed' block",
+    "end-then-start": "line before its start line",
+}
+
+
 @pytest.mark.parametrize("name", sorted(MALFORMED))
 @pytest.mark.parametrize("command", ["install", "uninstall"])
-def test_a_block_without_its_end_line_is_never_touched(
+def test_a_malformed_block_is_never_touched_and_the_message_names_its_shape(
     env: Env, capsys: pytest.CaptureFixture[str], name: str, command: str
 ) -> None:
     env.set_table(MALFORMED[name])
     (env.home / ".fake-crontab-fail-writes").touch()
     error = refused(capsys, "cron", command)
     assert error["details"]["kind"] == "malformed_crontab"
+    assert SHAPE_MESSAGES[name] in error["message"]
     assert "by hand" in error["message"]
     assert env.table() == MALFORMED[name]
 
 
-def test_a_malformed_crontab_is_refused_before_the_lock_or_any_write(
-    env: Env, capsys: pytest.CaptureFixture[str], state_dir: Path
+def test_a_malformed_crontab_is_refused_without_any_write(
+    env: Env, backend: Backend, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    env.set_table(MALFORMED["no-end"])
+    backend.table = MALFORMED["no-end"]
     refused(capsys, "cron", "install")
-    assert env.table() == MALFORMED["no-end"]
+    assert backend.table == MALFORMED["no-end"]
+    assert backend.writes() == [] and ("crontab", "-r") not in [c.argv for c in backend.calls]
 
 
 def test_a_nul_byte_or_an_oversized_crontab_is_not_touched(
@@ -497,12 +527,68 @@ def test_a_home_that_cannot_be_written_to_path_is_skipped_with_a_warning(
     assert not any("Jo" in d for d in dirs) and len(warnings) == 1
 
 
-def test_a_relative_path_entry_for_forgectl_is_made_absolute(
+def test_a_forgectl_found_through_a_relative_path_entry_is_left_out_with_a_warning(
     env: Env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(env.forgectl_dir.parent)
-    dirs, _ = cron.path_dirs(env.home, f"relative-nothing:{env.forgectl_dir.name}")
-    assert str(env.forgectl_dir) in dirs
+    dirs, warnings = cron.path_dirs(env.home, f"relative-nothing:{env.forgectl_dir.name}")
+    assert str(env.forgectl_dir) not in dirs and not any(not d.startswith("/") for d in dirs)
+    assert len(warnings) == 1 and "forgectl" in warnings[0] and "relative" in warnings[0]
+
+
+def test_a_colon_in_a_path_dir_is_left_out_with_a_warning(env: Env, tmp_path: Path) -> None:
+    odd = tmp_path / "a:b"
+    odd.mkdir(mode=0o755)
+    assert cron._dir_problem(str(odd)) is not None
+    dirs, warnings = cron.path_dirs(odd, str(env.forgectl_dir))
+    assert not any(":" in d for d in dirs)
+    assert len(warnings) == 1 and "left out of PATH" in warnings[0]
+
+
+def test_a_colon_is_allowed_in_the_env_file_path(env: Env, tmp_path: Path) -> None:
+    path = make_env_file(tmp_path, "a:b.env")
+    assert cron.check_env_file(str(path)) == str(path)
+
+
+def test_the_path_line_is_one_variable_even_when_home_has_a_colon(env: Env, tmp_path: Path) -> None:
+    odd = tmp_path / "x:y"
+    dirs, _ = cron.path_dirs(odd, str(env.forgectl_dir))
+    line = cron.build_block("5m", dirs, env.pr_watch, None)[1]
+    assert line == "PATH=" + ":".join([str(env.forgectl_dir), "/usr/local/bin", "/usr/bin", "/bin"])
+
+
+def _deep_dir(tmp_path: Path, depth: int) -> Path:
+    path = tmp_path / "deep"
+    for index in range(depth):
+        path = path / (f"{index}" * 200)
+    path.mkdir(parents=True, mode=0o700)
+    for parent in path.relative_to(tmp_path).parents:
+        (tmp_path / parent).chmod(0o700)
+    return path
+
+
+def test_a_block_line_over_1000_bytes_is_refused(
+    env: Env, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    directory = _deep_dir(tmp_path, 5)
+    path = directory / "pr-watch.env"
+    path.write_text("export X=1\n")
+    path.chmod(0o600)
+    write_config(env, f"cron:\n  env_file: {path}\n")
+    env.set_table(b"# keep\n")
+    doc = refused(capsys, "cron", "install", code="config_invalid")
+    assert "cron.env_file" in doc["message"] and str(path) not in doc["message"]
+    assert env.table() == b"# keep\n"
+
+
+def test_a_long_pr_watch_path_or_path_line_is_refused(
+    env: Env, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    long_home = _deep_dir(tmp_path, 5)
+    monkeypatch.setenv("HOME", str(long_home))
+    error = refused(capsys, "cron", "install")
+    assert error["details"]["kind"] == "unsafe_path"
+    assert env.table() is None
 
 
 # --- env_file ---------------------------------------------------------------------------------
@@ -629,6 +715,8 @@ def test_a_poll_line_outside_the_block_warns_on_stderr_and_in_the_result(
         b"*/5 * * * * jobsctl poll",
         b"*/5 * * * * not-pr-watch poll",
         b"*/5 * * * * echo pr-watch",
+        b"*/5 * * * * echo pr-watch poll.log",
+        b"*/5 * * * * pr-watch poll.sh",
     ],
 )
 def test_other_lines_do_not_warn(env: Env, capsys: pytest.CaptureFixture[str], line: bytes) -> None:
@@ -767,9 +855,10 @@ def test_install_waits_for_the_cron_lock_and_then_writes(
             fcntl.flock(fd, fcntl.LOCK_EX)
             proc = _child("install")
             children.append(proc)
-            time.sleep(1.0)
-            assert proc.poll() is None  # blocked on the lock
-            assert env.table() is None  # and wrote nothing
+            for _ in range(10):  # a bounded wait, checked at every tick
+                time.sleep(0.05)
+                assert proc.poll() is None  # blocked on the lock
+                assert env.table() is None  # and wrote nothing
         finally:
             os.close(fd)
     assert proc.wait(timeout=30) == 0
@@ -919,7 +1008,9 @@ def test_a_write_that_does_not_read_back_is_an_error(
 ) -> None:
     backend.drop_writes = True
     status, out, _ = run(capsys, "--json", "cron", "install")
-    assert status == 1 and "read back" in json.loads(out)["error"]["message"]
+    message = json.loads(out)["error"]["message"]
+    assert status == 1 and "changed while it was being written" in message
+    assert "by hand" in message and "run the command again" not in message
 
 
 @pytest.mark.parametrize(
@@ -968,12 +1059,35 @@ def test_a_failing_write_leaves_the_table_and_says_so(
     assert env.table() == b"# keep\n"
 
 
+def test_no_crontab_for_is_tolerated_only_by_remove(backend: Backend) -> None:
+    backend.write_result = Result(returncode=1, stderr="no crontab for u\n")
+    cron._write(b"")  # `-r` on a table that is already gone is fine
+    with pytest.raises(CliError) as info:
+        cron._write(b"# x\n")
+    assert info.value.code == "internal"
+
+
 def test_a_crontab_the_program_rejects_is_reported_not_swallowed(
     env: Env, backend: Backend, capsys: pytest.CaptureFixture[str]
 ) -> None:
     backend.write_result = Result(returncode=1, stderr="errors in crontab file, can't install.\n")
     status, out, _ = run(capsys, "--json", "cron", "install")
-    assert status == 1 and "can't install" in json.loads(out)["error"]["message"]
+    assert status == 1 and "exit 1" in json.loads(out)["error"]["message"]
+
+
+@pytest.mark.parametrize("command", ["install", "uninstall"])
+def test_crontab_stderr_is_never_echoed_in_an_error(
+    env: Env, backend: Backend, capsys: pytest.CaptureFixture[str], command: str
+) -> None:
+    backend.table = None if command == "install" else env.golden("install-fresh.crontab")
+    secret = "line 3: API_TOKEN=hunter2 * * * * * x"
+    backend.write_result = Result(returncode=1, stderr=secret + "\n")
+    status, out, err = run(capsys, "--json", "cron", command)
+    assert status == 1 and "hunter2" not in out + err
+    backend.write_result = None
+    backend.read_result = Result(returncode=3, stderr=secret + "\n")
+    status, out, err = run(capsys, "--json", "cron", command)
+    assert status == 1 and "hunter2" not in out + err and "exit 3" in out
 
 
 def test_the_real_crontab_is_never_reached(env: Env, capsys: pytest.CaptureFixture[str]) -> None:
