@@ -233,8 +233,9 @@ HANDLERS: dict[str, Handler] = {
 
 # --- watch remove, label add, label remove -----------------------------------------------------
 
-# Commands that never read or write state.db: they must not fail on a bad or newer database.
+# Commands whose `--dry-run` is read-only.
 DRY_RUN_COMMANDS = frozenset({"prune", "cron install", "cron uninstall"})
+# Commands that never read or write state.db: they must not fail on a bad or newer database.
 NO_STORE_COMMANDS = frozenset({"cron install", "cron uninstall"})
 
 

@@ -1349,3 +1349,74 @@ def test_real_runs_report_dry_run_false_and_the_block(
     assert real(capsys, "install")["block"] is None
     assert real(capsys, "uninstall")["block"] == doc["lines"]
     assert real(capsys, "uninstall")["block"] is None
+
+
+def _envelope(out: str) -> dict[str, Any]:
+    return json.loads(out)["error"]
+
+
+@pytest.mark.parametrize("command", ["install", "uninstall"])
+@pytest.mark.parametrize(
+    "result",
+    [
+        Result(returncode=3, stderr="boom\n"),
+        Result(returncode=None, abandoned=True),
+        Result(returncode=-15, timed_out=True),
+        Result(returncode=-15, too_large=True),
+    ],
+)
+def test_dry_run_fails_on_an_unreadable_crontab_like_the_real_run(
+    env: Env,
+    backend: Backend,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    result: Result,
+) -> None:
+    backend.read_result = result
+    real_status, real_out, _ = run(capsys, "--json", "cron", command)
+    dry_status, dry_out, _ = run(capsys, "--json", "cron", command, "--dry-run")
+    assert real_status == 1 and dry_status == real_status
+    assert _envelope(dry_out) == _envelope(real_out)
+    assert backend.writes() == []
+
+
+@pytest.mark.parametrize("command", ["install", "uninstall"])
+@pytest.mark.parametrize(
+    "table",
+    [b"# a\0b\n", b"# " + b"x" * (cron.MAX_CRONTAB_BYTES + 1) + b"\n"],
+    ids=["nul", "oversized"],
+)
+def test_dry_run_refuses_a_nul_or_oversized_crontab_like_the_real_run(
+    env: Env, capsys: pytest.CaptureFixture[str], command: str, table: bytes
+) -> None:
+    env.set_table(table)
+    real_status, real_out, _ = run(capsys, "--json", "cron", command)
+    dry_status, dry_out, _ = run(capsys, "--json", "cron", command, "--dry-run")
+    assert real_status == 1 and dry_status == real_status
+    assert _envelope(dry_out) == _envelope(real_out)
+    assert env.table() == table
+
+
+@pytest.mark.parametrize("command", ["install", "uninstall"])
+@pytest.mark.parametrize("problem", ["symlinked_lock", "bad_mode_dir"])
+def test_dry_run_refuses_an_unsafe_state_directory_like_the_real_run(
+    env: Env,
+    capsys: pytest.CaptureFixture[str],
+    state_dir: Path,
+    tmp_path: Path,
+    command: str,
+    problem: str,
+) -> None:
+    state_dir.mkdir(mode=0o700)
+    if problem == "symlinked_lock":
+        target = tmp_path / "elsewhere.lock"
+        target.write_text("")
+        (state_dir / "cron.lock").symlink_to(target)
+    else:
+        state_dir.chmod(0o770)
+    real_status, real_out, _ = run(capsys, "--json", "cron", command)
+    dry_status, dry_out, _ = run(capsys, "--json", "cron", command, "--dry-run")
+    assert (real_status, _envelope(real_out)["code"]) == (12, "state_unsafe")
+    assert dry_status == real_status
+    assert _envelope(dry_out) == _envelope(real_out)
+    assert env.table() is None
