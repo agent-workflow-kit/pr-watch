@@ -313,9 +313,9 @@ class BrowseApp(App[int]):
         self.query_one("#views", Static).update("  ".join(parts))
 
     def _count_text(self, view: str) -> str:
-        """The item count of a view; `N+` when the events window is full (older ones exist)."""
+        """The item count of a view; `N+` when older events exist beyond the window."""
         count = len(self._snap.items(view))
-        return f"{count}+" if view == "events" and count >= bm.EVENT_WINDOW else str(count)
+        return f"{count}+" if view == "events" and self._snap.events_truncated else str(count)
 
     def _render_detail(self) -> None:
         detail = self.query_one("#detail", Static)

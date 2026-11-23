@@ -442,7 +442,24 @@ def test_a_signal_before_mount_still_takes_the_exit_path() -> None:
     assert asyncio.run(asyncio.wait_for(main(), 60)) == 143
 
 
-def test_a_full_events_window_is_marked(store: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_exactly_full_events_window_is_not_marked(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bm, "EVENT_WINDOW", 3)
+    for _ in range(3):
+        add_event(store)
+    seen: dict[str, str] = {}
+
+    async def script(app: BrowseApp, pilot: object) -> None:
+        await pilot.press("3")  # type: ignore[attr-defined]
+        seen["views"], seen["status"] = views(app), status(app)
+
+    drive(script)
+    assert "[events 3]" in seen["views"]
+    assert "3+" not in seen["status"]
+
+
+def test_a_truncated_events_window_is_marked(store: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(bm, "EVENT_WINDOW", 3)
     for _ in range(4):
         add_event(store)

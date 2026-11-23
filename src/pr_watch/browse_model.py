@@ -76,6 +76,7 @@ class Snapshot:
     last_poll: str | None = None
     read_at: datetime | None = None
     empty: bool = True
+    events_truncated: bool = False  # older events exist beyond `EVENT_WINDOW`
 
     def items(self, view: str) -> tuple[Item, ...]:
         return {"prs": self.prs, "watches": self.watches, "events": self.events}[view]
@@ -136,16 +137,17 @@ def _list_args() -> argparse.Namespace:
     return argparse.Namespace(owner=None, label=None, pr=None, status=None)
 
 
-def _recent_events(ctx: Context) -> list[dict[str, Any]]:
+def _recent_events(ctx: Context) -> tuple[list[dict[str, Any]], bool]:
+    """The newest `EVENT_WINDOW` events and whether older ones exist (one extra row is read)."""
     if ctx.store is None:
-        return []
+        return [], False
     conn = ctx.store.conn
     try:
         with read_snapshot(conn):
-            rows = conn.execute(_EVENT_SQL, (EVENT_WINDOW,)).fetchall()
+            rows = conn.execute(_EVENT_SQL, (EVENT_WINDOW + 1,)).fetchall()
     except sqlite3.Error as exc:
         raise store_error_to_cli(classify_error(exc)) from None
-    return [stored_event(r).to_json() for r in rows]
+    return [stored_event(r).to_json() for r in rows[:EVENT_WINDOW]], len(rows) > EVENT_WINDOW
 
 
 def load_snapshot(loaded: LoadedConfig, *, now: datetime | None = None) -> Snapshot:
@@ -154,7 +156,7 @@ def load_snapshot(loaded: LoadedConfig, *, now: datetime | None = None) -> Snaps
     now = datetime.now(UTC) if now is None else now
     with _context(loaded) as ctx:
         data = listing.build(ctx, _list_args(), now=now)
-        events = _recent_events(ctx)
+        events, events_truncated = _recent_events(ctx)
     watch_labels = {w["id"]: list(w["labels"]) for w in data["watches"]}
     prs = tuple(_pr_item(p, watch_labels) for p in data["prs"])
     pr_names: dict[str, list[str]] = {}
@@ -171,6 +173,7 @@ def load_snapshot(loaded: LoadedConfig, *, now: datetime | None = None) -> Snaps
         else _s(data["last_poll_finished_at"]),
         read_at=now,
         empty=not (data["watches"] or data["prs"] or events),
+        events_truncated=events_truncated,
     )
 
 
