@@ -39,8 +39,9 @@ Judgment calls where the interface is silent (kept conservative):
   `EnumerationResult.stale_whoami` (not in `failures`) and a warning is logged; when the failure
   ends the poll (forgectl's `config_invalid`) it is in `failures` so `failed[]` explains the exit.
   A rate limit of the whole call cancels every host's listing that cycle (cached or not).
-- A forgectl call that ended 128+N while pr-watch itself was signalled is no failure
-  (`EnumerationResult.signalled`): nothing is recorded or counted for it.
+- A forgectl call that failed `interrupted` (exit 128+N) or `killed` (the child died by a signal,
+  e.g. the shutdown's SIGKILL) while pr-watch itself was signalled is no failure
+  (`EnumerationResult.ended_by_signal`): nothing is recorded or counted for it.
 - A `--repo` poll also lists its host's open PRs (host list and query listing for that host only).
   That listing writes `listed_updated_at` for every listed row, and joins members, resets
   `left_count` and reactivates only for items of the restricted repo; it counts no absence and
