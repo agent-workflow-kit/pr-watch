@@ -12,7 +12,7 @@ Layer 2 (composite). Watches PRs for changes and exposes them as events and hook
 |---|---|---|
 | forgectl | A (hard) | `prs`, `snapshot` (`--no-bodies`), `show`, `compare` (read-only, `--json`), `whoami` (host discovery); minimum version `MIN_FORGECTL`, a constant of the release |
 
-Third parties: none directly (git-host access is forgectl's). Dependencies of the package itself: `pyyaml` (the stdlib cannot read YAML) and `pydantic` (config validation), as the design guide prescribes; nothing else beyond the standard library (`argparse`, `sqlite3`, `subprocess`, `concurrent.futures`).
+Third parties: none directly (git-host access is forgectl's). Dependencies of the package itself: `pyyaml` (the stdlib cannot read YAML) and `pydantic` (config validation), as the design guide prescribes; nothing else beyond the standard library (`argparse`, `sqlite3`, `subprocess`, `concurrent.futures`). One optional extra, `browse`: `textual` (`>=8.1,<9`, brings `rich`), only for the `browse` TUI (D-30); it is also in the dev group so CI's plain `uv sync` installs it and the TUI tests run.
 
 ## Decisions
 
@@ -25,7 +25,7 @@ Third parties: none directly (git-host access is forgectl's). Dependencies of th
 | D-5 | Watches are keyed (pr_id or canonical query), have owners and labels; query watches have members baselined silently | Reference counting by owner is in the architecture; members need a digest to diff | [Watches, owners and members](interface.md#watches-owners-and-members) |
 | D-6 | Exact event definitions: per-reviewer approval keyed on `(state, at, commit_sha)`, `ci` held for a move to or from `none` (it carries counts of the counted checks; a change between `pending`, `passing` and `failing` is not held), `ready` is draft to ready only and carries `from_blocked_by` and `blocked_by`, `pushed` keys on the head sha | forgectl flaps right after a push (checks not registered, mergeability unknown); `pushed_at` can be minutes early | [Events](interface.md#events) |
 | D-7 | Hooks are best-effort, at-most-once, run in a bounded pool inside the poll, and are capped per poll and per PR (`merged`, `closed` and `post-poll` are exempt); events are committed first | A notification is not a guarantee; the cursor is | [Hooks](interface.md#hooks) |
-| D-8 | Command set: `poll`, `watch add|remove`, `list`, `show`, `events`, `label`, `prune`, `cron`, `export`; no TUI in 0.x | The consumers are tools; the harness dashboard shows events | [Commands](interface.md#commands) |
+| D-8 | Command set: `poll`, `watch add|remove`, `list`, `show`, `events`, `label`, `prune`, `cron`, `export`; `browse` TUI from 1.x (D-30) | The consumers are tools; the harness dashboard shows events | [Commands](interface.md#commands) |
 | D-9 | forgectl is binding A; per-host pause and per-PR failure counters; a failure never yields an event; one failure table with a column per call kind; whole-host failures are `auth_required`, `tool_missing` and host-call failures; `rate_limited` never counts | forgectl retries itself; `not_found` means unknown | [Failures](interface.md#failures), [Pacing and backoff](interface.md#pacing-and-backoff) |
 | D-10 | Query scope by repeatable `--host` and `--repo` filters; enumeration per host; config keys with per-host and per-repo overrides | One shared `--limit` across hosts cut one host's list (spike B) | [Config](interface.md#config) |
 | D-11 | `watch add <pr>` baselines synchronously with one `snapshot` (`--no-baseline` for the per-PR form only); a query `watch add` never baselines, its first `poll` does | A typo should fail at add time; no command that behaves differently under cron | [`watch add`](interface.md#watch-add) |
@@ -33,6 +33,7 @@ Third parties: none directly (git-host access is forgectl's). Dependencies of th
 | D-13 | Query enumeration lists the open set each cycle; "changed" is `listed_updated_at > snap_updated_at`; a reopen sets a persisted re-baseline flag (silent except `reopened`, `pushed`, `merged` and `closed`) | Removes windows, clocks and the baseline hole | [Poll cycle](interface.md#poll-cycle), [PR status](interface.md#pr-status) |
 | D-14 | Membership: enumeration adds and marks (`left_count`, two consecutive complete listings), only a snapshot commit removes a source | a merged member must keep its source so its event is stored; no enumeration-time removal | [Watches, owners and members](interface.md#watches-owners-and-members) |
 | D-15 | Deviations from the design guide are recorded in Hooks and Labels of the interface | one place for the differences | [Hooks](interface.md#hooks), [Labels](interface.md#labels) |
+| D-30 | `browse` is a read-only Textual TUI in an optional `browse` extra; the view model (`browse_model`) needs no Textual and reuses the code of `list`, `show` and `events`; no actions, no `--result-file`; missing extra is exit 2 `tui_missing` | The core install stays `pyyaml` + `pydantic`; consumers only call the CLI; Textual has a headless pilot so the keys are tested without a terminal | [TUI](interface.md#tui) |
 
 Value validation (`refs`, implementation readings where the interface is silent; always the narrower one):
 
