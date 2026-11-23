@@ -58,6 +58,8 @@ No extra event types in 0.1: the events a PR can lack are documented as non-even
 
 ## Live verification
 
+The `live` suite that settles the rows marked `live` is described in [live.md](live.md) (setup, variables, what each test does to the throwaway repositories, how to record results).
+
 | Behavior | Source | Result | Regression |
 |---|---|---|---|
 | A snapshot costs 5 to 8 requests on GitHub, 19 to 22 on GitLab | spikes A, B | measured | `live` cost budget test |

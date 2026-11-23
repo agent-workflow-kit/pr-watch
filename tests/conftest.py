@@ -10,6 +10,10 @@ binaries (tests/fakebin) plus a sandbox bin directory. The sandbox bin holds:
   holds) and `pr-watch` if it sits beside that interpreter,
 - stubs for `forgectl` and `crontab` that exit 99 and record the hit in `hits.log`.
 
+The one exception is the `live` suite (tests/live, docs/live.md): a test carrying the `live`
+marker, with `PR_WATCH_LIVE=1`, may launch the single real forgectl named by
+`PR_WATCH_LIVE_FORGECTL` (see `live_allowance`); a crontab is never reachable.
+
 A test that needs forgectl or crontab must put a fake in tests/fakebin. tests/fakebin is first
 on PATH and holds the fake forgectl, so `forgectl` by name resolves to the fake (it exits 98
 without a scenario, and leaves no hit in `hits.log`); the exit-99 `forgectl` stub is reachable
@@ -36,6 +40,7 @@ from typing import Any
 
 import pytest
 
+from tests import live_env
 from tests.forgectl_support import fake_forgectl  # noqa: E402,F401  (fixture)
 from tests.gateway_support import fake_gateway, fake_tool, reaper  # noqa: E402,F401  (fixtures)
 
@@ -58,7 +63,7 @@ XDG_SUBDIRS = (
     ("XDG_CACHE_HOME", ".cache"),
 )
 SESSION_PREFIX = "pr-watch-session-"
-_SESSION: dict[str, Path] = {}
+_SESSION: dict[str, Any] = {}
 
 
 def scrub_names(environ: Mapping[str, str]) -> list[str]:
@@ -129,6 +134,9 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers", "expect_guard_hit: the test deliberately runs a guard stub (forgectl/crontab)"
     )
+    # The `live` suite's opt-in is read before the scrub below deletes PR_WATCH_*, *TOKEN* and
+    # friends; without PR_WATCH_LIVE=1 nothing is kept (tests/live_env.py).
+    _SESSION["live_raw"] = live_env.capture(os.environ)
     root = Path(tempfile.mkdtemp(prefix=SESSION_PREFIX)).resolve()
     _SESSION["root"] = root
     _SESSION["bin"] = build_sandbox_bin(root / "sandbox-bin")
@@ -143,8 +151,22 @@ def pytest_configure(config: pytest.Config) -> None:
 def pytest_unconfigure(config: pytest.Config) -> None:
     root = _SESSION.pop("root", None)
     _SESSION.pop("bin", None)
+    _SESSION.pop("live_raw", None)
     if root is not None:
         shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.fixture(scope="session")
+def live_raw() -> dict[str, str] | None:
+    """The captured `PR_WATCH_LIVE*` variables, None without `PR_WATCH_LIVE=1` (live suite only)."""
+    return _SESSION.get("live_raw")
+
+
+def live_allowance(node: Any) -> tuple[Path, ...]:
+    """The one real forgectl a test may launch: only a `live`-marked test, only with the opt-in."""
+    if node.get_closest_marker("live") is None:
+        return ()
+    return live_env.guard_allowance(_SESSION.get("live_raw"))
 
 
 @pytest.fixture(scope="session")
@@ -176,12 +198,16 @@ def forbidden_launch(
     shell: bool,
     allowed_dirs: tuple[Path, ...],
     executable: Any = None,
+    allowed_real: tuple[Path, ...] = (),
 ) -> str | None:
     """The offending real path if the launch would start a crontab/forgectl that is not one of
     the tests' own (a file inside `allowed_dirs`, reached by its real path too), else None.
 
     Covers a bare name resolved through any PATH ordering (a real binary ahead of the fake, or
-    the fake last), an absolute or relative path, `shell=True` and `executable=`."""
+    the fake last), an absolute or relative path, `shell=True` and `executable=`.
+
+    `allowed_real` (the live suite's opt-in, see live_allowance) names real files that may be
+    launched whatever their path; a crontab is never allowed, by any of its names."""
     program = _first_program(args, shell)
     if executable is not None and not shell:
         program = os.fsdecode(executable)
@@ -197,6 +223,9 @@ def forbidden_launch(
         if real.name not in GUARDED_TOOLS and candidate.name not in GUARDED_TOOLS:
             continue
         if not real.exists() and not found:
+            continue
+        names = (real.name, candidate.name, Path(program).name)
+        if real in allowed_real and "crontab" not in names:
             continue
         absolute = Path(os.path.abspath(candidate))
         if all(
@@ -224,12 +253,18 @@ def isolated_env(
     monkeypatch.setenv("PATH", os.pathsep.join([str(FAKEBIN), str(sandbox_bin)]))
 
     allowed = (sandbox_bin.resolve(), FAKEBIN)
+    allowed_real = live_allowance(request.node)
     hits = sandbox_bin / HITS_LOG
     original_init = subprocess.Popen.__init__
 
     def guarded_init(self: Any, args: Any, *a: Any, **kw: Any) -> None:
         bad = forbidden_launch(
-            args, kw.get("env"), bool(kw.get("shell")), allowed, kw.get("executable")
+            args,
+            kw.get("env"),
+            bool(kw.get("shell")),
+            allowed,
+            kw.get("executable"),
+            allowed_real,
         )
         if bad:
             with hits.open("a", encoding="utf-8") as fh:
