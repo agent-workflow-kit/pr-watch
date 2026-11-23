@@ -50,9 +50,10 @@ Judgment calls where the interface is silent (kept conservative):
 - `hosts.<h>.snapshots` is the number of committed snapshots and `requests_estimate` is that times
   7 or 21; `hosts.<h>.errors` holds the listing and whole-host errors (`pr` null), per-PR
   failures are in `failed[]` only.
-- With `already_running` every counter but `prs.skipped_locked` is zero, `prs.incomplete`
-  and `deferred` included, and `truncated` and `full_pass` are false (the schema says only
-  `skipped_locked` can be non-zero).
+- With `already_running` every `prs` counter but `skipped_locked` is zero, `prs.incomplete`
+  and `deferred` included, and `truncated` and `full_pass` are false; `events.renamed` and the
+  hooks counters may be non-zero (the listings of that poll stored `renamed` events and queued
+  their hooks).
 - Housekeeping runs at the end of any poll that was not interrupted, when `last_prune_at` is
   missing, unreadable, in the future or at least a day old. A failure of it never changes the
   poll's result (one warning line on stderr).
@@ -62,7 +63,8 @@ Judgment calls where the interface is silent (kept conservative):
   (a signal during the drain: hooks stopped, no report, exit 128+N, `poll_end` interrupted).
   `post-poll` is queued after the event hooks drained, from the built report (counts exclude it),
   when `hooks.should_post_poll` says so; the report's `hooks` block is final after it. `--hook` and
-  `--no-hooks` come from the arguments. An `already_running` poll queues nothing.
+  `--no-hooks` come from the arguments. An `already_running` poll queues only the hooks of the
+  `renamed` events its listings stored.
 """
 
 from __future__ import annotations
@@ -483,7 +485,7 @@ def _write_end(run: _Run, report: dict[str, Any] | None) -> None:
     log = run.ctx.log
     pool = run.pool
     snapshots = 0 if pool is None else sum(r.snapshots for r in pool.hosts.values())
-    events = 0 if pool is None else len(pool.events)
+    events = len(run.res.events) + (0 if pool is None else len(pool.events))  # listings' too
     log.write(
         "poll_end",
         "info",

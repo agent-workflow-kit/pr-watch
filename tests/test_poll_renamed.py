@@ -12,9 +12,22 @@ import pytest
 
 from pr_watch.state_dir import open_state_dir
 from pr_watch.store import Store, open_store
+from pr_watch.watches import new_watch_id
 from tests.forgectl_support import FakeForgectl, sha
 from tests.harness import schema_errors
-from tests.test_poll import HOST, LATER, LATEST, col, events, poll, pr, run, watch_pr, watch_query
+from tests.test_poll import (
+    HOST,
+    LATER,
+    LATEST,
+    col,
+    events,
+    log_records,
+    poll,
+    pr,
+    run,
+    watch_pr,
+    watch_query,
+)
 
 NEW_REPO = f"{HOST}/example-org/gadgets"
 T3, T4 = "2026-10-05T00:00:00Z", "2026-10-06T00:00:00Z"
@@ -172,3 +185,60 @@ def test_two_renames_are_two_events(
     assert back == old["pr"]
     got = [(e["payload"]["from_pr"], e["payload"]["to_pr"]) for e in stored(store)]
     assert got == [(old["pr"], mid), (mid, old["pr"])]
+
+
+def test_a_listed_rename_with_an_over_cap_label_union_is_stored_and_logged(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str], state_dir: Path
+) -> None:
+    old = pr(9)
+    fake.add(old)
+    watch_query(capsys)
+    poll(capsys)
+    with store.transaction() as conn:
+        for n in range(5):
+            wid = new_watch_id()
+            conn.execute(
+                "INSERT INTO watches VALUES (?, 'pr', ?, '2026-01-01T00:00:00.000000Z')",
+                (wid, f"k{n}"),
+            )
+            conn.execute("INSERT INTO owners VALUES (?, 'o')", (wid,))
+            conn.execute("INSERT INTO sources (pr_id, watch_id) VALUES (?, ?)", (old["pr_id"], wid))
+            for i in range(60):
+                conn.execute("INSERT INTO labels VALUES (?, 'o', ?)", (wid, f"team=l{n}-{i:03d}"))
+    fake.rename(old["pr"], NEW_REPO)
+    _, doc = poll(capsys)  # the listing stores the rename; it must not wedge on the label union
+    assert doc["events"]["renamed"] == 1 and events(store) == ["renamed"]
+    labels = json.loads(store.conn.execute("SELECT labels FROM events").fetchone()[0])
+    assert len(labels) == 256
+    (rec,) = [r for r in log_records(state_dir) if r["event"] == "labels_capped"]
+    assert (rec["pr_id"], rec["kept"], rec["total"]) == (old["pr_id"], 256, 300)
+    _, doc = poll(capsys)  # and the next poll is not stuck on it
+    assert events(store) == ["renamed"]
+
+
+def test_poll_end_counts_the_renamed_events_a_listing_stored(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str], state_dir: Path
+) -> None:
+    old = pr(10)
+    fake.add(old)
+    watch_query(capsys)
+    poll(capsys)
+    fake.rename(old["pr"], NEW_REPO)
+    poll(capsys)  # no snapshot: the listing's one event is the whole poll's
+    ends = [r for r in log_records(state_dir) if r["event"] == "poll_end"]
+    assert [r["events"] for r in ends] == [0, 1]
+
+
+def test_a_stored_digest_without_a_readable_state_is_treated_as_never_snapshotted(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str], state_dir: Path
+) -> None:
+    old = pr(11)
+    fake.add(old)
+    watch_query(capsys)
+    poll(capsys)
+    with store.transaction() as conn:
+        conn.execute('UPDATE prs SET digest = \'{"head_sha": null, "state": null}\'')
+    new = fake.rename(old["pr"], NEW_REPO)
+    poll(capsys)
+    assert events(store) == [] and col(store, old["pr_id"], "pr") == new
+    assert [r for r in log_records(state_dir) if r["event"] == "events_dropped"] == []

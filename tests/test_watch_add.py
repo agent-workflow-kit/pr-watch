@@ -18,6 +18,7 @@ from pr_watch import prune as prune_mod
 from pr_watch import watch_add as wa
 from pr_watch import watches as w
 from pr_watch.cli import main
+from pr_watch.diff import Drop
 from pr_watch.digest import build_digest
 from pr_watch.refs import PrRef, parse_label, parse_pr
 from pr_watch.state_dir import open_state_dir
@@ -889,6 +890,72 @@ def test_a_rename_seen_for_a_baselined_row_is_one_renamed_event(
     assert payload["watches"] and row(store, pr_id)["pr"] == f"{renamed}#7"
     ok(capsys, PR, owner=B)  # the name is stored now: nothing more is reported
     assert event_types(store) == ["renamed"]
+
+
+def _log_of(state_dir: Path, event: str) -> list[dict[str, Any]]:
+    path = state_dir / "log.jsonl"
+    lines = path.read_text().splitlines() if path.exists() else []
+    return [r for r in map(json.loads, lines) if r.get("event") == event]
+
+
+def test_a_rename_with_an_over_cap_label_union_is_stored_with_the_labels_cut(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str], state_dir: Path
+) -> None:
+    renamed = "github.com/example-org/gadgets"
+    pr_id = pr_id_of(fake)
+    digest = json.dumps(build_digest(new_pr(number=7)))
+    seed_row(store, pr_id, digest=digest, owners=(A,))
+    seed_row(store, "OTHER", digest="{}", owners=(A,))  # same name: the reference is ambiguous
+    with store.transaction() as c:
+        c.execute("UPDATE prs SET pr = ? WHERE pr_id = 'OTHER'", (PR,))
+        for n in range(5):
+            wid = w.new_watch_id()
+            c.execute(
+                "INSERT INTO watches VALUES (?, 'pr', ?, '2026-01-01T00:00:00.000000Z')",
+                (wid, f"k{n}"),
+            )
+            c.execute("INSERT INTO owners VALUES (?, 'o')", (wid,))
+            c.execute("INSERT INTO sources (pr_id, watch_id) VALUES (?, ?)", (pr_id, wid))
+            for i in range(60):
+                c.execute("INSERT INTO labels VALUES (?, 'o', ?)", (wid, f"team=l{n}-{i:03d}"))
+    snap = new_pr(number=7)
+    snap.update(pr=f"{renamed}#7", repo=renamed)
+    fake.scenario["prs"][PR]["snapshot"] = snap
+    fake._write()
+    doc = ok(capsys, PR, owner=B)
+    assert doc["events_emitted"] == 1 and event_types(store) == ["renamed"]
+    labels = json.loads(store.conn.execute("SELECT labels FROM events").fetchone()[0])
+    assert len(labels) == 256
+    (rec,) = _log_of(state_dir, "labels_capped")
+    assert (rec["pr_id"], rec["kept"], rec["total"]) == (pr_id, 256, 300)
+
+
+def test_a_rename_without_a_valid_head_sha_refreshes_the_name_and_logs_events_dropped(
+    fake: FakeForgectl,
+    store: Store,
+    capsys: pytest.CaptureFixture[str],
+    state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # a snapshot's head sha is schema-valid, so the drop is injected at the seam
+    monkeypatch.setattr(
+        wa, "rename_event", lambda *a, **k: (None, Drop("renamed", "invalid_head_sha"))
+    )
+    renamed = "github.com/example-org/gadgets"
+    pr_id = pr_id_of(fake)
+    digest = json.dumps(build_digest(new_pr(number=7)))
+    seed_row(store, pr_id, digest=digest, owners=(A,))
+    seed_row(store, "OTHER", digest="{}", owners=(A,))  # same name: the reference is ambiguous
+    with store.transaction() as c:
+        c.execute("UPDATE prs SET pr = ? WHERE pr_id = 'OTHER'", (PR,))
+    snap = new_pr(number=7)
+    snap.update(pr=f"{renamed}#7", repo=renamed)
+    fake.scenario["prs"][PR]["snapshot"] = snap
+    fake._write()
+    ok(capsys, PR, owner=B)
+    assert event_types(store) == [] and row(store, pr_id)["pr"] == f"{renamed}#7"
+    (rec,) = _log_of(state_dir, "events_dropped")
+    assert (rec["pr_id"], rec["count"], rec["reasons"]) == (pr_id, 1, ["invalid_head_sha"])
 
 
 def test_an_expired_row_with_a_full_label_set_does_not_block_a_re_add(

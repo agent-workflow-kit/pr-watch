@@ -646,3 +646,26 @@ def test_a_rename_stored_while_the_snapshot_was_in_flight_is_not_reported_twice(
     monkeypatch.setattr(sn._Pool, "_commit", commit_after_a_listing)
     run(store, plan=full_pass())
     assert events(store) == []  # the stored name already was the snapshot's: nothing to report
+
+
+def test_a_snapshot_taken_under_the_old_name_does_not_undo_a_rename_stored_meanwhile(
+    store: Store, fake: FakeForgectl, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snap = pr(1)
+    pr_id = baseline(store, fake, snap)
+    fake.update(snap["pr"], updated_at="2026-10-03T10:00:00Z")  # the snapshot sees the old name
+    store.conn.execute("UPDATE prs SET listed_updated_at = '2026-10-03T10:00:00.000000Z'")
+    store.conn.commit()
+    new_repo = "github.com/example-org/gadgets"
+    new = f"{new_repo}#1"
+    real = sn._Pool._commit
+
+    def commit_after_a_listing(self: Any, host: Any, entry: Any, p: Any) -> None:
+        with store.transaction() as conn:  # a listing stored A -> B (and its event) meanwhile
+            conn.execute("UPDATE prs SET pr = ?, repo = ? WHERE pr_id = ?", (new, new_repo, pr_id))
+        real(self, host, entry, p)
+
+    monkeypatch.setattr(sn._Pool, "_commit", commit_after_a_listing)
+    run(store, plan=full_pass())
+    assert events(store) == []  # no false B -> A
+    assert col(store, pr_id, "pr") == new and col(store, pr_id, "repo") == new_repo

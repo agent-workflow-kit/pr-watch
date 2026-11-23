@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +16,9 @@ import pytest
 from pr_watch import hooks as hooks_module
 from pr_watch.cli import main
 from pr_watch.forgectl_client import ForgectlClient, ToolMissing
+from pr_watch.leases import ProcFs
 from pr_watch.state_dir import ensure_hooks_cwd
-from pr_watch.store import Store
+from pr_watch.store import Store, format_ts
 from tests.forgectl_support import FakeForgectl, new_pr, sha
 from tests.harness import assert_valid
 from tests.test_poll import (
@@ -406,3 +408,31 @@ def test_a_rename_found_by_a_listing_runs_on_renamed_once(
     assert payload["pr"] == new and payload["from_pr"] == snap["pr"]
     code, doc, _ = run(capsys, "poll", config=cfg)  # nothing new: no second run
     assert doc["hooks"]["run"] == 0 and events(store) == ["renamed"]
+
+
+def test_an_already_running_poll_runs_the_hook_of_a_renamed_event_its_listing_stored(
+    tmp_path: Path,
+    fake: FakeForgectl,  # noqa: F811
+    store: Store,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    out = tmp_path / "out"
+    cfg = write_config(tmp_path, f"hooks:\n  on-renamed:\n    - cmd: 'echo renamed >> {out}'\n")
+    snap = pr(1)
+    fake.add(snap)
+    watch_query(capsys)
+    run(capsys, "poll")
+    new = fake.rename(snap["pr"], f"{HOST}/example-org/gadgets")
+    fake.update(new, updated_at=LATER)  # a snapshot is needed, and another poll holds its lease
+    other = ProcFs().identity(1)
+    with store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO leases VALUES (?, ?, ?, ?, ?)",
+            (snap["pr_id"], other.pid, other.start, other.boot_id,
+             format_ts(datetime.now(UTC) + timedelta(minutes=30))),
+        )  # fmt: skip
+    code, doc, _ = run(capsys, "poll", config=cfg)  # validated against schemas/cli/poll.json
+    assert code == 0 and doc["already_running"] is True
+    assert doc["events"]["renamed"] == 1 and doc["prs"]["snapshotted"] == 0
+    assert doc["hooks"] == {"run": 1, "skipped": 0, "failed": 0}
+    assert out.read_text().strip() == "renamed"

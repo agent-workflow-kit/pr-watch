@@ -70,7 +70,7 @@ from .forgectl_client import ForgectlClient, Outcome
 from .log import Log
 from .refs import RefError, duration_ms, parse_host
 from .renames import rename_event
-from .store import PR_ID_RE, PR_RE, REPO_RE, Store, StoredEvent, format_ts
+from .store import MAX_LABELS, PR_ID_RE, PR_RE, REPO_RE, Store, StoredEvent, format_ts
 from .watches import QUERY_KIND, event_context, watch_exists
 
 LISTING_LIMIT: Final = 1000
@@ -474,6 +474,9 @@ def _upsert_listed(store: Store, conn: sqlite3.Connection, item: Listed, out: _A
         rename, drop = rename_event(conn, item.pr_id, item.pr, item.repo)
         if rename is not None:
             labels, ids = event_context(conn, item.pr_id)
+            if len(labels) > MAX_LABELS:  # the stored cap: more would fail the whole listing
+                out.capped.append((item.pr, item.pr_id, len(labels)))
+                labels = labels[:MAX_LABELS]
             out.events.append(store.append_event(rename.to_new_event(labels, ids)))
         elif drop is not None:
             out.drops.append((item.pr, item.pr_id, drop))
@@ -511,6 +514,7 @@ class _Applied:
     candidates: set[str] = field(default_factory=set)
     events: list[StoredEvent] = field(default_factory=list)  # `renamed`, stored by this listing
     drops: list[tuple[str, str, Drop]] = field(default_factory=list)  # (pr, pr_id, unreportable)
+    capped: list[tuple[str, str, int]] = field(default_factory=list)  # (pr, pr_id, total)
     named: set[str] = field(default_factory=set)  # `pr_id`s whose name this listing compared
 
 
@@ -955,6 +959,9 @@ def _absorb(
         if log is not None:
             log.write("events_dropped", "warn", pr=pr, pr_id=pr_id, count=1, reasons=[drop.reason])
     res.new_members.extend(p for p in applied.new_members if p not in res.new_members)
+    for pr, pr_id, total in applied.capped:
+        if log is not None:
+            log.write("labels_capped", "warn", pr=pr, pr_id=pr_id, kept=MAX_LABELS, total=total)
     for pr, pr_id in applied.reactivated:
         if pr_id not in res.reactivated:
             res.reactivated.append(pr_id)
