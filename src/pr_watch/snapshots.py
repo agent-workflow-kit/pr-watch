@@ -88,6 +88,7 @@ from .diff import Drop, ForcedCheck, forced_from_compare
 from .digest import digest_from_json
 from .enumeration import EnumerationResult, Failure, note_rate, parse_stamp, record_failure
 from .forgectl_client import ForgectlClient, Outcome, ToolError
+from .health import health_event
 from .leases import Lease, Leases
 from .log import Log
 from .refs import duration_ms, parse_pr
@@ -606,6 +607,17 @@ class _Pool:
             # has the one the plan saw: a snapshot taken under an older name must neither undo a
             # newer rename nor report it backwards.
             rename = drop = None
+            row = conn.execute(
+                "SELECT status, failure_count, last_failure_code FROM prs WHERE pr_id = ?",
+                (entry.task.pr_id,),
+            ).fetchone()
+            recovered = None
+            if row is not None and row[0] == "unreachable":
+                recovered, lost = health_event(
+                    conn, entry.task.pr_id, "recovered", row[2], int(row[1])
+                )
+                if lost is not None:
+                    rename_drops.append(lost)
             if "pr" in p.fields or "repo" in p.fields:
                 now_name = conn.execute(
                     "SELECT pr, repo FROM prs WHERE pr_id = ?", (entry.task.pr_id,)
@@ -619,7 +631,7 @@ class _Pool:
                         conn, entry.task.pr_id, p.fields.get("pr"), p.fields.get("repo"),
                         head_sha=p.plan.digest.get("head_sha"),
                     )  # fmt: skip
-            found = ([rename] if rename is not None else []) + list(p.plan.events)
+            found = [e for e in (recovered, rename) if e is not None] + list(p.plan.events)
             if drop is not None:
                 rename_drops.append(drop)
             if p.plan.digest.get("state") == "open":
@@ -717,6 +729,9 @@ class _Pool:
     def _count(self, entry: _Entry, decision: table.Decision) -> None:
         start, effect = entry.start, decision.effect
         code = decision.code or "internal"
+        stored: StoredEvent | None = None
+        lost: Drop | None = None
+        capped: tuple[int, int] | None = None
         with self.store.transaction() as conn:
             row = conn.execute(
                 "SELECT failure_count, status, last_failure_code FROM prs WHERE pr_id = ?",
@@ -733,6 +748,16 @@ class _Pool:
                 + " WHERE pr_id = ?",
                 (count, code, format_ts(self.clock()), entry.task.pr_id),
             )
+            if unreachable:  # the one event of a failure: stored with the status change
+                found, lost = health_event(conn, entry.task.pr_id, "unreachable", code, count)
+                if found is not None:
+                    labels, ids = event_context(conn, entry.task.pr_id)
+                    if len(labels) > MAX_LABELS:
+                        capped, labels = (MAX_LABELS, len(labels)), labels[:MAX_LABELS]
+                    try:
+                        stored = self.store.append_event(found.to_new_event(labels, ids))
+                    except EventError:  # the count and the status change still commit
+                        lost = Drop("unreachable", "invalid_payload")
         pr = start.state.pr
         if effect.record and table.should_record(row[2], code, count, start.unreachable_after):
             self._log("snapshot_failed", "warn", pr=pr, pr_id=entry.task.pr_id, code=code,
@@ -741,6 +766,17 @@ class _Pool:
             self.out.unreachable.append((pr, entry.task.pr_id, code))
             self._log("pr_status", pr=pr, pr_id=entry.task.pr_id,
                       **{"from": "active", "to": "unreachable"})  # fmt: skip
+        if lost is not None:
+            self._log("events_dropped", "warn", pr=pr, pr_id=entry.task.pr_id, count=1,
+                      reasons=[lost.reason])  # fmt: skip
+        if capped is not None:
+            self._log("labels_capped", "warn", pr=pr, pr_id=entry.task.pr_id, kept=capped[0],
+                      total=capped[1])  # fmt: skip
+        if stored is not None:
+            self.out.host(entry.task.host).events += 1
+            self.out.events.append(stored)
+            if self.on_events is not None:
+                self.on_events((stored,))
 
     def _log(self, event: str, level: str = "info", **fields: Any) -> None:
         if self.log is not None:

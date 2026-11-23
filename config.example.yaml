@@ -44,6 +44,8 @@ hooks:
   concurrency: 4              # hook workers, 1 to 32
   env_allow: []               # extra environment names hooks may see; hooks get a clean environment otherwise
   # Each hook name takes a list of {cmd, timeout (seconds, 1 to 600), async}; uncomment to use:
+  # on-unreachable: [{cmd: "my-script", timeout: 30, async: true}]
+  # on-recovered: [{cmd: "my-script", timeout: 30, async: true}]
   # on-renamed: [{cmd: "my-script", timeout: 30, async: true}]
   # on-opened: [{cmd: "my-script", timeout: 30, async: true}]
   # on-reopened: [{cmd: "my-script", timeout: 30, async: true}]
@@ -59,6 +61,7 @@ hooks:
   # on-ci: [{cmd: "my-script", timeout: 30, async: true}]
   # on-ready: [{cmd: "my-script", timeout: 30, async: true}]
   # on-converted_to_draft: [{cmd: "my-script", timeout: 30, async: true}]
+  # on-mergeability: [{cmd: "my-script", timeout: 30, async: true}]
   # on-merged: [{cmd: "my-script", timeout: 30, async: true}]
   # on-closed: [{cmd: "my-script", timeout: 30, async: true}]
   # post-poll: [{cmd: "my-script", timeout: 30, async: true}]

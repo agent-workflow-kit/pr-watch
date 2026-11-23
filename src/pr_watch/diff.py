@@ -73,6 +73,7 @@ from .digest import (
     counted_checks,
     incomplete_parts,
     instant,
+    previous_readiness,
     request_key,
     reviewer_key,
     winning_reviewer_item,
@@ -673,6 +674,53 @@ def _converted_to_draft(ctx: Ctx) -> list[dict[str, Any]]:
     ]
 
 
+_LAGGING_CODES: Final = frozenset({"draft", "checks_pending", "checks_failing"})
+
+
+def _pairs(items: object) -> list[tuple[str, str]]:
+    return [
+        (str(_map(i).get("code")), str(_map(i).get("detail", "")))
+        for i in (items if isinstance(items, list) else ())
+    ]
+
+
+# Entries per side in the `mergeability` payload (the comparison uses the full sets): 100 long
+# non-ASCII `other` details on both sides would not fit `MAX_PAYLOAD_BYTES`.
+MAX_MERGEABILITY_LIST: Final = 20
+
+
+def _mergeability(ctx: Ctx) -> list[dict[str, Any]]:
+    """A change of the readiness blockers other than draft, checks and unknown (conflicts,
+    required reviews, branch protection, other host statuses), or of `mergeable` between true and
+    false. It compares the digest's `readiness` (the last known reading, held across a computing
+    spell). Silent: at first sight, under `rebaseline`, unless both PRs are open, when either
+    reading is missing or has no known blockers yet, and for a `mergeable` flip that comes with a
+    draft or check blocker change (`ready`, `converted_to_draft` and `ci` say it)."""
+    if ctx.rebaseline or ctx.old.get("state") != "open" or ctx.new.get("state") != "open":
+        return []
+    old, new = previous_readiness(ctx.old), previous_readiness(ctx.new)
+    if old is None or new is None or old["blocked_by"] is None or new["blocked_by"] is None:
+        return []
+    before, after = old["mergeable"], new["mergeable"]
+    set_changed = _pairs(old["blocked_by"]) != _pairs(new["blocked_by"])
+    flipped = isinstance(before, bool) and isinstance(after, bool) and before != after
+    if flipped and not set_changed:
+        raw = {c for c, _ in _pairs(ctx.old.get("blocked_by")) + _pairs(ctx.new.get("blocked_by"))}
+        if ctx.old.get("draft") != ctx.new.get("draft") or raw & _LAGGING_CODES:
+            return []
+    if not (set_changed or flipped):
+        return []
+    return [
+        {
+            "occurred_at": None,
+            "from_blocked_by": _blocked({"blocked_by": old["blocked_by"]})[:MAX_MERGEABILITY_LIST],
+            "blocked_by": _blocked({"blocked_by": new["blocked_by"]})[:MAX_MERGEABILITY_LIST],
+            "from_mergeable": before,
+            "mergeable": after,
+        }
+    ]
+
+
 def _blocked(digest: Mapping[str, Any]) -> list[Any]:
     value = digest.get("blocked_by")
     if not isinstance(value, list):
@@ -743,6 +791,7 @@ RULES: Final[tuple[Rule, ...]] = (
     Rule("ci", _ci),
     Rule("ready", _ready),
     Rule("converted_to_draft", _converted_to_draft),
+    Rule("mergeability", _mergeability),
     Rule("merged", _merged, on_first_sight=True),
     Rule("closed", _closed, on_first_sight=True),
 )

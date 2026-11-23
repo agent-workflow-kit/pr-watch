@@ -184,7 +184,7 @@ def test_digest_has_exactly_the_documented_keys() -> None:
     assert set(d) == {
         "head_sha", "state", "draft", "mergeable", "blocked_by", "ci", "review_decision",
         "approvals_at_head", "reviewers", "seen", "pushed_at", "merged_head_sha",
-        "merge_commit_sha", "baselined", "review_requests", "base_ref",
+        "merge_commit_sha", "baselined", "review_requests", "base_ref", "readiness",
     }  # fmt: skip
     assert set(d["seen"]) == {"comments", "reviews"}
     assert set(d["ci"]) == {"state", "head_sha", "hold", "hold_to", "checks", "checks_more"}

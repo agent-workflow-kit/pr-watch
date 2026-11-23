@@ -22,7 +22,8 @@ Call kinds: `pr` (`snapshot` or `show` of one PR), `repo` (`prs --repo`), `query
 and `whoami`. The interface's third column covers both `query` and `whoami`; they differ only in
 the `failed[]` kind.
 
-A failure never produces an event and never changes a PR's state: no effect here commits anything
+A failure produces no event and never changes a PR's state (the one exception, `unreachable`, is
+stored by `snapshots._count` with the status change: `health.py`): no effect here commits anything
 but a success, `not_found` means unknown (never closed), and whole-host failures never touch a
 counter. Code the table does not know is the `transient` row (the `internal` row of the
 interface).

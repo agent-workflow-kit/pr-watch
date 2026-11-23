@@ -116,6 +116,8 @@ def check_hook_cmd(cmd: str) -> bool:
 
 
 EVENT_TYPES: Final = (
+    "unreachable",
+    "recovered",
     "renamed",
     "opened",
     "reopened",
@@ -131,6 +133,7 @@ EVENT_TYPES: Final = (
     "ci",
     "ready",
     "converted_to_draft",
+    "mergeability",
     "merged",
     "closed",
 )

@@ -721,6 +721,26 @@ def test_the_on_retargeted_payload_golden() -> None:
     check_golden("on-retargeted", payload)
 
 
+@pytest.mark.parametrize("kind", ["unreachable", "recovered", "mergeability"])
+def test_the_health_and_mergeability_hook_payload_goldens(kind: str) -> None:
+    event = ev(1, kind)
+    if kind == "mergeability":
+        event.payload.update(
+            from_blocked_by=[], blocked_by=[{"code": "conflicts"}],
+            from_mergeable=True, mergeable=False,
+        )  # fmt: skip
+    else:
+        event.payload.update(code="not_found", failures=5)
+    payload = hooks.event_payload(event)
+    assert_valid(f"hooks/on-{kind}", payload)
+    assert payload["hook"] == f"on-{kind}" and payload["type"] == kind
+    check_golden(f"on-{kind}", payload)
+
+
+def test_the_health_hooks_are_not_exempt_from_the_caps() -> None:
+    assert not {"on-unreachable", "on-recovered", "on-mergeability"} & hooks.EXEMPT
+
+
 def test_the_on_approval_withdrawn_payload_golden() -> None:
     event = ev(1, "approval_withdrawn")
     event.payload.update(

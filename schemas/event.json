@@ -2,8 +2,170 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "pr-watch/event.json",
   "title": "pr-watch event",
-  "description": "One detected difference on a PR. Fixed in-snapshot order: renamed, opened, reopened, pushed, retargeted, review, comment, review_comment, review_requested, approved, changes_requested, approval_withdrawn, ci, ready, converted_to_draft, merged, closed. Closed shape of this version; consumers must ignore unknown fields and types and must not validate strictly.",
+  "description": "One detected difference on a PR. Fixed in-snapshot order: unreachable, recovered, renamed, opened, reopened, pushed, retargeted, review, comment, review_comment, review_requested, approved, changes_requested, approval_withdrawn, ci, ready, converted_to_draft, mergeability, merged, closed. Closed shape of this version; consumers must ignore unknown fields and types and must not validate strictly.",
   "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "unreachable"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "repo": {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        "detected_at": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "occurred_at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "$ref": "defs.json#/$defs/labels"
+        },
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "watches": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/watch_id"
+          },
+          "uniqueItems": true
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z_]{1,64}$",
+          "description": "forgectl's failure code of the last counted failure (the one `failed[]` and `last_failure_code` carry)."
+        },
+        "failures": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000,
+          "description": "The consecutive counted failures that made the PR unreachable (failures.unreachable_after)."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "seq",
+        "type",
+        "pr",
+        "pr_id",
+        "repo",
+        "detected_at",
+        "occurred_at",
+        "labels",
+        "head_sha",
+        "watches",
+        "code",
+        "failures"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "recovered"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "repo": {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        "detected_at": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "occurred_at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "$ref": "defs.json#/$defs/labels"
+        },
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "watches": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/watch_id"
+          },
+          "uniqueItems": true
+        },
+        "code": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z_]{1,64}$",
+              "description": "forgectl's failure code of the last counted failure (the one `failed[]` and `last_failure_code` carry)."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The last failure code the row held before the success, null when unreadable."
+        },
+        "failures": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000,
+          "description": "The consecutive counted failures the row held before the success."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "seq",
+        "type",
+        "pr",
+        "pr_id",
+        "repo",
+        "detected_at",
+        "occurred_at",
+        "labels",
+        "head_sha",
+        "watches",
+        "code",
+        "failures"
+      ]
+    },
     {
       "type": "object",
       "properties": {
@@ -1294,6 +1456,116 @@
         "watches",
         "from_blocked_by",
         "blocked_by"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "defs.json#/$defs/event_id"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "mergeability"
+        },
+        "pr": {
+          "$ref": "defs.json#/$defs/pr"
+        },
+        "pr_id": {
+          "$ref": "defs.json#/$defs/pr_id"
+        },
+        "repo": {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        "detected_at": {
+          "$ref": "defs.json#/$defs/ts"
+        },
+        "occurred_at": {
+          "oneOf": [
+            {
+              "$ref": "defs.json#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "$ref": "defs.json#/$defs/labels"
+        },
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "watches": {
+          "type": "array",
+          "items": {
+            "$ref": "defs.json#/$defs/watch_id"
+          },
+          "uniqueItems": true
+        },
+        "from_blocked_by": {
+          "allOf": [
+            {
+              "$ref": "defs.json#/$defs/blocked_by"
+            },
+            {
+              "maxItems": 20
+            }
+          ],
+          "description": "At most 20 entries (the first 20 in sorted order)."
+        },
+        "blocked_by": {
+          "allOf": [
+            {
+              "$ref": "defs.json#/$defs/blocked_by"
+            },
+            {
+              "maxItems": 20
+            }
+          ],
+          "description": "At most 20 entries (the first 20 in sorted order)."
+        },
+        "from_mergeable": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mergeable": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "seq",
+        "type",
+        "pr",
+        "pr_id",
+        "repo",
+        "detected_at",
+        "occurred_at",
+        "labels",
+        "head_sha",
+        "watches",
+        "from_blocked_by",
+        "blocked_by",
+        "from_mergeable",
+        "mergeable"
       ]
     },
     {

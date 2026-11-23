@@ -473,7 +473,7 @@ def test_gitlab_style_blind_change_is_found_by_the_full_pass(
 # --- failures ---
 
 
-def test_counted_failures_make_a_pr_unreachable_once_and_never_an_event(
+def test_counted_failures_make_a_pr_unreachable_once_with_one_unreachable_event_only(
     store: Store, fake: FakeForgectl
 ) -> None:
     snap = pr(1)
@@ -494,7 +494,8 @@ def test_counted_failures_make_a_pr_unreachable_once_and_never_an_event(
         store.conn.execute("UPDATE prs SET status = 'active' WHERE status = 'unreachable'")
         store.conn.commit()
     assert [s[0] for s in seen] == [[], ["network_error"], []]  # reported once, at the crossing
-    assert col(store, pr_id, "digest") == digest and event_types(store) == []
+    assert col(store, pr_id, "digest") == digest
+    assert event_types(store) == ["unreachable"]  # the one event, at the crossing
     assert col(store, pr_id, "last_failure_code") == "network_error"
     assert col(store, pr_id, "last_attempt_at") is not None
     assert [f["failures"] for f in log.of("snapshot_failed")] == [1, 2]  # first, then the multiple

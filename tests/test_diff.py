@@ -767,6 +767,7 @@ def test_rule_table_follows_the_documented_order() -> None:
         "ci",
         "ready",
         "converted_to_draft",
+        "mergeability",
         "merged",
         "closed",
     ]

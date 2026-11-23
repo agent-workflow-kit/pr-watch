@@ -112,6 +112,8 @@
     },
     "event_type": {
       "enum": [
+        "unreachable",
+        "recovered",
         "renamed",
         "opened",
         "reopened",
@@ -127,6 +129,7 @@
         "ci",
         "ready",
         "converted_to_draft",
+        "mergeability",
         "merged",
         "closed"
       ]
