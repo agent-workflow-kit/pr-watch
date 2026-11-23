@@ -250,7 +250,47 @@ def test_probe_warns_about_a_configured_host_forgectl_does_not_know(
 ) -> None:
     write_config("hosts:\n  git.example.test:\n    concurrency: 2\n")
     doc = jrun(capsys, "--probe")
+    assert doc["warnings"] == [
+        {
+            "code": "host_unknown",
+            "key": "hosts.git.example.test",
+            "message": "forgectl does not know this host",
+        }
+    ]
+
+
+def test_probe_warns_only_for_the_unknown_host_of_a_mixed_config(
+    capsys: pytest.CaptureFixture[str], fake
+) -> None:
+    write_config(
+        "hosts:\n  github.com:\n    concurrency: 2\n  git.example.test:\n    concurrency: 2\n"
+    )
+    doc = jrun(capsys, "--probe")
     assert [w["key"] for w in doc["warnings"]] == ["hosts.git.example.test"]
+
+
+def test_no_probe_means_no_host_warning(capsys: pytest.CaptureFixture[str], fake) -> None:
+    write_config("hosts:\n  git.example.test:\n    concurrency: 2\n")
+    assert jrun(capsys)["warnings"] == []
+
+
+def test_probe_with_no_known_hosts_warns_for_every_configured_host(
+    capsys: pytest.CaptureFixture[str], fake
+) -> None:
+    write_config("hosts:\n  git.example.test:\n    concurrency: 2\n")
+    fake.raw("whoami", stdout='{"hosts": [], "errors": []}')
+    doc = jrun(capsys, "--probe")
+    assert doc["probe"] == {"hosts": 0}
+    assert [w["code"] for w in doc["warnings"]] == ["host_unknown"]
+
+
+def test_probe_errors_suppress_the_host_unknown_warning(
+    capsys: pytest.CaptureFixture[str], fake
+) -> None:
+    write_config("hosts:\n  git.example.test:\n    concurrency: 2\n")
+    fake.network_error("whoami", host="github.com")
+    doc = jrun(capsys, "--probe")
+    assert [w["code"] for w in doc["warnings"]] == ["probe_partial"]
 
 
 def test_probe_failure_ends_with_the_forgectl_error(
@@ -269,6 +309,60 @@ def test_probe_with_a_failing_host_is_a_warning(capsys: pytest.CaptureFixture[st
     assert [w["code"] for w in doc["warnings"]] == ["probe_partial"]
 
 
-def test_probe_is_refused_nowhere_else(capsys: pytest.CaptureFixture[str]) -> None:
-    code, _, _ = run(capsys, "--bogus")
-    assert code == 2
+def test_probe_refusal_is_exit_20(capsys: pytest.CaptureFixture[str], fake) -> None:
+    envelope = {"error": {"code": "refused", "reason": "unknown_host", "message": "unknown host"}}
+    fake.raw("whoami", stdout=json.dumps(envelope), exit=20)
+    code, out, _ = run(capsys, "--json", "--probe")
+    assert code == 20
+    err = json.loads(out)["error"]
+    assert err["code"] == "refused" and err["reason"] == "unknown_host"
+    assert_valid("cli/error", json.loads(out))
+
+
+def test_probe_with_no_usable_result_is_exit_12_host_failed(
+    capsys: pytest.CaptureFixture[str], fake
+) -> None:
+    envelope = {"error": {"code": "network_error", "message": "could not reach the host"}}
+    fake.raw("whoami", stdout=json.dumps(envelope), exit=12)
+    code, out, _ = run(capsys, "--json", "--probe")
+    assert code == 12
+    err = json.loads(out)["error"]
+    assert err["code"] == "host_failed" and "lower_error" in err
+    assert_valid("cli/error", json.loads(out))
+
+
+# --- forgectl --version edge cases -------------------------------------------------------------
+
+
+def test_garbage_version_is_tool_too_old_found_unknown(
+    capsys: pytest.CaptureFixture[str], fake
+) -> None:
+    fake.version("not a version\n")
+    code, out, _ = run(capsys, "--json")
+    assert code == 12
+    err = json.loads(out)["error"]
+    assert err["code"] == "tool_too_old" and err["details"]["found"] == "unknown"
+
+
+def test_hung_version_ends_as_tool_missing_after_the_short_deadline(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, fake
+) -> None:
+    from pr_watch import validate
+
+    fake.hang("--version", seconds=30)
+    monkeypatch.setattr(validate, "VERSION_DEADLINE", 0.5)
+    code, out, _ = run(capsys, "--json")
+    assert code == 12 and json.loads(out)["error"]["code"] == "tool_missing"
+
+
+def test_unsafe_state_dir_wins_over_a_missing_forgectl(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    sandbox_bin: Path,
+    state_dir: Path,
+) -> None:
+    state_dir.mkdir(parents=True)
+    state_dir.chmod(0o777)
+    monkeypatch.setenv("PATH", str(sandbox_bin.parent / "empty-dir-that-does-not-exist"))
+    code, out, _ = run(capsys, "--json")
+    assert code == 12 and json.loads(out)["error"]["code"] == "state_unsafe"

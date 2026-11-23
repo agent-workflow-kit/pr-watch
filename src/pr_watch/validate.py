@@ -23,6 +23,10 @@ from .forgectl_client import ForgectlClient, ToolError
 from .hooks import collect_specs
 from .text import one_line
 
+# `forgectl --version` is a local call: a hung one ends validate after this many seconds
+# (`tool_missing`) instead of after `forgectl.timeout` plus the deadline slack.
+VERSION_DEADLINE = 10.0
+
 
 def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}{'' if count == 1 else 's'}"
@@ -56,7 +60,7 @@ def _probe(
         warnings.append(
             _warning("probe_partial", "forgectl", "whoami reported errors for some hosts")
         )
-    elif known:
+    else:
         for host in sorted(ctx.loaded.config.hosts):
             if host.lower() not in known:
                 warnings.append(
@@ -79,7 +83,7 @@ def validate_command(ctx: Context, args: argparse.Namespace) -> int:
     ]
     try:
         client = ForgectlClient.from_config(config.forgectl)
-        version = client.version()
+        version = client.version(deadline=VERSION_DEADLINE)
     except ToolError as exc:
         raise to_cli_error(decide_tool(exc)) from None
     checks.append(_check("forgectl", f"forgectl {version.text}"))

@@ -67,8 +67,7 @@
         "type": "object",
         "properties": {
           "code": {
-            "type": "string",
-            "maxLength": 64
+            "enum": ["config_warning", "probe_partial", "host_unknown"]
           },
           "key": {
             "type": "string",
@@ -81,6 +80,35 @@
         },
         "additionalProperties": false,
         "required": ["code", "key", "message"]
+      }
+    }
+  },
+  "if": {
+    "properties": {
+      "checks": {
+        "contains": {
+          "properties": {
+            "name": {
+              "const": "probe"
+            }
+          },
+          "required": ["name"]
+        }
+      }
+    },
+    "required": ["checks"]
+  },
+  "then": {
+    "properties": {
+      "probe": {
+        "type": "object"
+      }
+    }
+  },
+  "else": {
+    "properties": {
+      "probe": {
+        "type": "null"
       }
     }
   },

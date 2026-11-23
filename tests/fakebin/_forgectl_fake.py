@@ -851,7 +851,7 @@ ACTION_KINDS: dict[str, frozenset[str]] = {
     "snapshot": _COMMON_KINDS,
     "compare": _COMMON_KINDS,
     "whoami": _COMMON_KINDS - {"pad"},  # no field of `whoami` is free text to pad
-    "--version": frozenset({"raw", "error"}),
+    "--version": frozenset({"raw", "error", "hang"}),
 }
 ACTION_FIELDS: dict[str, frozenset[str]] = {
     "error": frozenset({"code", "message", "reason", "details", "retry_after"}),
@@ -1716,6 +1716,8 @@ def discard_stream(fd: int) -> None:
 def version_run(session: Session, argv: list[str], out: Output) -> int:
     action = session.take_rule({"command": "--version", "argv": argv})
     if action is not None:
+        if action["kind"] == "hang":
+            hang(session, action, None)
         return raw_answer(action, out)
     out.stdout = f"forgectl {VERSION}\n"
     return 0
