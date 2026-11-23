@@ -161,9 +161,11 @@ def end_group(proc: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
 
 def install_sigterm_handler() -> Callable[[], None]:
     """Turn SIGTERM into a KeyboardInterrupt so pytest ends the session normally (teardown and
-    cleanup run). Returns the function that restores the previous handler."""
+    cleanup run). One-shot: later SIGTERMs are ignored so teardown always finishes. Returns the
+    function that restores the previous handler."""
 
     def handler(signum: int, frame: Any) -> None:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         raise KeyboardInterrupt("SIGTERM")
 
     previous = signal.signal(signal.SIGTERM, handler)
@@ -330,7 +332,8 @@ class Workspace:
         """`redact`, then host, repository and login names replaced by placeholders."""
         text = self.redact(text)
         for term in sorted(self._scrub, key=len, reverse=True):
-            text = re.sub(re.escape(term), self._scrub[term], text, flags=re.IGNORECASE)
+            pattern = r"(?<![A-Za-z0-9_-])" + re.escape(term) + r"(?![A-Za-z0-9_-])"
+            text = re.sub(pattern, self._scrub[term], text, flags=re.IGNORECASE)
         return text
 
     def close(self) -> None:
@@ -941,11 +944,12 @@ class HostOps:
             raise HostError(
                 f"the {self.kind} throwaway repository could not be read: {exc}", exc.status
             ) from None
-        if canonical != self.cfg.path:
+        if canonical.casefold() != self.cfg.path.casefold():
             raise HostError(
                 f"the repository named by PR_WATCH_LIVE_{self.kind.upper()}_REPO is not the "
-                "canonical name the host reports (an earlier run may have been killed after a "
-                "rename: see docs/live.md, Recovering after a killed run); fix the variable "
+                "canonical name the host reports (compared without regard to case; an earlier "
+                "run may have been killed after a rename: see docs/live.md, Recovering after a "
+                "killed run); fix the variable "
                 "or rename the repository back before running"
             )
 

@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -98,6 +99,23 @@ def rec(
     return _rec
 
 
+_CONFIG: pytest.Config | None = None
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    global _CONFIG
+    _CONFIG = config
+
+
+def announce(line: str) -> None:
+    """Write through the terminal reporter so the line shows without -s; print without one."""
+    reporter: Any = _CONFIG.pluginmanager.getplugin("terminalreporter") if _CONFIG else None
+    if reporter is not None:
+        reporter.write_line(line)
+    else:
+        print(line, flush=True)
+
+
 def _ops(kind: str, ws: Workspace, session: LiveSession) -> Iterator[HostOps]:
     cfg = ws.env.hosts.get(kind)
     if cfg is None:
@@ -105,7 +123,7 @@ def _ops(kind: str, ws: Workspace, session: LiveSession) -> Iterator[HostOps]:
     ops = make_ops(ws, cfg)
     if kind not in session.announced:
         session.announced.add(kind)
-        print(f"LIVE-TARGET {cfg.repo_id} receives branches, PRs and comments", flush=True)
+        announce(f"LIVE-TARGET {cfg.repo_id} receives branches, PRs and comments")
     if kind not in session.verified:
         try:
             ops.verify_target()

@@ -539,6 +539,25 @@ def test_sigterm_becomes_a_normal_interrupt() -> None:
         restore()
 
 
+def test_a_second_sigterm_does_not_abort_cleanup() -> None:
+    restore = support.install_sigterm_handler()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            os.kill(os.getpid(), 15)
+            import time
+
+            time.sleep(1)
+        os.kill(os.getpid(), 15)  # ignored: would kill the process if the handler were reset
+    finally:
+        restore()
+
+
+def test_scrub_matches_whole_names_only(tmp_path: Path, sandbox_bin: Path) -> None:
+    ws = make_ws(tmp_path, sandbox_bin)
+    ws.add_scrub("bot", "<login>")
+    assert ws.scrub("bot and robot, bot-two, a/bot.") == "<login> and robot, bot-two, a/<login>."
+
+
 def test_unique_paths_never_repeat(tmp_path: Path, sandbox_bin: Path) -> None:
     ws = make_ws(tmp_path, sandbox_bin)
     ops = GitHubOps(ws, ws.env.hosts["github"])
@@ -752,8 +771,10 @@ def test_a_failed_rename_is_marked_and_rolled_back_in_cleanup(
 
 
 def test_the_target_must_be_the_canonical_name(tmp_path: Path, sandbox_bin: Path) -> None:
-    ws = make_ws(tmp_path, sandbox_bin, 'echo \'{"full_name": "own/Repo"}\'')
-    with pytest.raises(HostError, match="canonical"):
+    ws = make_ws(tmp_path, sandbox_bin, 'echo \'{"full_name": "own/renamed"}\'')
+    with pytest.raises(HostError, match="canonical.*case"):
         GitHubOps(ws, ws.env.hosts["github"]).verify_target()
     script(tmp_path / "real" / "gh", 'echo \'{"full_name": "own/repo"}\'')
     GitHubOps(ws, ws.env.hosts["github"]).verify_target()
+    script(tmp_path / "real" / "gh", 'echo \'{"full_name": "Own/Repo"}\'')
+    GitHubOps(ws, ws.env.hosts["github"]).verify_target()  # case differences are not a rename

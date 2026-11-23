@@ -14,7 +14,7 @@ The suite is written to be run by a person, once per forgectl or pr-watch releas
 - Each call has a timeout; a child that overruns has its own process group (created at launch, pid captured) killed and its output collected within 5 seconds, so a grandchild holding a pipe cannot hang the run. An interrupt does the same. PIDs of every child are kept in `Workspace.pids`.
 - Selection: even with `PR_WATCH_LIVE=1` and a full configuration, the suite runs only when the `-m` expression explicitly selects `live` (the word `live` not directly preceded by `not`). `-m "not slow"` skips every live test.
 - Leaks: every child's output is checked, before redaction, for the tokens in raw, URL-encoded, base64 and basic-auth forms (the second account's included); tests assert no leak, and the failure names the program, never a secret. Tokens shorter than 8 characters are refused.
-- Throwaway confirmation: a configured host is used only when `PR_WATCH_LIVE_<KIND>_THROWAWAY` is exactly equal to `PR_WATCH_LIVE_<KIND>_REPO`. The target is printed once (`LIVE-TARGET`) before the first write, and the repository's canonical name on the host must equal the configured one or the host's tests fail with a clear message.
+- Throwaway confirmation: a configured host is used only when `PR_WATCH_LIVE_<KIND>_THROWAWAY` is exactly equal to `PR_WATCH_LIVE_<KIND>_REPO`. The target is printed once (`LIVE-TARGET`) before the first write, and the repository's canonical name on the host must equal the configured one (compared without regard to case) or the host's tests fail with a clear message.
 
 ## Setup
 
@@ -153,7 +153,7 @@ After a run:
 
 ## Cleanup
 
-Teardown closes every PR and deletes every branch the test made, and renames a renamed repository back. A PR the test itself closed or merged and a branch it deleted are not touched again, and a host answer that the item is already gone (404, 422) counts as done, so `LIVE-CLEANUP-PROBLEMS` lists real leftovers only. Problems are also written to the results file, and they fail the session at its end (an error on the last test). SIGTERM is turned into a normal interrupt so teardown runs.
+Teardown closes every PR and deletes every branch the test made, and renames a renamed repository back. A PR the test itself closed or merged and a branch it deleted are not touched again, and a host answer that the item is already gone (404, 422) counts as done, so `LIVE-CLEANUP-PROBLEMS` lists real leftovers only. Problems are also written to the results file, and they fail the session at its end (an error on the last test). SIGTERM is turned into a normal interrupt so teardown runs; only the first one counts, later ones are ignored so teardown always finishes.
 
 ## Recovering after a killed run
 
