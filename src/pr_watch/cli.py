@@ -212,7 +212,7 @@ Handler = Callable[[Context, argparse.Namespace], int]
 # Commands that only read state: they open (and so verify) the state directory but write no
 # log record, so a consumer that polls `events` or `list` cannot fill log.jsonl with the same
 # configuration warnings on every call.
-READ_ONLY_COMMANDS = frozenset({"list", "show", "events", "export"})
+READ_ONLY_COMMANDS = frozenset({"list", "show", "events", "export", "browse"})
 
 # One entry per command. A later issue replaces its stub with the real handler.
 HANDLERS: dict[str, Handler] = {
@@ -226,6 +226,7 @@ HANDLERS: dict[str, Handler] = {
     "events": lambda ctx, args: _events(ctx, args),
     "show": lambda ctx, args: _show(ctx, args),
     "export": lambda ctx, args: _export(ctx, args),
+    "browse": lambda ctx, args: _browse(ctx, args),
     "cron install": lambda ctx, args: _cron_install(ctx, args),
     "cron uninstall": lambda ctx, args: _cron_uninstall(ctx, args),
 }
@@ -236,7 +237,7 @@ HANDLERS: dict[str, Handler] = {
 # Commands whose `--dry-run` is read-only.
 DRY_RUN_COMMANDS = frozenset({"prune", "cron install", "cron uninstall"})
 # Commands that never read or write state.db: they must not fail on a bad or newer database.
-NO_STORE_COMMANDS = frozenset({"cron install", "cron uninstall"})
+NO_STORE_COMMANDS = frozenset({"cron install", "cron uninstall", "browse"})
 
 
 def store_error_to_cli(exc: StoreError) -> CliError:
@@ -279,6 +280,12 @@ def _poll(ctx: Context, args: argparse.Namespace) -> int:
     from .poller import poll_command  # lazy: it imports this module
 
     return poll_command(ctx, args)
+
+
+def _browse(ctx: Context, args: argparse.Namespace) -> int:
+    from .browse import browse_command  # lazy: it imports this module
+
+    return browse_command(ctx, args)
 
 
 def _list(ctx: Context, args: argparse.Namespace) -> int:
@@ -559,6 +566,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--since", metavar="CURSOR", help="cursor from a previous call")
     p.add_argument("--limit", metavar="N", help="maximum events (1 to 1000, default 100)")
 
+    p = _command(sub, "browse", "browse", "browse watches, PRs and events in a terminal UI")
+    p.add_argument("--focus", metavar="PR", help="open on this stored PR")
+
     label = _group(sub, "label", "add or remove labels on a watch")
     for verb in ("add", "remove"):
         p = _command(label, verb, f"label {verb}", f"{verb} labels on a watch")
@@ -714,6 +724,10 @@ def _check_filter_values(args: argparse.Namespace) -> None:
     args.type = _each(args.type, parse_type)
 
 
+def _check_browse_values(args: argparse.Namespace) -> None:
+    args.focus = _one(args.focus, parse_reference)
+
+
 def _check_events_values(args: argparse.Namespace) -> None:
     _check_filter_values(args)
     args.since = _one(args.since, parse_cursor)
@@ -743,6 +757,7 @@ VALUE_CHECKS: dict[str, Callable[[argparse.Namespace], None]] = {
     "list": _check_list_values,
     "show": _check_show_values,
     "events": _check_events_values,
+    "browse": _check_browse_values,
     "export": _check_export_values,
     "label add": _check_label_values,
     "label remove": _check_label_values,
