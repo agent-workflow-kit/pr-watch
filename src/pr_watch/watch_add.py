@@ -30,7 +30,9 @@ Judgment calls where the interface is silent (kept conservative):
 - A snapshot over the output cap (`too_large`) ends `watch add` with exit 12 and records nothing;
   the `show` fallback of the poll is for PRs already stored. `--no-baseline` still works.
 - A snapshot fetched for a stored row (an ambiguous name, a poll that won the race) refreshes the
-  row's `pr` and `repo` (a rename) even when its baseline is discarded; `rev` is not bumped.
+  row's `pr` and `repo` (a rename) even when its baseline is discarded; `rev` is not bumped. When
+  the row has a digest the rename is also one `renamed` event, stored here (and counted in
+  `events_emitted`) unless the poll or a listing stored the new name first.
 - A snapshot whose `pr_id` is not a valid id, or whose `updated_at` is not a string, is a
   `contract` failure.
 - A baseline discarded because a listing already saw a newer state of a closed PR
@@ -52,6 +54,7 @@ from .commit import commit_in_transaction
 from .failures import decide, decide_tool, to_cli_error
 from .forgectl_client import ForgectlClient, ToolError
 from .refs import PrRef, RefError, duration_ms, watch_key
+from .renames import rename_event
 from .rows import pr_row
 from .store import PR_ID_RE, PR_RE, REPO_RE, NewEvent, Store
 
@@ -294,11 +297,20 @@ def _write_pr(
             planned = planned_names.get(pr_id)
             if planned is not None and (snap["pr"], snap["repo"]) != (row[0], row[1]):
                 # Only over the name the plan saw: a newer rename committed since is kept.
+                head = snap.get("head")
+                rename, _ = rename_event(
+                    conn, pr_id, snap["pr"], snap["repo"],
+                    head_sha=head.get("sha") if isinstance(head, dict) else None,
+                )  # fmt: skip
                 cur = conn.execute(
                     "UPDATE prs SET pr = ?, repo = ? WHERE pr_id = ? AND pr = ? AND repo = ?",
                     (snap["pr"], snap["repo"], pr_id, planned[0], planned[1]),
                 )
                 renamed = cur.rowcount > 0
+                if renamed and rename is not None:  # a row that was seen reports its rename once
+                    labels_now, ids = watches.event_context(conn, pr_id)
+                    store.append_event(rename.to_new_event(labels_now, ids))
+                    emitted += 1
         view = watches.watch_view(conn, watch_id)
         prrow = pr_row(conn, pr_id, now=now, pending_max_age_ms=pending_ms)
     assert view is not None

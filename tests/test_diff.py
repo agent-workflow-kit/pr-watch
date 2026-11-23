@@ -752,9 +752,11 @@ def test_fixed_type_order_in_one_snapshot() -> None:
 
 def test_rule_table_follows_the_documented_order() -> None:
     documented = [
+        "renamed",
         "opened",
         "reopened",
         "pushed",
+        "retargeted",
         "review",
         "comment",
         "review_comment",

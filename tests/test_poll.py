@@ -166,9 +166,9 @@ def test_a_pushed_head_becomes_one_pushed_event_and_is_counted(
     assert doc["prs"]["snapshotted"] == 1 and doc["prs"]["unchanged"] == 0
     assert events(store) == ["pushed"]
     assert list(doc["events"]) == [
-        "opened", "reopened", "pushed", "comment", "review_comment", "review",
-        "review_requested", "approved", "changes_requested", "approval_withdrawn", "ci",
-        "ready", "converted_to_draft", "merged", "closed",
+        "renamed", "opened", "reopened", "pushed", "retargeted", "comment", "review_comment",
+        "review", "review_requested", "approved", "changes_requested", "approval_withdrawn",
+        "ci", "ready", "converted_to_draft", "merged", "closed",
     ]  # fmt: skip
 
 
@@ -365,7 +365,8 @@ def test_a_renamed_repo_updates_the_stored_name_by_pr_id(
     _, doc = poll(capsys)
     assert col(store, old["pr_id"], "pr") == renamed["pr"]
     assert col(store, old["pr_id"], "repo") == renamed["repo"]
-    assert sum(doc["events"].values()) == 0 and doc["failed"] == []
+    assert doc["events"]["renamed"] == 1 and sum(doc["events"].values()) == 1
+    assert events(store) == ["renamed"] and doc["failed"] == []
 
 
 def test_a_closed_pr_is_not_snapshotted_again(

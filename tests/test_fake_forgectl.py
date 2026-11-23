@@ -1252,3 +1252,18 @@ def test_a_valid_config_is_accepted_and_relative_paths_are_made_absolute(
         env={**os.environ, "FAKE_FORGECTL_DIR": str(fake.dir)},
     )  # fmt: skip
     assert json.loads(proc.stdout)["error"]["details"] == {"key": str(tmp_path / "nope.yaml")}
+
+
+def test_rename_moves_the_pr_keeps_the_ids_and_redirects_the_old_name(fake: FakeForgectl) -> None:
+    old = fake.add(new_pr())
+    before = new_pr()
+    new = fake.rename(old, "github.com/example-org/gadgets")
+    assert new == "github.com/example-org/gadgets#7"
+    _, snap, _ = run_json(fake, "snapshot", old)  # the old name still resolves
+    assert snap["pr"] == new and snap["repo"] == "github.com/example-org/gadgets"
+    assert snap["pr_id"] == before["pr_id"] and snap["repo_id"] == before["repo_id"]
+    assert "example-org/gadgets" in snap["url"] and "widgets" not in snap["url"]
+    _, out, _ = run_json(fake, "prs", "--author", "me")
+    assert numbers(out) == ["example-org/gadgets#7"]
+    _, out, _ = run_json(fake, "prs", "--repo", "github.com/example-org/widgets")
+    assert out["items"] == []

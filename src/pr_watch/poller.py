@@ -240,6 +240,8 @@ def _enumerate(run: _Run, client: ForgectlClient, paused: dict[str, datetime]) -
         )  # fmt: skip
     except ToolError as exc:
         raise _tool_failed(run, exc) from None
+    if run.hooks is not None and run.res.events:
+        run.hooks.submit_events(run.res.events)  # `renamed` from a listing, committed already
     if run.res.whoami_rate_limited:  # persisted even when a signal ended the enumeration
         pause = pc.pause_hosts(
             run.store, _known_hosts(run), run.res.whoami_retry_after, now=run.now()
@@ -385,9 +387,9 @@ def _host_entry(run: _Run, host: str) -> dict[str, Any]:
     }
 
 
-def _events_by_type(pool: PoolResult | None) -> dict[str, int]:
+def _events_by_type(res: EnumerationResult, pool: PoolResult | None) -> dict[str, int]:
     counts: dict[str, int] = {t: 0 for t in EVENT_TYPES}  # noqa: C420 (typed as str keys)
-    for event in pool.events if pool is not None else ():
+    for event in (*res.events, *(pool.events if pool is not None else ())):
         if event.type in counts:
             counts[event.type] += 1
     return counts
@@ -412,7 +414,7 @@ def build_report(run: _Run) -> dict[str, Any]:
             "unreachable": len(pool.unreachable),
             "incomplete": 0 if already else _incomplete_count(run.store),
         },
-        "events": _events_by_type(pool),
+        "events": _events_by_type(run.res, pool),
         "hooks": (run.hooks.counts if run.hooks is not None else hooks.HookCounts()).as_report(),
         "failed": _failed(run.res),
         "full_pass": not already and any(o.full_pass for o in run.outcomes.values()),

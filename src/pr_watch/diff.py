@@ -28,6 +28,10 @@ Conservative readings (the interface is silent):
   request left the set, or GitLab's `reviewed` returned to `outstanding`) fires again, an
   instance change under a steady request does not. The requester is not in a snapshot, so the
   event has none. `converted_to_draft` is `ready`'s inverse (`draft` false to true).
+- `retargeted` fires when the stored and the new `base_ref` are both text and differ; a stored
+  digest without the key (written before 1.x) or with a null one is filled silently, and so is
+  `rebaseline`. `renamed` is not a digest rule: it needs the name the row holds, so the commit
+  builds it first in the snapshot's events (`renames.py`).
 - A null or unknown value is never a change: an unreadable state, head or reviewer is no event.
 - A stored `state` that is null (never readable) counts as first sight for `merged` and `closed`.
 - `review` is emitted for GitHub-backed PRs only (the snapshot url is a `pull` url).
@@ -632,6 +636,19 @@ def _ci(ctx: Ctx) -> list[dict[str, Any]]:
     return [extra]
 
 
+def _retargeted(ctx: Ctx) -> list[dict[str, Any]]:
+    """The base branch name changed. A stored digest without `base_ref` (written before 1.x) or
+    with a null one, and a snapshot whose base is unreadable (the digest then keeps the stored
+    name), are no change; `rebaseline` is silent. Names are compared as stored (branch names are
+    case-sensitive)."""
+    if ctx.rebaseline:
+        return []
+    before, after = ctx.old.get("base_ref"), ctx.new.get("base_ref")
+    if not isinstance(before, str) or not isinstance(after, str) or before == after:
+        return []
+    return [{"occurred_at": None, "from": before, "to": after}]
+
+
 def _ready(ctx: Ctx) -> list[dict[str, Any]]:
     if ctx.rebaseline or ctx.old.get("draft") is not True or ctx.new.get("draft") is not False:
         return []
@@ -715,6 +732,7 @@ RULES: Final[tuple[Rule, ...]] = (
     Rule("opened", _opened, on_first_sight=True),
     Rule("reopened", _reopened_rule),
     Rule("pushed", _pushed),
+    Rule("retargeted", _retargeted),
     Rule("review", _review),
     Rule("comment", _comment),
     Rule("review_comment", _review_comment),

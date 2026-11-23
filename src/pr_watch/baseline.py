@@ -28,7 +28,10 @@ here:
   emit `opened` at first sight; it is ignored when the row has a stored digest.
 - **Rename.** A row is keyed on `pr_id`: `pr` and `repo` are refreshed from the snapshot only
   when both are well formed (at most 256 characters), `pr` is `repo#N`, and the host equals the
-  row's host; otherwise both stored values are kept. Events carry the snapshot's `pr`.
+  row's host; otherwise both stored values are kept. Events carry the snapshot's `pr`. The plan
+  itself emits no `renamed`: the commit (`snapshots._commit`, `renames.rename_event`) compares the
+  new name with the name the row holds inside its transaction, so a rename a listing stored
+  meanwhile is not reported twice.
   A snapshot with another `pr_id` is refused (`PrIdMismatch`: the caller runs the `pr_id_changed`
   failure path and commits nothing). A snapshot that is not a mapping raises `MalformedSnapshot`
   (a contract failure for the poller to classify).

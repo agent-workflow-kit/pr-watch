@@ -383,3 +383,26 @@ def test_an_unusable_hooks_cwd_fails_the_hook_is_logged_and_the_poll_exits_zero(
     assert not ran.exists() and list(real_dir.iterdir()) == []
     (rec,) = [r for r in log_records(state_dir) if r["event"] == "hook_run"]
     assert rec["exit_code"] is None and "hooks-cwd unavailable" in rec["message"]
+
+
+def test_a_rename_found_by_a_listing_runs_on_renamed_once(
+    fake: FakeForgectl,  # noqa: F811
+    store: Store,  # noqa: F811
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    snap = pr(1)
+    fake.add(snap)
+    watch_query(capsys)
+    run(capsys, "poll")
+    new = fake.rename(snap["pr"], "github.com/example-org/gadgets")
+    body = tmp_path / "body"
+    cfg = write_config(tmp_path, f"hooks:\n  on-renamed:\n    - cmd: 'cat >> {body}'\n")
+    code, doc, _ = run(capsys, "poll", config=cfg)
+    assert code == 0 and doc["hooks"] == {"run": 1, "skipped": 0, "failed": 0}
+    assert doc["events"]["renamed"] == 1 and events(store) == ["renamed"]
+    payload = json.loads(body.read_text())
+    assert_valid("hooks/on-renamed", payload)
+    assert payload["pr"] == new and payload["from_pr"] == snap["pr"]
+    code, doc, _ = run(capsys, "poll", config=cfg)  # nothing new: no second run
+    assert doc["hooks"]["run"] == 0 and events(store) == ["renamed"]

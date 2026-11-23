@@ -18,6 +18,7 @@ from pr_watch import prune as prune_mod
 from pr_watch import watch_add as wa
 from pr_watch import watches as w
 from pr_watch.cli import main
+from pr_watch.digest import build_digest
 from pr_watch.refs import PrRef, parse_label, parse_pr
 from pr_watch.state_dir import open_state_dir
 from pr_watch.store import Store, format_ts, open_store
@@ -864,6 +865,30 @@ def test_a_rename_seen_by_a_discarded_snapshot_updates_the_stored_row(
     assert doc["pr"]["pr"] == f"{renamed}#7"
     assert (row(store, pr_id)["pr"], row(store, pr_id)["repo"]) == (f"{renamed}#7", renamed)
     assert row(store, pr_id)["rev"] == 0
+
+
+def test_a_rename_seen_for_a_baselined_row_is_one_renamed_event(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    renamed = "github.com/example-org/gadgets"
+    pr_id = pr_id_of(fake)
+    digest = json.dumps(build_digest(new_pr(number=7)))
+    seed_row(store, pr_id, digest=digest, owners=(A,))
+    seed_row(store, "OTHER", digest="{}", owners=(A,))  # same name: the reference is ambiguous
+    with store.transaction() as c:
+        c.execute("UPDATE prs SET pr = ? WHERE pr_id = 'OTHER'", (PR,))
+    snap = new_pr(number=7)
+    snap.update(pr=f"{renamed}#7", repo=renamed)
+    fake.scenario["prs"][PR]["snapshot"] = snap
+    fake._write()
+    doc = ok(capsys, PR, owner=B)
+    assert doc["baselined"] is False and doc["events_emitted"] == 1
+    assert event_types(store) == ["renamed"]
+    payload = json.loads(store.conn.execute("SELECT payload FROM events").fetchone()[0])
+    assert (payload["from_pr"], payload["to_pr"]) == (PR, f"{renamed}#7")
+    assert payload["watches"] and row(store, pr_id)["pr"] == f"{renamed}#7"
+    ok(capsys, PR, owner=B)  # the name is stored now: nothing more is reported
+    assert event_types(store) == ["renamed"]
 
 
 def test_an_expired_row_with_a_full_label_set_does_not_block_a_re_add(

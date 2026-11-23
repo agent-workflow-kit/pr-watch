@@ -96,6 +96,13 @@ def _bool(value: object) -> object:
     return value if isinstance(value, bool) else _BAD
 
 
+def _ref(value: object) -> object:
+    """A branch name as one bounded line; empty or not text is unreadable."""
+    if not isinstance(value, str) or not value:
+        return _BAD
+    return bounded_one_line(value, MAX_FIELD_CHARS)
+
+
 def _count(value: object) -> object:
     ok = isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= MAX_INT
     return value if ok else _BAD
@@ -570,6 +577,7 @@ def build_digest(
         "state": _scalar(snapshot.get("state"), _enum(*_STATES), old, "state"),
         "draft": _scalar(snapshot.get("draft"), _bool, old, "draft"),
         "mergeable": _scalar(snapshot.get("mergeable"), _nullable(_bool), old, "mergeable"),
+        "base_ref": _scalar(_dict(snapshot.get("base")).get("ref"), _ref, old, "base_ref"),
         "blocked_by": blocked,
         "pushed_at": _scalar(head.get("pushed_at"), _nullable(_ts), old, "pushed_at"),
         "merged_head_sha": _scalar(

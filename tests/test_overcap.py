@@ -603,3 +603,46 @@ def test_plan_overcap_reads_only_terminal_states_and_keeps_64_hex_shas() -> None
         plan_overcap(row, {**base, "pr_id": "other", "state": "merged"}, now=now)
     with pytest.raises(MalformedSnapshot):
         plan_overcap(row, [], now=now)  # type: ignore[arg-type]
+
+
+def test_a_rename_seen_by_the_over_cap_show_is_one_renamed_before_the_terminal_event(
+    store: Store, fake: FakeForgectl
+) -> None:
+    snap = pr(1)
+    pr_id = baseline(store, fake, snap)
+    new = fake.rename(snap["pr"], "github.com/example-org/gadgets")
+    fake.update(
+        new, state="closed", closed_at="2026-10-03T10:00:00Z", updated_at="2026-10-03T10:00:00Z"
+    )  # fmt: skip
+    store.conn.execute("UPDATE prs SET listed_updated_at = '2026-10-03T10:00:00.000000Z'")
+    store.conn.commit()
+    over_cap(fake)
+    run(store, plan=full_pass())
+    assert [e["type"] for e in events(store)] == ["renamed", "closed"]
+    assert {e["pr"] for e in events(store)} == {new}
+    assert col(store, pr_id, "pr") == new
+
+
+def test_a_rename_stored_while_the_snapshot_was_in_flight_is_not_reported_twice(
+    store: Store, fake: FakeForgectl, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snap = pr(1)
+    pr_id = baseline(store, fake, snap)
+    new = fake.rename(snap["pr"], "github.com/example-org/gadgets")
+    fake.update(new, updated_at="2026-10-03T10:00:00Z")
+    store.conn.execute("UPDATE prs SET listed_updated_at = '2026-10-03T10:00:00.000000Z'")
+    store.conn.commit()
+    real = sn._Pool._commit
+
+    def commit_after_a_listing(self: Any, host: Any, entry: Any, p: Any) -> None:
+        # another poll's listing stored the new name (and its one event) before this commit
+        with store.transaction() as conn:
+            conn.execute(
+                "UPDATE prs SET pr = ?, repo = ? WHERE pr_id = ?",
+                (new, "github.com/example-org/gadgets", pr_id),
+            )
+        real(self, host, entry, p)
+
+    monkeypatch.setattr(sn._Pool, "_commit", commit_after_a_listing)
+    run(store, plan=full_pass())
+    assert events(store) == []  # the stored name already was the snapshot's: nothing to report

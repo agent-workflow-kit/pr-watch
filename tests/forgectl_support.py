@@ -235,6 +235,22 @@ class FakeForgectl:
         _merge(self.scenario["prs"][pr]["snapshot"], changes)
         self._write()
 
+    def rename(self, pr: str, repo: str) -> str:
+        """Rename the repo of a stored PR to `repo` (`host/org/name`): its `pr`, `repo`, `url` and
+        `head.repo` follow, `pr_id` and `repo_id` stay, listings show the new name, and the old
+        `pr` keeps resolving for `snapshot`, `show` and `compare` (a host redirect). Returns the
+        new `pr`."""
+        entry = self.scenario["prs"].pop(pr)
+        snap = entry["snapshot"]
+        old_repo = snap["repo"]
+        new = f"{repo}#{snap['number']}"
+        snap["pr"], snap["repo"], snap["head"]["repo"] = new, repo, repo
+        snap["url"] = snap["url"].replace(old_repo, repo)
+        self.scenario["prs"][new] = entry
+        self.scenario.setdefault("redirects", {})[pr.lower()] = new
+        self._write()
+        return new
+
     def remove(self, pr: str) -> None:
         del self.scenario["prs"][pr]
         self._write()
