@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import re
 import signal
-import subprocess
-import time
 from collections.abc import Callable
 from typing import Any
 
 import pytest
 
 from tests.forgectl_support import assert_forgectl_valid
-from tests.live.support import HostOps, Workspace, wait_until
+from tests.live.support import (
+    HostOps,
+    Result,
+    Workspace,
+    assert_no_leak,
+    forgectl_new_enough,
+    wait_until,
+)
 
 pytestmark = pytest.mark.live
 
@@ -31,6 +36,7 @@ def test_argv_grammar_schemas_and_version(ws: Workspace, ops: HostOps, rec: Rec)
     assert version.rc == 0 and re.fullmatch(r"forgectl [0-9]+\.[0-9]+\.[0-9]+\n", version.out), (
         version.out
     )
+    assert forgectl_new_enough(version.out), f"forgectl >= 0.55 is required, got {version.out!r}"
     pr = ops.open_pr("grammar")
     second = ops.add_commit(pr.branch)
     wait_until(lambda: _head_is(ws, pr.ref, second), timeout=90, what="head moved on host")
@@ -75,12 +81,15 @@ def test_error_envelopes_and_codes(ws: Workspace, ops: HostOps, rec: Rec) -> Non
     """#6/#8: real exit codes and `error` envelopes (types of `retry_after` and `details`)."""
     pr = ops.open_pr("errors")
     seen: dict[str, str] = {}
+    results: list[Result] = []
 
-    def envelope(res: Any, want_rc: int, want_code: str) -> dict[str, Any]:
+    def envelope(res: Result, want_rc: int, want_code: str) -> dict[str, Any]:
+        results.append(res)
         assert res.rc == want_rc, f"{want_code}: exit {res.rc}: {res.out[:300]} {res.err[:300]}"
         err = res.json()["error"]
         assert err["code"] == want_code, err
-        assert err["retry_after"] is None or isinstance(err["retry_after"], (int, float))
+        retry_after = err.get("retry_after")  # the schema does not require the key
+        assert retry_after is None or isinstance(retry_after, (int, float))
         assert isinstance(err.get("details", {}), dict)
         assert len(res.err) < 4000
         seen[want_code] = str(err.get("details"))[:120]
@@ -99,51 +108,42 @@ def test_error_envelopes_and_codes(ws: Workspace, ops: HostOps, rec: Rec) -> Non
     envelope(res, 12, "tool_missing")
     long_sha = "a" * 64
     big = ws.forgectl("compare", pr.ref, f"--from={long_sha}", f"--to={long_sha}", "--json")
+    results.append(big)
     assert big.rc == 2, f"64-hex sha: exit {big.rc}: {big.out[:200]}"
-    for text in (missing.err, missing.out):
-        for secret in ws.env.hosts.values():
-            assert secret.token not in text
+    assert_no_leak(*results)
     rec(host=ops.kind, **{k: v.replace(" ", "_") for k, v in seen.items()})
 
 
 def test_timeout_budget_and_zero(ws: Workspace, ops: HostOps, rec: Rec) -> None:
-    """#6/#8 item 7: an exhausted `--timeout` ends forgectl within timeout + 10 s with a
-    network_error envelope; `--timeout=0ms` is a usage error."""
+    """#6/#8 item 7: an exhausted `--timeout` ends forgectl within the budget plus 10 s with a
+    network_error envelope (exit 12); `--timeout=0ms` is a usage error."""
     pr = ops.open_pr("timeout")
     res = ws.forgectl("snapshot", pr.ref, "--no-bodies", "--json", "--timeout=1ms")
-    assert res.rc == 12 and res.elapsed <= 11.0 + 5.0, (res.rc, res.elapsed, res.out[:300])
+    assert res.rc == 12 and res.elapsed <= 0.001 + 10.0, (res.rc, res.elapsed, res.out[:300])
     code = res.json()["error"]["code"]
+    assert code == "network_error", code
     zero = ws.forgectl("snapshot", pr.ref, "--json", "--timeout=0ms")
     assert zero.rc == 2, (zero.rc, zero.out[:200])
+    assert_no_leak(res, zero)
     rec(host=ops.kind, timeout_1ms_code=code, elapsed_s=round(res.elapsed, 2))
 
 
 def test_sigterm_exit_status_and_latency(ws: Workspace, ops: HostOps, rec: Rec) -> None:
-    """#6/#8 item 6: SIGTERM to forgectl (the exact PID started here) ends it with 143 (or -15
-    in the startup window) and no hang."""
+    """#6/#8 item 6: SIGTERM to forgectl (the exact child started here) ends it with 143 (or -15
+    in the startup window) within 5 s."""
     pr = ops.open_pr("sigterm")
-    proc = subprocess.Popen(
+    res = ws.run(
         [str(ws.env.forgectl), "snapshot", pr.ref, "--json"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
         env=ws.tool_env(),
-        cwd=str(ws.root),
-        start_new_session=True,
+        timeout=20,
+        signal_after=0.3,
+        sig=signal.SIGTERM,
     )
-    ws.pids.append(proc.pid)
-    time.sleep(0.3)
-    sent = time.monotonic()
-    proc.send_signal(signal.SIGTERM)
-    try:
-        out, err = proc.communicate(timeout=20)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()
-        pytest.fail(f"forgectl pid {proc.pid} ignored SIGTERM for 20 s")
-    latency = time.monotonic() - sent
-    assert proc.returncode in (0, 143, -15), (proc.returncode, out[:200], err[:200])
-    rec(host=ops.kind, sigterm_rc=proc.returncode, latency_s=round(latency, 2))
+    assert res.latency is not None, "forgectl ended before SIGTERM was sent; nothing was tested"
+    assert res.rc in (143, -15), (res.rc, res.out[:200], res.err[:200])
+    assert res.latency < 5.0, f"SIGTERM took {res.latency:.1f}s"
+    assert_no_leak(res)
+    rec(host=ops.kind, sigterm_rc=res.rc, latency_s=round(res.latency, 2))
 
 
 def test_whoami_with_and_without_credential(ws: Workspace, ops: HostOps, rec: Rec) -> None:

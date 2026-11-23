@@ -87,7 +87,7 @@ def test_mergeability_codes(ws: Workspace, ops: HostOps, rec: Rec) -> None:
     """#38: `draft` and `conflicts` blockers appear in `blocked_by`; pr-watch fires
     `mergeability` when a sibling merge creates a conflict; the number of snapshots that still
     read `mergeability_unknown` is recorded, also right after a reopen."""
-    path = "live/conflict.txt"
+    path = ops.unique_path("conflict.txt")
     a = ops.open_pr("conflict-a", files={path: "from a\n"}, with_ci=False)
     b = ops.open_pr("conflict-b", files={path: "from b\n"}, with_ci=False)
     d = ops.open_pr("draft", draft=True, with_ci=False)
@@ -140,27 +140,33 @@ def test_listing_filters(ws: Workspace, ops: HostOps, rec: Rec) -> None:
     assert open_pr.number in numbers("--state=all", f"--updated-since={recent}")
     cut = ws.fg_json("prs", repo, "--state=all", "--limit=1")
     assert len(cut["items"]) == 1 and cut["complete"] is False
-    item = ws.list_item(ops.repo_id, open_pr.number)
-    assert item is not None and item["pr"].lower() == open_pr.ref.lower()
+    item = ws.wait_listed(ops.repo_id, open_pr.number)
+    assert item["pr"].lower() == open_pr.ref.lower()
     rec(host=ops.kind, pr_exact_case=item["pr"] == open_pr.ref, repo_as_listed=item["repo"])
 
 
 def test_over_cap_snapshot_falls_back(ws: Workspace, live_cfg: Any, rec: Rec) -> None:
     """#24 (needs a huge PR): a snapshot over `forgectl.max_output_mib` is killed at the cap and
-    pr-watch falls back to `show` instead of failing the PR. Read-only on the named PR."""
+    pr-watch falls back to `show` instead of failing the PR. Read-only on the named PR.
+    Exit 0 is required. A merged or closed huge PR commits its terminal event (no failure, one
+    snapshot); an open one is the documented counted `too_large` failure (the `show` saw it
+    open). Anything else (`internal`, `contract`, a second failure) fails."""
     if not live_cfg.huge_pr:
         pytest.skip(
             "manual step: set PR_WATCH_LIVE_HUGE_PR to a PR (host/path#N) whose snapshot exceeds "
             "1 MiB; docs/live.md"
         )
+    huge_host = live_cfg.huge_pr.partition("/")[0]
+    assert any(c.host == huge_host for c in live_cfg.hosts.values()), "huge PR host not configured"
     env = {"PR_WATCH_FORGECTL__MAX_OUTPUT_MIB": "1"}
     added = ws.pw_json("watch", "add", live_cfg.huge_pr, "--owner", "live", "--no-baseline",
-                       extra_env=env)  # fmt: skip
+                       schema="cli/watch-add", extra_env=env)  # fmt: skip
     assert added["pr"] is not None
-    res = ws.prwatch("poll", "--pr", live_cfg.huge_pr, "--no-hooks", extra_env=env)
-    assert res.rc in (0, 12), (res.rc, res.out[:300], res.err[:300])
-    report = res.json()
-    bad = [f for f in report["failed"] if f.get("code") in ("internal", "contract")]
-    assert not bad, bad
-    rec(rc=res.rc, failed=[f.get("code") for f in report["failed"]], polled=report.get("polled"),
-        snapshotted=report["prs"]["snapshotted"])  # fmt: skip
+    report = ws.pw_json("poll", "--pr", live_cfg.huge_pr, "--no-hooks", schema="cli/poll",
+                        extra_env=env)  # fmt: skip
+    codes = [f.get("code") for f in report["failed"]]
+    committed_terminal = codes == [] and report["prs"]["snapshotted"] >= 1
+    counted_too_large = codes == ["too_large"]
+    assert committed_terminal or counted_too_large, (codes, report["prs"])
+    rec(failed=codes, polled=report.get("polled"), snapshotted=report["prs"]["snapshotted"],
+        fallback="terminal_committed" if committed_terminal else "too_large_recorded")  # fmt: skip

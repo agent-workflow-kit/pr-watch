@@ -14,20 +14,25 @@ Rules every helper keeps:
 
 from __future__ import annotations
 
+import base64
 import json
 import os
+import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
 import urllib.parse
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from tests.harness import assert_valid
 from tests.live_env import HostCfg, LiveEnv
 
 PASS_THROUGH = (
@@ -36,10 +41,137 @@ PASS_THROUGH = (
 )  # fmt: skip
 TOKEN_VARS = {"github": "LIVE_GITHUB_TOKEN", "gitlab": "LIVE_GITLAB_TOKEN"}
 OWNER = "live"
+GIT_USERS = ("x-access-token", "oauth2")
+FAIL_FAST = (401, 403, 404)  # a retry cannot fix these
+GONE = (404, 422)  # already deleted, closed or merged: cleanup treats them as done
+KILL_GRACE = 5.0
+FORGECTL_MIN = (0, 55)
+# forgectl's own RFC 3339 `ts` (defs.json): optional fraction, `Z` or a numeric offset.
+TS = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?"
+    r"(?:[Zz]|[+-][0-9]{2}:[0-9]{2})"
+)
+_STATUS = (
+    re.compile(r"HTTP (\d{3})"),
+    re.compile(
+        r"\b(\d{3}) (?:Bad Request|Unauthorized|Forbidden|Not Found|Method Not Allowed|Conflict"
+        r"|Gone|Unprocessable Entity)\b"
+    ),
+)
 
 
 class HostError(RuntimeError):
-    """A host action failed (the message is already redacted)."""
+    """A host action failed (the message is already redacted). `status` is the HTTP status the
+    tool reported, when it said one."""
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+def http_status(text: str) -> int | None:
+    """The HTTP status a gh or glab failure text names, else None."""
+    for pattern in _STATUS:
+        found = pattern.search(text)
+        if found:
+            return int(found.group(1))
+    return None
+
+
+def fail_fast(exc: BaseException) -> bool:
+    return isinstance(exc, HostError) and exc.status in FAIL_FAST
+
+
+def github_token_variable(host: str) -> str:
+    """The variable gh reads the token from, chosen like forgectl's gateway: `GH_TOKEN` only for
+    github.com and *.ghe.com, `GH_ENTERPRISE_TOKEN` for every other GitHub host."""
+    name = host.partition(":")[0]
+    return (
+        "GH_TOKEN" if name == "github.com" or name.endswith(".ghe.com") else "GH_ENTERPRISE_TOKEN"
+    )
+
+
+def parse_ts(text: str) -> datetime:
+    return datetime.fromisoformat(text.upper()).astimezone(UTC)
+
+
+def forgectl_version(text: str) -> tuple[int, int, int] | None:
+    found = re.fullmatch(r"forgectl ([0-9]+)\.([0-9]+)\.([0-9]+)\n?", text)
+    return None if found is None else (int(found[1]), int(found[2]), int(found[3]))
+
+
+def forgectl_new_enough(text: str) -> bool:
+    version = forgectl_version(text)
+    return version is not None and version[:2] >= FORGECTL_MIN
+
+
+def secret_forms(secret: str) -> list[str]:
+    """Every form a token can take in an output: raw, URL-encoded, and base64 (also as the basic
+    auth pair `user:token` git and curl send), longest first."""
+    forms = {
+        secret,
+        urllib.parse.quote(secret, safe=""),
+        urllib.parse.quote(secret, safe="/"),
+        urllib.parse.quote_plus(secret),
+    }
+    for raw in (secret, f":{secret}", *(f"{user}:{secret}" for user in GIT_USERS)):
+        for encode in (base64.b64encode, base64.urlsafe_b64encode):
+            encoded = encode(raw.encode()).decode()
+            forms.update((encoded, encoded.rstrip("=")))
+    return sorted((f for f in forms if f), key=len, reverse=True)
+
+
+def graphql_errors(data: Any) -> list[str]:
+    """Every error a GraphQL answer carries: top-level `errors` and any `errors` list nested in
+    the payload (a mutation reports its refusals there), or one entry for an unusable answer."""
+    if not isinstance(data, dict):
+        return ["the answer is not an object"]
+    found: list[str] = []
+    if data.get("errors"):
+        found.append(str(data["errors"])[:200])
+    payload = data.get("data")
+    if payload is None:
+        found.append("the answer has no data")
+    else:
+        for path, value in walk(payload):
+            if path and path[-1] == "errors" and value:
+                found.append(str(value)[:200])
+    return found
+
+
+def end_group(proc: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
+    """End a child started with `start_new_session` by killing its own process group (the pid
+    was captured at launch) and collect its output within a bound; never blocks for good."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        return proc.communicate(timeout=KILL_GRACE)
+    except subprocess.TimeoutExpired:
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
+        try:
+            proc.wait(timeout=KILL_GRACE)
+        except subprocess.TimeoutExpired:
+            pass
+        return b"", b""
+
+
+def install_sigterm_handler() -> Callable[[], None]:
+    """Turn SIGTERM into a KeyboardInterrupt so pytest ends the session normally (teardown and
+    cleanup run). Returns the function that restores the previous handler."""
+
+    def handler(signum: int, frame: Any) -> None:
+        raise KeyboardInterrupt("SIGTERM")
+
+    previous = signal.signal(signal.SIGTERM, handler)
+
+    def restore() -> None:
+        signal.signal(signal.SIGTERM, previous)
+
+    return restore
 
 
 @dataclass
@@ -50,6 +182,8 @@ class Result:
     err: str
     elapsed: float
     pid: int
+    leaked: bool = False  # a secret was in the UNREDACTED output (out and err are redacted)
+    latency: float | None = None  # seconds from the signal sent by `run(signal_after=...)`
 
     def json(self) -> Any:
         try:
@@ -61,20 +195,45 @@ class Result:
             ) from exc
 
 
+def assert_no_leak(*results: Result) -> None:
+    """The failure message names the programs, never a secret."""
+    names = [r.argv0 for r in results if r.leaked]
+    assert not names, f"a secret was present in the unredacted output of: {', '.join(names)}"
+
+
 def wait_until(
-    check: Callable[[], Any], *, timeout: float, interval: float = 2.0, what: str
+    check: Callable[[], Any],
+    *,
+    timeout: float,
+    interval: float = 2.0,
+    what: str,
+    give_up: Callable[[BaseException], bool] | None = None,
 ) -> tuple[Any, float]:
     """Call `check` until it returns something truthy; returns (value, seconds waited).
 
-    Bounded: raises AssertionError after `timeout` seconds."""
+    Bounded: after `timeout` seconds it raises. An AssertionError or HostError from `check` is
+    retried until then (unless `give_up` says it is final) and the last one is re-raised at the
+    deadline, with the wait described in a note; otherwise the failure is an AssertionError."""
     start = time.monotonic()
+    last: Exception | None = None
     while True:
-        value = check()
-        if value:
-            return value, time.monotonic() - start
-        if time.monotonic() - start >= timeout:
-            raise AssertionError(f"timed out after {timeout:.0f}s waiting for: {what}")
-        time.sleep(interval)
+        try:
+            value = check()
+        except (AssertionError, HostError) as exc:
+            if give_up is not None and give_up(exc):
+                raise
+            last = exc
+        else:
+            if value:
+                return value, time.monotonic() - start
+        waited = time.monotonic() - start
+        if waited >= timeout:
+            note = f"timed out after {timeout:.0f}s waiting for: {what}"
+            if last is not None:
+                last.add_note(note)
+                raise last
+            raise AssertionError(note)
+        time.sleep(min(interval, max(0.0, timeout - waited)))
 
 
 def walk(value: Any, path: tuple[str, ...] = ()) -> Any:
@@ -119,6 +278,13 @@ class Workspace:
         self.secrets = [c.token for c in env.hosts.values()] + [
             c.token2 for c in env.hosts.values() if c.token2
         ]
+        self.forms = sorted(
+            {form for secret in self.secrets for form in secret_forms(secret)},
+            key=len,
+            reverse=True,
+        )
+        self.leaked_runs: list[str] = []
+        self._scrub: dict[str, str] = {}
         (self.bin / "forgectl").symlink_to(env.forgectl)
         for name, real in (("gh", env.gh), ("glab", env.glab)):
             if real is not None:
@@ -147,13 +313,29 @@ class Workspace:
         path.chmod(0o700)
 
     def redact(self, text: str) -> str:
-        for secret in self.secrets:
-            if secret:
-                text = text.replace(secret, "<redacted>")
+        for form in self.forms:
+            text = text.replace(form, "<redacted>")
+        return text
+
+    def leaks(self, text: str) -> bool:
+        """True when `text` (UNREDACTED) holds a secret in any form."""
+        return any(form in text for form in self.forms)
+
+    def add_scrub(self, term: str, label: str) -> None:
+        """Names (host, repository path, account login) that `scrub` hides from recorded output."""
+        if len(term) >= 3:
+            self._scrub[term] = label
+
+    def scrub(self, text: str) -> str:
+        """`redact`, then host, repository and login names replaced by placeholders."""
+        text = self.redact(text)
+        for term in sorted(self._scrub, key=len, reverse=True):
+            text = re.sub(re.escape(term), self._scrub[term], text, flags=re.IGNORECASE)
         return text
 
     def close(self) -> None:
         self.secrets = []
+        self.forms = []
 
     def base_env(self) -> dict[str, str]:
         env = {
@@ -190,7 +372,13 @@ class Workspace:
         stdin: str | None = None,
         timeout: float = 120.0,
         cwd: Path | None = None,
+        signal_after: float | None = None,
+        sig: signal.Signals = signal.SIGTERM,
     ) -> Result:
+        """Run a child to its end within `timeout` seconds. A child that overruns, or a run that
+        is interrupted, has its own process group killed (the pid was captured at launch) and the
+        wait for its output is bounded. With `signal_after`, `sig` is sent to the child that long
+        after the start and `Result.latency` is the time from that signal to the end."""
         start = time.monotonic()
         proc = subprocess.Popen(
             argv,
@@ -202,25 +390,40 @@ class Workspace:
             start_new_session=True,
         )
         self.pids.append(proc.pid)
+        data = stdin.encode() if stdin is not None else None
+        sent: float | None = None
         try:
-            out, err = proc.communicate(stdin.encode() if stdin is not None else None, timeout)
+            if signal_after is None:
+                out, err = proc.communicate(data, timeout)
+            else:
+                try:
+                    out, err = proc.communicate(data, signal_after)
+                except subprocess.TimeoutExpired:
+                    sent = time.monotonic()
+                    proc.send_signal(sig)
+                    out, err = proc.communicate(None, timeout)
         except subprocess.TimeoutExpired:
-            proc.terminate()
-            try:
-                proc.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
+            end_group(proc)
             raise AssertionError(
                 f"{Path(argv[0]).name} (pid {proc.pid}) overran its {timeout:.0f}s bound"
             ) from None
+        except BaseException:
+            end_group(proc)
+            raise
+        raw_out = out.decode("utf-8", "replace")
+        raw_err = err.decode("utf-8", "replace")
+        leaked = self.leaks(raw_out) or self.leaks(raw_err)
+        if leaked:
+            self.leaked_runs.append(Path(argv[0]).name)
         return Result(
             Path(argv[0]).name,
             proc.returncode,
-            self.redact(out.decode("utf-8", "replace")),
-            self.redact(err.decode("utf-8", "replace")),
+            self.redact(raw_out),
+            self.redact(raw_err),
             time.monotonic() - start,
             proc.pid,
+            leaked,
+            None if sent is None else time.monotonic() - sent,
         )
 
     # --- forgectl ----------------------------
@@ -293,6 +496,35 @@ class Workspace:
                 return item
         return None
 
+    def wait_listed(
+        self, repo_id: str, number: int, state: str = "open", timeout: float = 180.0
+    ) -> dict[str, Any]:
+        """The listing item of a PR once the index shows it (the listing lags the host)."""
+        item, _ = wait_until(
+            lambda: self.list_item(repo_id, number, state),
+            timeout=timeout,
+            interval=4,
+            what=f"#{number} is listed as {state}",
+        )
+        return dict(item)
+
+    def settled_stamps(
+        self, repo_id: str, ref: str, number: int, timeout: float = 240.0
+    ) -> tuple[str, str]:
+        """(listing, show) `updated_at` once the listing has caught up with `show`."""
+
+        def caught_up() -> tuple[str, str] | None:
+            item = self.list_item(repo_id, number)
+            shown = str(self.fg_json("show", ref)["updated_at"])
+            if item is None or str(item["updated_at"]) != shown:
+                return None
+            return shown, shown
+
+        value, _ = wait_until(
+            caught_up, timeout=timeout, interval=4, what="the listing's updated_at equals show's"
+        )
+        return value
+
     # --- call counting ----------------------------
 
     def mark(self) -> int:
@@ -322,38 +554,55 @@ class Workspace:
             [sys.executable, "-m", "pr_watch", "--json", *args], env=env, timeout=timeout
         )
 
-    def pw_json(self, *args: str, ok: tuple[int, ...] = (0,), **kw: Any) -> Any:
+    def pw_json(
+        self, *args: str, ok: tuple[int, ...] = (0,), schema: str | None = None, **kw: Any
+    ) -> Any:
+        """Run pr-watch, require an exit code in `ok` and, with `schema` (a name under
+        schemas/, for example `cli/poll`), that the output validates against it."""
         res = self.prwatch(*args, **kw)
         assert res.rc in ok, (
             f"pr-watch {' '.join(args[:2])} exit {res.rc}: {res.out[:500]!r} "
             f"stderr: {res.err[:500]!r}"
         )
-        return res.json()
+        doc = res.json()
+        if schema is not None:
+            assert_valid(schema, doc)
+        return doc
 
     def watch(self, ref: str, **kw: Any) -> str:
         """`watch add` (baselines now); returns the events cursor."""
-        data = self.pw_json("watch", "add", ref, "--owner", OWNER, **kw)
+        data = self.pw_json("watch", "add", ref, "--owner", OWNER, schema="cli/watch-add", **kw)
         assert data["baselined"] is True, data
         return str(data["cursor"])
 
     def poll_pr(self, ref: str, **kw: Any) -> dict[str, Any]:
-        return self.pw_json("poll", "--pr", ref, "--no-hooks", **kw)
+        return self.pw_json("poll", "--pr", ref, "--no-hooks", schema="cli/poll", **kw)
 
-    def events(self, cursor: str) -> tuple[list[dict[str, Any]], str]:
-        data = self.pw_json("events", "--since", cursor, "--limit", "1000")
+    def events(self, cursor: str, timeout: float = 240.0) -> tuple[list[dict[str, Any]], str]:
+        data = self.pw_json(
+            "events", "--since", cursor, "--limit", "1000", schema="cli/events", timeout=timeout
+        )
+        for event in data["events"]:
+            assert_valid("event", event)
         return list(data["events"]), str(data["cursor"])
 
     def poll_for(
         self, ref: str, cursor: str, want: str | set[str], timeout: float = 120.0, **kw: Any
     ) -> tuple[list[dict[str, Any]], str, float]:
-        """Poll the PR until an event of type `want` is stored; (new events, cursor, seconds)."""
+        """Poll the PR until an event of type `want` is stored; (new events, cursor, seconds).
+        No single call outlives the overall deadline."""
         wanted = {want} if isinstance(want, str) else set(want)
         collected: list[dict[str, Any]] = []
         state = {"cursor": cursor}
+        deadline = time.monotonic() + timeout
 
         def check() -> bool:
-            self.poll_pr(ref, **kw)
-            events, state["cursor"] = self.events(state["cursor"])
+            remaining = deadline - time.monotonic()
+            if remaining < 1.0:
+                return False
+            per_call = min(kw.get("timeout", 240.0), remaining)
+            self.poll_pr(ref, **{**kw, "timeout": per_call})
+            events, state["cursor"] = self.events(state["cursor"], timeout=per_call)
             collected.extend(events)
             return any(e["type"] in wanted for e in collected)
 
@@ -361,15 +610,40 @@ class Workspace:
         return collected, state["cursor"], waited
 
 
-def record(test: str, results_file: Path | None, **fields: Any) -> None:
+def scrub_value(value: Any, scrub: Callable[[str], str]) -> Any:
+    if isinstance(value, str):
+        return scrub(value)
+    if isinstance(value, dict):
+        return {str(k): scrub_value(v, scrub) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [scrub_value(v, scrub) for v in value]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return scrub(str(value))
+
+
+def append_result(results_file: Path, row: Mapping[str, Any]) -> None:
+    """Append one JSON line; the file is created 0600 and a link is never followed."""
+    fd = os.open(results_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, default=str) + "\n")
+
+
+def record(
+    test: str,
+    results_file: Path | None,
+    scrub: Callable[[str], str] = lambda text: text,
+    **fields: Any,
+) -> None:
     """One result line for the record (docs/live.md): printed (run with -s) and, when
-    PR_WATCH_LIVE_RESULTS_FILE is set, appended there as JSON."""
-    line = " ".join(f"{k}={v}" for k, v in fields.items())
+    PR_WATCH_LIVE_RESULTS_FILE is set, appended there as JSON. Values pass through `scrub`
+    (tokens redacted; host, repository and login names replaced) before they leave."""
+    clean = {k: scrub_value(v, scrub) for k, v in fields.items()}
+    line = " ".join(f"{k}={v}" for k, v in clean.items())
     print(f"LIVE-RESULT {test} {line}", flush=True)
     if results_file is not None:
-        row = {"test": test, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **fields}
-        with results_file.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, default=str) + "\n")
+        row = {"test": test, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **clean}
+        append_result(results_file, row)
 
 
 @dataclass
@@ -397,7 +671,20 @@ class HostOps:
         self._cloned = False
         self._prs: list[int] = []
         self._branches: list[str] = []
+        self._closed: set[int] = set()
+        self._merged: set[int] = set()
+        self._deleted: set[str] = set()
         self._seq = 0
+        self.rename_pending: str | None = None  # the path a rename call was aimed at
+        owner_rename = f"{cfg.path.rpartition('/')[0]}/{cfg.rename_to}".lstrip("/")
+        for term, label in (
+            (cfg.repo_id, "<repo>"),
+            (f"{cfg.host}/{owner_rename}" if cfg.rename_to else "", "<repo>"),
+            (cfg.path, "<repo-path>"),
+            (owner_rename if cfg.rename_to else "", "<repo-path>"),
+            (cfg.host, "<host>"),
+        ):
+            ws.add_scrub(term, label)
 
     # --- generic ----------------------------
 
@@ -414,6 +701,11 @@ class HostOps:
     def unique(self) -> str:
         self._seq += 1
         return f"{self.ws.run_id}-{self._seq}-{time.time_ns()}"
+
+    def unique_path(self, name: str) -> str:
+        """A repository path no other PR of any run has used: file content is never identical
+        across PRs, so a commit is never empty."""
+        return f"live/{self.unique()}/{name}"
 
     def need_token2(self) -> str:
         if not self.cfg.token2:
@@ -519,14 +811,17 @@ class HostOps:
 
     def _api_result(self, res: Result, what: str) -> Any:
         if res.rc != 0:
-            raise HostError(f"{what} failed ({res.rc}): {res.out[:300]} {res.err[:300]}")
+            raise HostError(
+                f"{what} failed ({res.rc}): {res.out[:300]} {res.err[:300]}",
+                status=http_status(f"{res.out}\n{res.err}"),
+            )
         text = res.out.strip()
         if not text:
             return None
         try:
             return json.loads(text)
         except ValueError:
-            return text
+            raise HostError(f"{what}: the answer is not JSON: {text[:200]!r}") from None
 
     # --- PR actions (subclasses) ----------------------------
 
@@ -559,11 +854,19 @@ class HostOps:
     ) -> int:
         raise NotImplementedError
 
+    def _close(self, number: int) -> None:
+        raise NotImplementedError
+
     def close(self, number: int) -> None:
+        self._close(number)
+        self._closed.add(number)
+
+    def _reopen(self, number: int) -> None:
         raise NotImplementedError
 
     def reopen(self, number: int) -> None:
-        raise NotImplementedError
+        self._reopen(number)
+        self._closed.discard(number)
 
     def retarget(self, number: int, base: str) -> None:
         raise NotImplementedError
@@ -580,9 +883,15 @@ class HostOps:
     def resolve_thread(self, number: int, thread_id: str) -> None:
         raise NotImplementedError
 
-    def user(self, token: str | None = None) -> tuple[str, str]:
-        """(login, numeric id) of the account behind a token (default: the primary)."""
+    def _user(self, token: str | None) -> tuple[str, str]:
         raise NotImplementedError
+
+    def user(self, token: str | None = None) -> tuple[str, str]:
+        """(login, numeric id) of the account behind a token (default: the primary). The login
+        joins the names recorded output hides."""
+        login, user_id = self._user(token)
+        self.ws.add_scrub(login, "<login>")
+        return login, user_id
 
     def request_review(self, number: int, login: str, user_id: str) -> None:
         raise NotImplementedError
@@ -601,34 +910,123 @@ class HostOps:
     def request_changes(self, number: int) -> None:
         raise NotImplementedError
 
+    def _merge(self, number: int, *, delete_branch: bool) -> None:
+        raise NotImplementedError
+
     def merge(self, number: int, *, delete_branch: bool = False) -> None:
+        self._merge(number, delete_branch=delete_branch)
+        self._merged.add(number)
+
+    def _delete_branch(self, branch: str) -> None:
         raise NotImplementedError
 
     def delete_branch(self, branch: str) -> None:
+        self._delete_branch(branch)
+        self._deleted.add(branch)
+
+    def _rename_api(self, current_path: str, new_name: str) -> None:
+        """The host call that renames the repository now at `current_path`."""
         raise NotImplementedError
 
-    def rename_repo(self, new_name: str) -> None:
+    def canonical_path(self) -> str:
+        """The repository's canonical `owner/repo` (or project path) as the host reports it."""
         raise NotImplementedError
+
+    def verify_target(self) -> None:
+        """Fail unless the configured repository is the host's canonical name for it (a rename
+        left behind by a killed run, or a redirect, would make later writes go elsewhere)."""
+        try:
+            canonical = self.canonical_path()
+        except HostError as exc:
+            raise HostError(
+                f"the {self.kind} throwaway repository could not be read: {exc}", exc.status
+            ) from None
+        if canonical != self.cfg.path:
+            raise HostError(
+                f"the repository named by PR_WATCH_LIVE_{self.kind.upper()}_REPO is not the "
+                "canonical name the host reports (an earlier run may have been killed after a "
+                "rename: see docs/live.md, Recovering after a killed run); fix the variable "
+                "or rename the repository back before running"
+            )
+
+    # --- rename with a recovery marker ----------------------------
+
+    def _pending_files(self) -> list[Path]:
+        files = [self.ws.root / f"RENAME-PENDING-{self.kind}.txt"]
+        results = self.ws.env.results_file
+        if results is not None:
+            files.append(results.with_name(f"{results.name}.rename-pending-{self.kind}"))
+        return files
+
+    def rename_repo(self, new_name: str) -> None:
+        """Rename the repository. A marker (in memory and in files) is written first and stays
+        until `cleanup` has put the original name back, whatever this call ends up doing."""
+        new_path = f"{self.path.rpartition('/')[0]}/{new_name}".lstrip("/")
+        self.rename_pending = new_path
+        note = (
+            f"A {self.kind} throwaway repository may have been renamed to a different name by "
+            f"run {self.ws.run_id}. Its original name is {self.original_path} on host "
+            f"{self.cfg.host}. If it no longer answers to that name, rename it back (docs/live.md, "
+            "Recovering after a killed run).\n"
+        )
+        for marker in self._pending_files():
+            try:
+                fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(note)
+            except OSError:
+                pass
+        self._rename_api(self.path, new_name)
+        self.path = new_path
+
+    def _restore_name(self) -> list[str]:
+        """Rename back, unconditionally when a marker is set (the call may have gone through
+        even though it errored or timed out): try the current name, the aimed-at name, the
+        original one."""
+        if self.rename_pending is None and self.path == self.original_path:
+            return []
+        original_name = self.original_path.rsplit("/", 1)[-1]
+        candidates = [self.path, self.rename_pending or self.path, self.original_path]
+        last: Exception | None = None
+        for candidate in dict.fromkeys(candidates):
+            try:
+                self._rename_api(candidate, original_name)
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                continue
+            self.path = self.original_path
+            self.rename_pending = None
+            for marker in self._pending_files():
+                marker.unlink(missing_ok=True)
+            return []
+        return [f"RENAME BACK FAILED, now {self.path} or {self.rename_pending}: {last}"]
 
     def pr_updated_at(self, number: int) -> str:
         raise NotImplementedError
 
     def cleanup(self) -> list[str]:
-        """Close every PR and delete every branch this run made; returns the failures."""
-        problems: list[str] = []
-        if self.path != self.original_path:
-            try:
-                self.rename_repo(self.original_path.rsplit("/", 1)[-1])
-            except Exception as exc:  # noqa: BLE001
-                problems.append(f"RENAME BACK FAILED, repository is now {self.path}: {exc}")
+        """Close every PR and delete every branch this run made; returns the real failures. A PR
+        this run closed or merged and a branch it deleted are not touched again, and a host
+        answer that says it is already gone (404, 422) counts as done."""
+        problems = self._restore_name()
         for number in self._prs:
+            if number in self._closed or number in self._merged:
+                continue
             try:
                 self.close(number)
+            except HostError as exc:
+                if exc.status not in GONE:
+                    problems.append(f"close #{number}: {exc}")
             except Exception as exc:  # noqa: BLE001
                 problems.append(f"close #{number}: {exc}")
         for branch in self._branches:
+            if branch in self._deleted:
+                continue
             try:
                 self.delete_branch(branch)
+            except HostError as exc:
+                if exc.status not in GONE:
+                    problems.append(f"delete branch {branch}: {exc}")
             except Exception as exc:  # noqa: BLE001
                 problems.append(f"delete branch {branch}: {exc}")
         return problems
@@ -653,7 +1051,7 @@ class GitHubOps(HostOps):
         env = self.ws.base_env()
         env.update(
             {
-                "GH_TOKEN": token or self.cfg.token,
+                github_token_variable(self.cfg.host): token or self.cfg.token,
                 "GH_CONFIG_DIR": str(self.ws.root / "gh-config"),
                 "GH_PROMPT_DISABLED": "1",
                 "GH_NO_UPDATE_NOTIFIER": "1",
@@ -687,10 +1085,10 @@ class GitHubOps(HostOps):
     def _patch(self, number: int, body: dict[str, Any]) -> Any:
         return self.api("PATCH", f"{self._repo()}/pulls/{number}", body)
 
-    def close(self, number: int) -> None:
+    def _close(self, number: int) -> None:
         self._patch(number, {"state": "closed"})
 
-    def reopen(self, number: int) -> None:
+    def _reopen(self, number: int) -> None:
         self._patch(number, {"state": "open"})
 
     def retarget(self, number: int, base: str) -> None:
@@ -738,7 +1136,7 @@ class GitHubOps(HostOps):
         if isinstance(data, dict) and data.get("errors"):
             raise HostError(f"resolve refused: {str(data['errors'])[:200]}")
 
-    def user(self, token: str | None = None) -> tuple[str, str]:
+    def _user(self, token: str | None) -> tuple[str, str]:
         data = self.api("GET", "user", token=token)
         return str(data["login"]), str(data["id"])
 
@@ -777,29 +1175,27 @@ class GitHubOps(HostOps):
         )
         self._review_ids[number] = int(data["id"])
 
-    def merge(self, number: int, *, delete_branch: bool = False) -> None:
+    def _merge(self, number: int, *, delete_branch: bool) -> None:
         pr = self.api("GET", f"{self._repo()}/pulls/{number}")
         branch = pr["head"]["ref"]
 
         def attempt() -> bool:
-            try:
-                self.api("PUT", f"{self._repo()}/pulls/{number}/merge", {"merge_method": "merge"})
-                return True
-            except HostError:
-                return False
+            self.api("PUT", f"{self._repo()}/pulls/{number}/merge", {"merge_method": "merge"})
+            return True
 
-        wait_until(attempt, timeout=90, interval=5, what=f"merge of #{number}")
+        wait_until(attempt, timeout=90, interval=5, what=f"merge of #{number}", give_up=fail_fast)
         if delete_branch:
             self.delete_branch(branch)
 
-    def delete_branch(self, branch: str) -> None:
+    def _delete_branch(self, branch: str) -> None:
         ref = urllib.parse.quote(f"heads/{branch}", safe="/")
         self.api("DELETE", f"{self._repo()}/git/refs/{ref}")
 
-    def rename_repo(self, new_name: str) -> None:
-        owner = self.path.split("/")[0]
-        self.api("PATCH", self._repo(), {"name": new_name})
-        self.path = f"{owner}/{new_name}"
+    def _rename_api(self, current_path: str, new_name: str) -> None:
+        self.api("PATCH", f"repos/{current_path}", {"name": new_name})
+
+    def canonical_path(self) -> str:
+        return str(self.api("GET", self._repo())["full_name"])
 
     def set_status(self, sha: str, state: str) -> None:
         """A commit status on the PR head (`pending`, `success`, `failure`): CI without runners."""
@@ -836,7 +1232,8 @@ class GitLabOps(HostOps):
             {
                 "GITLAB_TOKEN": token or self.cfg.token,
                 "GLAB_CONFIG_DIR": str(self.ws.root / "glab-config"),
-                "NO_PROMPT": "1",
+                "GLAB_NO_PROMPT": "1",  # never NO_PROMPT: glab prints a deprecation notice for it
+                "GLAB_SHOW_WHATS_NEW": "false",
                 "GLAB_SEND_TELEMETRY": "false",
                 "GLAB_CHECK_UPDATE": "false",
             }
@@ -880,10 +1277,10 @@ class GitLabOps(HostOps):
     def _put(self, number: int, body: dict[str, Any]) -> Any:
         return self.api("PUT", f"{self._proj()}/merge_requests/{number}", body)
 
-    def close(self, number: int) -> None:
+    def _close(self, number: int) -> None:
         self._put(number, {"state_event": "close"})
 
-    def reopen(self, number: int) -> None:
+    def _reopen(self, number: int) -> None:
         self._put(number, {"state_event": "reopen"})
 
     def retarget(self, number: int, base: str) -> None:
@@ -897,8 +1294,15 @@ class GitLabOps(HostOps):
         self.api("POST", f"{self._proj()}/merge_requests/{number}/notes", {"body": body})
 
     def inline_thread(self, number: int, path: str, body: str) -> None:
-        mr = self.api("GET", f"{self._proj()}/merge_requests/{number}")
-        refs = mr["diff_refs"]
+        # diff_refs is null for a moment after the merge request is created
+        refs, _ = wait_until(
+            lambda: (self.api("GET", f"{self._proj()}/merge_requests/{number}") or {}).get(
+                "diff_refs"
+            ),
+            timeout=90,
+            interval=3,
+            what="diff_refs of the merge request",
+        )
         self.api(
             "POST",
             f"{self._proj()}/merge_requests/{number}/discussions",
@@ -922,7 +1326,7 @@ class GitLabOps(HostOps):
             "PUT", f"{self._proj()}/merge_requests/{number}/discussions/{did}", {"resolved": True}
         )
 
-    def user(self, token: str | None = None) -> tuple[str, str]:
+    def _user(self, token: str | None) -> tuple[str, str]:
         data = self.api("GET", "user", token=token)
         return str(data["username"]), str(data["id"])
 
@@ -956,32 +1360,33 @@ class GitLabOps(HostOps):
             {"query": query, "variables": {"p": self.path, "i": str(number)}},
             token=self.need_token2(),
         )
-        if isinstance(data, dict) and (data.get("errors") or data.get("data") is None):
-            raise HostError(f"request changes refused: {str(data)[:200]}")
+        errors = graphql_errors(data)
+        if errors:
+            raise HostError(f"request changes refused: {'; '.join(errors)[:300]}")
 
-    def merge(self, number: int, *, delete_branch: bool = False) -> None:
+    def _merge(self, number: int, *, delete_branch: bool) -> None:
         def attempt() -> bool:
-            try:
-                self.api(
-                    "PUT",
-                    f"{self._proj()}/merge_requests/{number}/merge",
-                    {"should_remove_source_branch": delete_branch},
-                )
-                return True
-            except HostError:
-                return False
+            self.api(
+                "PUT",
+                f"{self._proj()}/merge_requests/{number}/merge",
+                {"should_remove_source_branch": delete_branch},
+            )
+            return True
 
-        wait_until(attempt, timeout=120, interval=5, what=f"merge of !{number}")
+        wait_until(attempt, timeout=120, interval=5, what=f"merge of !{number}", give_up=fail_fast)
 
-    def delete_branch(self, branch: str) -> None:
+    def _delete_branch(self, branch: str) -> None:
         self.api(
             "DELETE", f"{self._proj()}/repository/branches/{urllib.parse.quote(branch, safe='')}"
         )
 
-    def rename_repo(self, new_name: str) -> None:
-        parent = self.path.rsplit("/", 1)[0] if "/" in self.path else ""
-        self.api("PUT", self._proj(), {"path": new_name, "name": new_name})
-        self.path = f"{parent}/{new_name}" if parent else new_name
+    def _rename_api(self, current_path: str, new_name: str) -> None:
+        # by project id (cached before any rename): works under whichever name the project has
+        self.api("PUT", self._proj(), {"path": new_name})
+
+    def canonical_path(self) -> str:
+        data = self.api("GET", f"projects/{urllib.parse.quote(self.path, safe='')}")
+        return str(data["path_with_namespace"])
 
     def pipelines_done(self, number: int) -> bool:
         pipes = self.api("GET", f"{self._proj()}/merge_requests/{number}/pipelines")

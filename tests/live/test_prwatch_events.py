@@ -10,12 +10,12 @@ from typing import Any
 
 import pytest
 
-from tests.live.support import HostError, HostOps, Workspace, wait_until
+from tests.harness import assert_valid
+from tests.live.support import GitHubOps, GitLabOps, HostError, HostOps, Workspace, wait_until
 
 pytestmark = pytest.mark.live
 
 Rec = Callable[..., None]
-THREAD_FILE = "live/thread.txt"
 FORCE_ENV = {"PR_WATCH_DETECT_FORCE_PUSH": "true"}
 NEVER = {"unreachable", "recovered", "renamed"}
 
@@ -34,7 +34,7 @@ def test_unchanged_pr_gives_no_events_and_a_sane_report(
     time.sleep(10)
     first = ws.poll_pr(pr.ref)
     second = ws.poll_pr(pr.ref)
-    full = ws.pw_json("poll", "--full", "--no-hooks")
+    full = ws.pw_json("poll", "--full", "--no-hooks", schema="cli/poll")
     events, _ = ws.events(cursor)
     assert events == [], types(events)
     assert first["polled"] is True and second["polled"] is True
@@ -54,43 +54,67 @@ def test_failed_whoami_without_cache_is_reported(ws: Workspace, ops: HostOps, re
     res = ws.prwatch("poll", "--full", "--no-hooks", tokens=False)
     assert res.rc == 12, (res.rc, res.out[:400], res.err[:400])
     report = res.json()
-    codes = [f.get("code") for f in report["failed"]]
-    assert "auth_required" in codes, report["failed"]
+    assert_valid("cli/poll", report)
+    assert any(
+        f.get("code") == "auth_required" and f.get("ref") == "whoami" for f in report["failed"]
+    ), report["failed"]
     rec(host=ops.kind, failed=report["failed"][:2])
 
 
-def _comment(ops: HostOps, pr: Any) -> None:
+def _comment(ops: HostOps, pr: Any, thread_file: str) -> None:
     ops.comment(pr.number, "live comment")
 
 
-def _inline(ops: HostOps, pr: Any) -> None:
-    ops.inline_thread(pr.number, THREAD_FILE, "live inline comment")
+def _inline(ops: HostOps, pr: Any, thread_file: str) -> None:
+    ops.inline_thread(pr.number, thread_file, "live inline comment")
 
 
-def _push(ops: HostOps, pr: Any) -> None:
+def _push(ops: HostOps, pr: Any, thread_file: str) -> None:
     ops.add_commit(pr.branch)
 
 
-STEPS: dict[str, tuple[Callable[[HostOps, Any], None], set[str]]] = {
-    "comment": (_comment, {"comment"}),
-    "inline": (_inline, {"review_comment"}),
-    "push": (_push, {"pushed"}),
-    "convert_to_draft": (lambda o, p: o.set_draft(p.number, True), {"converted_to_draft"}),
-    "close": (lambda o, p: o.close(p.number), {"closed"}),
-    "merge": (lambda o, p: o.merge(p.number), {"merged"}),
-}
+def _ci(ops: HostOps, pr: Any, thread_file: str) -> None:
+    if isinstance(ops, GitHubOps):
+        ops.set_status(pr.head_sha, "success")
+    else:
+        assert isinstance(ops, GitLabOps)
+        wait_until(lambda: ops.pipelines_done(pr.number), timeout=240, interval=5,
+                   what="the pipeline finished")  # fmt: skip
+
+
+Step = Callable[[HostOps, Any, str], None]
+STEPS: dict[str, tuple[Step, Callable[[str], set[str]]]] = {
+    "comment": (_comment, lambda kind: {"comment"}),
+    # a GitHub inline comment is posted inside a review, which is an event of its own
+    "inline": (_inline, lambda kind: {"review", "review_comment"} if kind == "github"
+               else {"review_comment"}),
+    "push": (_push, lambda kind: {"pushed"}),
+    "convert_to_draft": (lambda o, p, f: o.set_draft(p.number, True),
+                         lambda kind: {"converted_to_draft"}),
+    "close": (lambda o, p, f: o.close(p.number), lambda kind: {"closed"}),
+    "merge": (lambda o, p, f: o.merge(p.number), lambda kind: {"merged"}),
+    "ci": (_ci, lambda kind: {"ci"}),
+}  # fmt: skip
 
 
 @pytest.mark.parametrize("step", sorted(STEPS))
 def test_event_per_host_change(ws: Workspace, ops: HostOps, rec: Rec, step: str) -> None:
-    """V5 and the GitHub shapes: one host change gives its event once; nothing else fires."""
-    do, want = STEPS[step]
-    pr = ops.open_pr(f"ev-{step}", files={THREAD_FILE: "one line\n"}, with_ci=False)
+    """V5 and the GitHub shapes: one host change gives exactly its expected set of event types
+    (the `ci` step: a commit status on GitHub, a finished pipeline on GitLab with
+    PR_WATCH_LIVE_GITLAB_CI=1) and, polled again, nothing more."""
+    do, expect = STEPS[step]
+    want = expect(ops.kind)
+    if step == "ci" and ops.kind == "gitlab" and not ops.cfg.ci:
+        pytest.skip(
+            "manual step: the GitLab ci event needs PR_WATCH_LIVE_GITLAB_CI=1; docs/live.md"
+        )
+    thread_file = ops.unique_path("thread.txt")
+    pr = ops.open_pr(f"ev-{step}", files={thread_file: "one line\n"}, with_ci=step == "ci")
     cursor = ws.watch(pr.ref)
-    do(ops, pr)
+    do(ops, pr, thread_file)
     events, cursor, waited = ws.poll_for(pr.ref, cursor, want)
     got = set(types(events))
-    assert want <= got and not (got & NEVER), types(events)
+    assert got == want, f"expected exactly {sorted(want)}, got {types(events)}"
     assert all(e["pr_id"] == events[0]["pr_id"] for e in events)
     # a second poll with nothing new adds nothing (the event is reported once)
     ws.poll_pr(pr.ref)
@@ -165,7 +189,11 @@ def test_retargeted_and_merged_base(ws: Workspace, ops: HostOps, rec: Rec) -> No
         lambda: (r := ws.snapshot(child.ref)["base"]["ref"]) != parent.branch and r,
         timeout=120,
         interval=3,
-        what="the child retargets when its base PR merges",
+        what=(
+            "the child retargets when its base PR merges and the branch is deleted (UNVERIFIED "
+            "assumption of this test, docs/live.md: a failure here may be the host's behavior, "
+            "not pr-watch's)"
+        ),
     )
     merged_base = ws.snapshot(parent.ref)["base"]["ref"]
     rec(host=ops.kind, base_edit_visible_s=round(prompt, 1), auto_retarget_s=round(waited),
@@ -207,7 +235,7 @@ def test_review_requests_approvals_and_dismissals(ws: Workspace, ops: HostOps, r
     cursor = ws.watch(pr.ref)
     shapes: dict[str, Any] = {}
 
-    before = ws.list_item(ops.repo_id, pr.number)
+    before = ws.settled_stamps(ops.repo_id, pr.ref, pr.number)[0]
     ops.request_review(pr.number, login2, id2)
     events, cursor, _ = ws.poll_for(pr.ref, cursor, "review_requested")
     snap = ws.snapshot(pr.ref)
@@ -216,9 +244,8 @@ def test_review_requests_approvals_and_dismissals(ws: Workspace, ops: HostOps, r
     shapes["request"] = {k: mine[0]["reviewer"].get(k) for k in ("kind", "id")}
     shapes["teams_visible"] = snap["teams_visible"]
     shapes["request_incomplete"] = "review_requests" in snap["incomplete"]
-    after = ws.list_item(ops.repo_id, pr.number)
-    shapes["request_bumps_listing"] = bool(before and after and before["updated_at"]
-                                           != after["updated_at"])  # fmt: skip
+    after = ws.settled_stamps(ops.repo_id, pr.ref, pr.number)[0]
+    shapes["request_bumps_listing"] = before != after
     wait_until(
         lambda: any(
             i["number"] == pr.number
@@ -252,15 +279,20 @@ def test_review_requests_approvals_and_dismissals(ws: Workspace, ops: HostOps, r
 
     try:
         ops.request_changes(pr.number)
-        events, cursor, _ = ws.poll_for(pr.ref, cursor, "changes_requested")
-        again = ws.snapshot(pr.ref)
-        shapes["changes_requested_entry"] = [
-            (e["state"], e.get("at"))
-            for e in again["latest_by_reviewer"]
-            if e["login"].lower() == login2.lower()  # fmt: skip
-        ]
     except HostError as exc:
         shapes["changes_requested"] = f"not available: {str(exc)[:80]}"
+    else:
+        try:
+            events, cursor, _ = ws.poll_for(pr.ref, cursor, "changes_requested")
+        except AssertionError:
+            shapes["changes_requested"] = "not observed"
+        else:
+            again = ws.snapshot(pr.ref)
+            shapes["changes_requested_entry"] = [
+                (e["state"], e.get("at"))
+                for e in again["latest_by_reviewer"]
+                if e["login"].lower() == login2.lower()  # fmt: skip
+            ]
 
     ops.add_commit(pr.branch)
     wait_until(lambda: ws.snapshot(pr.ref)["head"]["sha"] != pr.head_sha, timeout=90, what="push")

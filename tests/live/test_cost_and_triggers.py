@@ -2,28 +2,43 @@
 
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 import pytest
 
 from tests.forgectl_support import assert_forgectl_valid
-from tests.live.support import GitHubOps, GitLabOps, HostOps, Workspace, nested_bodies, wait_until
+from tests.live.support import (
+    TS,
+    GitHubOps,
+    GitLabOps,
+    HostOps,
+    Workspace,
+    nested_bodies,
+    parse_ts,
+    wait_until,
+)
 
 pytestmark = pytest.mark.live
 
 Rec = Callable[..., None]
 BODY = "pr-watch live test; safe to delete"
-THREAD_FILE = "live/thread.txt"
-TS = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$", re.I)
 BUDGET = {"github": (5, 8), "gitlab": (19, 22)}
 
 
 def ts(text: str) -> datetime:
-    return datetime.fromisoformat(text.upper().replace("Z", "+00:00")).astimezone(UTC)
+    return parse_ts(text)
+
+
+def review_thread(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    """The first inline review thread (GitHub `gh:rt:`, resolvable); general comments are
+    `gh:ic:` threads that cannot be resolved."""
+    for thread in snapshot["threads"]:
+        if thread.get("resolvable") and str(thread["id"]).startswith("gh:rt:"):
+            return dict(thread)
+    return None
 
 
 def listed_at(ws: Workspace, ops: HostOps, number: int, state: str = "open") -> str | None:
@@ -34,9 +49,10 @@ def listed_at(ws: Workspace, ops: HostOps, number: int, state: str = "open") -> 
 def test_cost_budget(ws: Workspace, ops: HostOps, rec: Rec) -> None:
     """A snapshot costs 5 to 8 requests on GitHub and 19 to 22 on GitLab (counted at the gh and
     glab wrappers, one `api` call each); a configured `me` never costs more."""
-    pr = ops.open_pr("cost", files={THREAD_FILE: "one line\n"})
+    thread_file = ops.unique_path("thread.txt")
+    pr = ops.open_pr("cost", files={thread_file: "one line\n"})
     ops.comment(pr.number, "live cost comment")
-    ops.inline_thread(pr.number, THREAD_FILE, "live cost thread")
+    ops.inline_thread(pr.number, thread_file, "live cost thread")
     tool = "gh" if ops.kind == "github" else "glab"
     mark = ws.mark()
     ws.snapshot(pr.ref)
@@ -58,12 +74,14 @@ def test_trigger_blindness(ws: Workspace, ops: HostOps, rec: Rec) -> None:
     """`updated_at` is blind to CI completion and thread resolution (GitHub) and to approvals and
     CI (GitLab; bot edits are a manual step, docs/live.md). A new comment is the control: it
     must move `updated_at`, or the test proves nothing."""
-    pr = ops.open_pr("trigger", files={THREAD_FILE: "one line\n"})
+    thread_file = ops.unique_path("thread.txt")
+    pr = ops.open_pr("trigger", files={thread_file: "one line\n"})
     ref = pr.ref
     results: dict[str, str] = {}
 
     def stamps() -> tuple[str, str]:
-        return str(listed_at(ws, ops, pr.number)), str(ws.fg_json("show", ref)["updated_at"])
+        """(listing, show) `updated_at`, taken only once the listing has caught up."""
+        return ws.settled_stamps(ops.repo_id, ref, pr.number)
 
     def blind(name: str, do: Callable[[], None], done: Callable[[], Any]) -> None:
         time.sleep(15)
@@ -74,7 +92,6 @@ def test_trigger_blindness(ws: Workspace, ops: HostOps, rec: Rec) -> None:
         after = stamps()
         results[name] = "blind" if after == before else f"BUMPED {before}->{after}"
 
-    time.sleep(10)
     before_list = stamps()[0]
     ops.comment(pr.number, "live control comment")
     _, waited = wait_until(
@@ -86,15 +103,19 @@ def test_trigger_blindness(ws: Workspace, ops: HostOps, rec: Rec) -> None:
 
     ran = 0
     if isinstance(ops, GitHubOps):
-        ops.inline_thread(pr.number, THREAD_FILE, "live thread")
-        wait_until(lambda: ws.snapshot(ref)["threads"], timeout=120, what="the thread is listed")
+        ops.inline_thread(pr.number, thread_file, "live thread")
+        wait_until(lambda: review_thread(ws.snapshot(ref)), timeout=120,
+                   what="the inline review thread is listed")  # fmt: skip
         blind("ci_pending", lambda: ops.set_status(pr.head_sha, "pending"),
               lambda: ws.snapshot(ref)["ci"]["state"] == "pending")  # fmt: skip
         blind("ci_completion", lambda: ops.set_status(pr.head_sha, "success"),
               lambda: ws.snapshot(ref)["ci"]["state"] == "passing")  # fmt: skip
-        blind("thread_resolution",
-              lambda: ops.resolve_thread(pr.number, ws.snapshot(ref)["threads"][0]["id"]),
-              lambda: ws.snapshot(ref)["threads"][0]["resolved"])  # fmt: skip
+        thread = review_thread(ws.snapshot(ref))
+        assert thread is not None
+        thread_id = str(thread["id"])
+        blind("thread_resolution", lambda: ops.resolve_thread(pr.number, thread_id),
+              lambda: any(t["id"] == thread_id and t["resolved"]
+                          for t in ws.snapshot(ref)["threads"]))  # fmt: skip
         ran = 3
     elif isinstance(ops, GitLabOps):
         if ops.cfg.token2:
@@ -193,9 +214,7 @@ def test_v4_snapshot_updated_at_not_behind_listing(ws: Workspace, ops: HostOps, 
             ops.comment(pr.number, "live v4 comment")
         elif step == "push":
             ops.add_commit(pr.branch)
-        time.sleep(8)
-        item = ws.list_item(ops.repo_id, pr.number)
-        assert item is not None
+        item = ws.wait_listed(ops.repo_id, pr.number)
         snap = ws.fg_json("snapshot", pr.ref, "--no-bodies")
         show = ws.fg_json("show", pr.ref)
         assert ts(snap["updated_at"]) >= ts(item["updated_at"]), (step, snap["updated_at"], item)
@@ -219,20 +238,20 @@ def test_show_of_closed_and_merged(ws: Workspace, ops: HostOps, rec: Rec) -> Non
     c = ws.fg_json("show", closed.ref)
     m = ws.fg_json("show", merged.ref)
     for doc in (c, m):
-        assert TS.match(doc["updated_at"]) and doc["head"]["sha"]
+        assert TS.fullmatch(doc["updated_at"]) and doc["head"]["sha"]
     assert c["state"] == "closed" and c["merged_head_sha"] is None
     assert m["merged_head_sha"] == merged.head_sha and m["merge_commit_sha"]
-    item = ws.list_item(ops.repo_id, closed.number, "closed")
-    if item is not None:
-        assert ts(c["updated_at"]) >= ts(item["updated_at"])
+    item = ws.wait_listed(ops.repo_id, closed.number, "closed")
+    assert ts(c["updated_at"]) >= ts(item["updated_at"])
     rec(host=ops.kind, closed_merge_commit=c["merge_commit_sha"], merged_head_ok=True)
 
 
 def test_no_bodies_flag(ws: Workspace, ops: HostOps, rec: Rec) -> None:
     """`snapshot --no-bodies` drops the body of every review and comment and keeps the PR's own."""
-    pr = ops.open_pr("bodies", files={THREAD_FILE: "one line\n"}, body=BODY)
+    thread_file = ops.unique_path("thread.txt")
+    pr = ops.open_pr("bodies", files={thread_file: "one line\n"}, body=BODY)
     ops.comment(pr.number, "live general comment")
-    ops.inline_thread(pr.number, THREAD_FILE, "live inline comment")
+    ops.inline_thread(pr.number, thread_file, "live inline comment")
     wait_until(
         lambda: nested_bodies(ws.snapshot(pr.ref, bodies=True)),
         timeout=120,
@@ -253,12 +272,11 @@ def test_created_at_presence_format_and_skew(ws: Workspace, ops: HostOps, rec: R
     before = time.time()
     pr = ops.open_pr("created")
     after = time.time()
-    item = ws.list_item(ops.repo_id, pr.number)
-    assert item is not None
+    item = ws.wait_listed(ops.repo_id, pr.number)
     docs = {"listing": item, "show": ws.fg_json("show", pr.ref),
             "snapshot": ws.snapshot(pr.ref)}  # fmt: skip
     for name, doc in docs.items():
-        assert TS.match(str(doc.get("created_at"))), (name, doc.get("created_at"))
+        assert TS.fullmatch(str(doc.get("created_at"))), (name, doc.get("created_at"))
     created = ts(item["created_at"]).timestamp()
     assert before - 120 <= created <= after + 120, (before, created, after)
     assert len({ts(d["created_at"]) for d in docs.values()}) == 1
@@ -267,7 +285,8 @@ def test_created_at_presence_format_and_skew(ws: Workspace, ops: HostOps, rec: R
 
 def test_unchanged_snapshots_are_identical(ws: Workspace, ops: HostOps, rec: Rec) -> None:
     """Unchanged PRs give identical snapshots after dropping `fetched_at` and `rate_limit`
-    (the spikes saw 8 of 9 and 6 of 6): some consecutive pair of three must match."""
+    (the spikes saw 8 of 9 and 6 of 6): at least one of the three consecutive pairs of four
+    snapshots must be equal (not all: the doc claim is exactly this)."""
     pr = ops.open_pr("determinism")
     ops.comment(pr.number, "live determinism comment")
     time.sleep(10)
@@ -288,7 +307,7 @@ def test_rate_limit_shape(ws: Workspace, ops: HostOps, rec: Rec) -> None:
     rl = snap["rate_limit"]
     assert rl["host"] == ops.cfg.host
     if ops.kind == "github":
-        assert isinstance(rl["remaining"], int) and TS.match(str(rl["reset_at"])), rl
-    else:
-        assert rl["remaining"] is None, rl
+        assert isinstance(rl["remaining"], int) and TS.fullmatch(str(rl["reset_at"])), rl
+    # GitLab: `remaining` is null on a self-managed server and may be an int on gitlab.com, so
+    # only the host is asserted; the value is the finding.
     rec(host=ops.kind, rate_limit=rl)
