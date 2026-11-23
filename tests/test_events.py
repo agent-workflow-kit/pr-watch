@@ -70,6 +70,13 @@ def add_event(
         }  # fmt: skip
     if type_ == "retargeted":
         payload = {"from": "main", "to": "dev", **payload}
+    if type_ in ("unreachable", "recovered"):
+        payload = {"code": "not_found", "failures": 5, **payload}
+    if type_ == "mergeability":
+        payload = {
+            "from_blocked_by": [], "blocked_by": [{"code": "conflicts"}],
+            "from_mergeable": True, "mergeable": False, **payload,
+        }  # fmt: skip
     if type_ == "approval_withdrawn":
         payload = {
             "reviewer": {"id": "1", "login": "a", "is_bot": False}, "to": "dismissed",
@@ -416,6 +423,23 @@ def test_type_filter_accepts_renamed_and_retargeted(
     assert code == 0 and "from example.net/o/old#1" in lines[0] and "main -> dev" in lines[1]
 
 
+def test_type_filter_accepts_the_health_and_mergeability_types(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    add_event(store, "unreachable")  # 1
+    add_event(store, "recovered")  # 2
+    add_event(store, "mergeability")  # 3
+    add_event(store, "pushed")  # 4
+    since = ("--since", cur(store, 0))
+    assert seqs(events(capsys, *since, "--type", "unreachable")) == [1]
+    assert seqs(events(capsys, *since, "--type", "recovered")) == [2]
+    assert seqs(events(capsys, *since, "--type", "mergeability")) == [3]
+    assert seqs(events(capsys, *since, "--type", "recovered", "--type", "mergeability")) == [2, 3]
+    code, out, _ = run(capsys, "events", *since)
+    lines = out.splitlines()[1:]
+    assert code == 0 and "not_found after 5 failures" in lines[0] and "mergeable True" in lines[2]
+
+
 def test_label_filter_is_and(store: Store, capsys: pytest.CaptureFixture[str]) -> None:
     populate(store)
     since = ("--since", cur(store, 0))
@@ -563,6 +587,12 @@ def test_every_event_type_validates(store: Store, capsys: pytest.CaptureFixture[
         "reopened": {},
         "pushed": {"from_sha": "b" * 40, "to_sha": "a" * 40, "forced": True},
         "retargeted": {"from": "main", "to": "release/1.x"},
+        "unreachable": {"code": "not_found", "failures": 5},
+        "recovered": {"code": None, "failures": 0},
+        "mergeability": {
+            "from_blocked_by": [], "blocked_by": [{"code": "other", "detail": "locked"}],
+            "from_mergeable": None, "mergeable": False,
+        },
         "comment": {"comment_id": "gh:ic:1", "thread_id": None, "author": author},
         "review_comment": {
             "comment_id": "gh:rc:1", "thread_id": "gh:rt:1", "author": author, "path": "a/b.py",

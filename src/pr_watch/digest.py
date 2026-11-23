@@ -335,6 +335,69 @@ def _blocked_by(value: object) -> object:
     return [{"code": c} if not d else {"code": c, "detail": d} for c, d in kept]
 
 
+# Blocker codes `mergeability` leaves to other events or to "still computing": draft is `ready`
+# and `converted_to_draft`, the check codes are `ci`, the unknown code is no reading at all.
+NON_READINESS_CODES: Final = frozenset(
+    {"draft", "checks_pending", "checks_failing", "mergeability_unknown"}
+)
+
+
+def _blocker_pairs(items: object) -> list[dict[str, str]] | None:
+    """A stored `blocked_by` list of `{code[, detail]}` mappings, or None when malformed."""
+    if not isinstance(items, list) or len(items) > MAX_BLOCKED_BY:
+        return None
+    out: list[dict[str, str]] = []
+    for item in items:
+        data = _dict(item)
+        code = data.get("code")
+        detail = data.get("detail")
+        if not isinstance(code, str) or set(data) - {"code", "detail"}:
+            return None
+        if detail is not None and not isinstance(detail, str):
+            return None
+        out.append({"code": code} if detail is None else {"code": code, "detail": detail})
+    return out
+
+
+def previous_readiness(previous: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The previous digest's `readiness` when it has the expected shape, else None."""
+    value = previous.get("readiness")
+    if not isinstance(value, dict) or set(value) != {"blocked_by", "mergeable"}:
+        return None
+    mergeable = value["mergeable"]
+    if mergeable is not None and not isinstance(mergeable, bool):
+        return None
+    blocked = value["blocked_by"]
+    if blocked is not None:
+        blocked = _blocker_pairs(blocked)
+        if blocked is None:
+            return None
+    return {"blocked_by": blocked, "mergeable": mergeable}
+
+
+def _readiness(
+    snapshot: Mapping[str, Any], state: object, old: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """The last known readiness reading (the `mergeability` event's input): the blockers other
+    than draft, checks and unknown, and a boolean `mergeable`. A reading the snapshot does not
+    give (unknown mergeability, an unreadable list, a null `mergeable`, a PR that is not open)
+    keeps the previous one, so a change across a computing spell is still seen. `blocked_by` is
+    null until a first known reading."""
+    before = previous_readiness(old)
+    if state != "open":
+        return before
+    blocked = before["blocked_by"] if before else None
+    mergeable = before["mergeable"] if before else None
+    fresh = _blocked_by(snapshot.get("blocked_by"))
+    if isinstance(fresh, list):
+        codes = [_dict(i).get("code") for i in fresh]
+        if "mergeability_unknown" not in codes:
+            blocked = [i for i in fresh if _dict(i).get("code") not in NON_READINESS_CODES]
+    if isinstance(snapshot.get("mergeable"), bool):
+        mergeable = snapshot["mergeable"]
+    return {"blocked_by": blocked, "mergeable": mergeable}
+
+
 def counted_checks(ci: Mapping[str, Any]) -> dict[str, tuple[str, str]]:
     """Key -> (full name, state) of the counted checks of a readable `ci`, uncapped. Checks that
     share a key merge, the worst state winning, whatever the order."""
@@ -587,6 +650,8 @@ def build_digest(
             snapshot.get("merge_commit_sha"), _nullable(_sha), old, "merge_commit_sha"
         ),
     }
+
+    digest["readiness"] = _readiness(snapshot, digest["state"], old)
 
     if "reviews" in incomplete:
         digest["reviewers"] = _previous_reviewers(old)

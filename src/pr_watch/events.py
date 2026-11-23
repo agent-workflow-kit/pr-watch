@@ -262,6 +262,10 @@ def summary(e: dict[str, Any]) -> str:
         return f"by {_login(e.get('reviewer'))}"
     if kind in ("ci", "retargeted"):
         return f"{_s(e.get('from'))} -> {_s(e.get('to'))}"
+    if kind in ("unreachable", "recovered"):
+        return f"{_s(e.get('code'))} after {_s(e.get('failures'))} failures"
+    if kind == "mergeability":
+        return f"mergeable {_s(e.get('from_mergeable'))} -> {_s(e.get('mergeable'))}"
     if kind == "renamed":
         return f"from {_s(e.get('from_pr'))}"
     return ""

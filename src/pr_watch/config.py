@@ -212,6 +212,8 @@ class Hooks(_Model):
     max_per_pr_per_poll: int = Field(default=10, ge=1, le=1000)
     concurrency: int = Field(default=4, ge=1, le=32)
     env_allow: list[EnvAllowName] = Field(default_factory=list)
+    on_unreachable: list[HookCmd] = Field(default_factory=list, alias="on-unreachable")
+    on_recovered: list[HookCmd] = Field(default_factory=list, alias="on-recovered")
     on_renamed: list[HookCmd] = Field(default_factory=list, alias="on-renamed")
     on_opened: list[HookCmd] = Field(default_factory=list, alias="on-opened")
     on_reopened: list[HookCmd] = Field(default_factory=list, alias="on-reopened")
@@ -231,6 +233,7 @@ class Hooks(_Model):
     on_converted_to_draft: list[HookCmd] = Field(
         default_factory=list, alias="on-converted_to_draft"
     )
+    on_mergeability: list[HookCmd] = Field(default_factory=list, alias="on-mergeability")
     on_merged: list[HookCmd] = Field(default_factory=list, alias="on-merged")
     on_closed: list[HookCmd] = Field(default_factory=list, alias="on-closed")
     post_poll: list[HookCmd] = Field(default_factory=list, alias="post-poll")

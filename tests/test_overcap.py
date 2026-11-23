@@ -219,8 +219,9 @@ def test_a_closed_over_cap_pr_with_a_digest_changes_only_the_terminal_fields(
     store.conn.commit()
     over_cap(fake)
     run(store, plan=full_pass())
-    assert [e["type"] for e in events(store)] == ["closed"]  # no pushed, ready or ci
-    assert events(store)[0]["head_sha"] == before["head_sha"]
+    # the row was unreachable, so the success is also a recovery; no pushed, ready or ci
+    assert [e["type"] for e in events(store)] == ["recovered", "closed"]
+    assert events(store)[1]["head_sha"] == before["head_sha"]
     after = json.loads(col(store, pr_id, "digest"))
     assert after == {**before, "state": "closed"}
     assert col(store, pr_id, "failure_count") == 0
@@ -669,3 +670,46 @@ def test_a_snapshot_taken_under_the_old_name_does_not_undo_a_rename_stored_meanw
     run(store, plan=full_pass())
     assert events(store) == []  # no false B -> A
     assert col(store, pr_id, "pr") == new and col(store, pr_id, "repo") == new_repo
+
+
+def test_an_over_cap_pr_with_a_digest_makes_one_unreachable_at_the_crossing_only(
+    store: Store, fake: FakeForgectl
+) -> None:
+    snap = pr(1)
+    pr_id = baseline(store, fake, snap)
+    over_cap(fake)
+    for _ in range(2):
+        store.conn.execute("UPDATE prs SET rebaseline = 1")  # chosen again
+        store.conn.commit()
+        run(store, UNREACHABLE_AFTER)
+    assert [(e["type"], e["code"], e["failures"]) for e in events(store)] == [
+        ("unreachable", "too_large", 2)
+    ]
+    assert events(store)[0]["head_sha"] == snap["head"]["sha"]
+    for _ in range(2):
+        run(store, UNREACHABLE_AFTER, plan=full_pass())
+    assert [e["type"] for e in events(store)] == ["unreachable"]
+    assert col(store, pr_id, "status") == "unreachable"
+
+
+def test_a_terminal_show_of_an_unreachable_over_cap_pr_is_recovered_then_the_terminal_event(
+    store: Store, fake: FakeForgectl
+) -> None:
+    snap = pr(1)
+    pr_id = baseline(store, fake, snap)
+    over_cap(fake)
+    for _ in range(2):
+        store.conn.execute("UPDATE prs SET rebaseline = 1")
+        store.conn.commit()
+        run(store, UNREACHABLE_AFTER)
+    fake.update(
+        snap["pr"], state="closed", closed_at="2026-10-03T10:00:00Z",
+        updated_at="2026-10-03T10:00:00Z",
+    )  # fmt: skip
+    store.conn.execute("UPDATE prs SET listed_updated_at = '2026-10-03T10:00:00.000000Z'")
+    store.conn.commit()
+    run(store, UNREACHABLE_AFTER, plan=full_pass())
+    got = events(store)
+    assert [e["type"] for e in got] == ["unreachable", "recovered", "closed"]
+    assert got[1]["failures"] == 2 and got[1]["code"] == "too_large"
+    assert col(store, pr_id, "status") == "terminal"
