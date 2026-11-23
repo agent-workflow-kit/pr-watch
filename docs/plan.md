@@ -75,7 +75,7 @@ This plan implements [interface.md](interface.md) (the normative spec) and [desi
 
 **Goal**: `cron install|uninstall`, the README and the `live` suite.
 **Success Criteria**: the managed block matches the golden text and replaces the harness's block; the live tests pass against GitHub and a GitLab server; README and `config.example.yaml` match the interface.
-**Tests**: golden crontab for install, reinstall, uninstall and foreign entries; GitLab transition shapes (the still-to-verify item); macOS checklist.
+**Tests**: golden crontab for install, reinstall, uninstall and foreign entries; GitLab transition shapes (the still-to-verify item); macOS checklist ([macos-checklist.md](macos-checklist.md)).
 **Status**: In Progress (live suite against GitHub/GitLab and the macOS checklist are human-gated)
 
 ## Version roadmap
