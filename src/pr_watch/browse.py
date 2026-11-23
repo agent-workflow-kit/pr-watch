@@ -5,8 +5,10 @@ module is imported lazily from `cli`, and `browse_model` needs no Textual), so w
 the command exits 2 (`usage`, `details.kind: tui_missing`) with an install hint and nothing else
 in pr-watch needs the library.
 
-Order of the checks: `--json` (refused), the extra, a terminal on stdin and stdout, `--focus`, then
-the TUI. A store that cannot be read is not an exit code: the TUI shows it as a failed read.
+Order of the checks: `--json` (refused), the extra, a terminal on stdin and stderr, `--focus`, then
+the TUI. `cli.main` does not open the state directory for `browse`, so a store that cannot be
+read is not an exit code: the TUI shows it as a failed read. Only `--focus` reads the store before
+the screen opens, so it surfaces the store's own error codes (`state_unsafe`, `store_too_new`: 12).
 """
 
 from __future__ import annotations
@@ -45,8 +47,9 @@ def browse_command(ctx: Context, args: argparse.Namespace) -> int:
     if ctx.json:
         raise UsageError("browse is a terminal UI and has no --json form", kind="bad_combination")
     app_module = _import_app()
-    if not (_is_tty(sys.stdin) and _is_tty(sys.stdout)):
-        raise UsageError("browse needs a terminal on standard input and output", kind="no_terminal")
+    # Textual's driver reads sys.__stdin__ and draws to sys.__stderr__, never to stdout.
+    if not (_is_tty(sys.__stdin__) and _is_tty(sys.__stderr__)):
+        raise UsageError("browse needs a terminal on standard input and error", kind="no_terminal")
     from . import browse_model
 
     focus: str | None = None

@@ -880,7 +880,12 @@ def _execute(argv: Sequence[str]) -> int:
     try:
         # Read-only commands create nothing: a missing state directory or state.db is an empty
         # store (`ctx.state` / `ctx.store` None); an existing one is checked as usual.
-        state = open_existing_state_dir() if read_only else open_state_dir()
+        # `browse` opens nothing here: its terminal and extra checks come first, and the TUI shows
+        # an unreadable store as a failed read (its own read-only open does the reading).
+        if args.command == "browse":
+            state = None
+        else:
+            state = open_existing_state_dir() if read_only else open_state_dir()
     except StateDirError as exc:
         raise CliError("state_unsafe", str(exc)) from None
     store: Store | None = None

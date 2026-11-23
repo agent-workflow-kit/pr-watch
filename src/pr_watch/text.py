@@ -7,13 +7,19 @@ import unicodedata
 
 MAX_MESSAGE_CHARS = 256
 
+# Characters that render as nothing (so they could hide content) although they are not in a
+# category marked below. Variation selectors are not marked: they only pick emoji presentation.
+_INVISIBLE = frozenset({0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2800, 0x3164, 0xFFA0})
+
 
 def _tokens(text: str, keep: str = "") -> list[str]:
     """Each character, or a `<U+XXXX>` marker for a control, format (bidi), line/paragraph
     separator or surrogate character (`keep` lists control characters to leave alone)."""
     out: list[str] = []
     for ch in text:
-        if ch not in keep and unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp", "Cs"):
+        if ch not in keep and (
+            unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp", "Cs") or ord(ch) in _INVISIBLE
+        ):
             out.append(f"<U+{ord(ch):04X}>")
         else:
             out.append(ch)

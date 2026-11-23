@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from textual.app import ComposeResult
 
 from pr_watch import browse_model as bm
 from pr_watch.browse_app import BrowseApp
 from pr_watch.cli import CliError
-from pr_watch.config import LoadedConfig
+from pr_watch.config import LoadedConfig, load_config
 from pr_watch.state_dir import open_state_dir
 from pr_watch.store import NewEvent, Store, open_store
 from tests.browse_support import (
@@ -26,7 +29,7 @@ from tests.browse_support import (
     status,
     views,
 )
-from tests.test_list import T0, add_pr, add_watch, digest, fingerprint, link, populate, settled
+from tests.test_list import T0, add_pr, add_watch, digest, fingerprint, link, populate
 
 
 @pytest.fixture
@@ -338,4 +341,151 @@ def test_a_browse_session_leaves_the_state_directory_byte_identical(
             await pilot.pause()  # type: ignore[attr-defined]
 
     drive(script)
-    assert settled(fingerprint(state_dir)) == settled(before)
+    after = fingerprint(state_dir)
+    assert after["state.db"] == before["state.db"]
+    # A reader may leave an empty -wal and a -shm (as `list`, `show` and `events` do); nothing
+    # else in the directory changes and no data is written.
+    litter = {k for k in set(after) | set(before) if after.get(k) != before.get(k)}
+    assert litter <= {"state.db-wal", "state.db-shm"}
+    wal = after.get("state.db-wal")
+    assert wal is None or wal == before.get("state.db-wal") or wal[1] == 0
+
+
+def focused_id(app: BrowseApp) -> str | None:
+    return app.focused.id if app.focused is not None else None
+
+
+def test_enter_on_the_table_focuses_the_detail_pane_and_arrows_scroll_it(store: Store) -> None:
+    populate(store)
+    seen: dict[str, object] = {}
+
+    async def script(app: BrowseApp, pilot: object) -> None:
+        press = pilot.press  # type: ignore[attr-defined]
+        await press("enter")
+        await pilot.pause()  # type: ignore[attr-defined]
+        seen["focus"] = focused_id(app)
+        seen["cursor"] = cursor_key(app)
+        await press("down")
+        seen["cursor_after"] = cursor_key(app)  # the arrow went to the pane, not the table
+        await press("escape")
+        seen["back"] = focused_id(app)
+
+    drive(script)
+    assert seen["focus"] == "detail-scroll"
+    assert seen["cursor"] == seen["cursor_after"]
+    assert seen["back"] == "table"
+
+
+def test_escape_in_the_detail_pane_keeps_a_kept_text_filter(store: Store) -> None:
+    populate(store)
+    seen: dict[str, object] = {}
+
+    async def script(app: BrowseApp, pilot: object) -> None:
+        press = pilot.press  # type: ignore[attr-defined]
+        await press("slash")
+        await press(*"o/s#3")
+        await press("enter")  # keeps the filter, focus to the table
+        await press("enter")  # detail pane
+        await press("escape")
+        seen["after_escape"] = keys(app)
+        seen["focus"] = focused_id(app)
+        await press("escape")  # from the table: clears
+        seen["cleared"] = keys(app)
+
+    drive(script)
+    assert seen["after_escape"] == ["P3"] and seen["focus"] == "table"
+    assert seen["cleared"] == ["P1", "P2", "P3", "P4", "P6"]
+
+
+def test_tab_in_the_filter_input_keeps_focus_there(store: Store) -> None:
+    populate(store)
+    seen: list[object] = []
+
+    async def script(app: BrowseApp, pilot: object) -> None:
+        press = pilot.press  # type: ignore[attr-defined]
+        await press("slash")
+        await press("tab")
+        seen.append(focused_id(app))
+        await press("shift+tab")
+        seen.append(focused_id(app))
+        seen.append(views(app))
+
+    drive(script)
+    assert seen[:2] == ["filter", "filter"]
+    assert "[PRs 5]" in str(seen[2])
+
+
+@pytest.mark.parametrize(
+    ("number", "code"), [(signal.SIGINT, 130), (signal.SIGTERM, 143), (signal.SIGHUP, 129)]
+)
+def test_a_stop_signal_exits_128_plus_its_number(number: int, code: int) -> None:
+    async def script(app: BrowseApp, pilot: object) -> None:
+        os.kill(os.getpid(), number)
+        await asyncio.sleep(0.3)
+
+    assert drive(script) == code
+
+
+def test_a_signal_before_mount_still_takes_the_exit_path() -> None:
+    class Early(BrowseApp):
+        def compose(self) -> ComposeResult:
+            os.kill(os.getpid(), signal.SIGTERM)  # after the driver-less Load, before on_mount
+            return super().compose()
+
+    async def main() -> int | None:
+        app = Early(load_config(None), refresh_seconds=3600.0)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause()
+            await asyncio.sleep(0.3)
+        return app.return_value
+
+    assert asyncio.run(asyncio.wait_for(main(), 60)) == 143
+
+
+def test_a_full_events_window_is_marked(store: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bm, "EVENT_WINDOW", 3)
+    for _ in range(4):
+        add_event(store)
+    seen: dict[str, str] = {}
+
+    async def script(app: BrowseApp, pilot: object) -> None:
+        await pilot.press("3")  # type: ignore[attr-defined]
+        seen["views"], seen["status"] = views(app), status(app)
+
+    drive(script)
+    assert "[events 3+]" in seen["views"]
+    assert "3+" in seen["status"]
+
+
+def test_a_label_filter_that_vanishes_after_a_refresh_is_reset(store: Store) -> None:
+    populate(store)
+    seen: dict[str, object] = {}
+
+    async def script(app: BrowseApp, pilot: object) -> None:
+        press = pilot.press  # type: ignore[attr-defined]
+        await press("l", "l", "l")  # tier=1
+        seen["before"] = keys(app)
+        with store.transaction() as c:
+            c.execute("DELETE FROM labels WHERE label = 'tier=1'")
+        await press("r")
+        await pilot.pause()  # type: ignore[attr-defined]
+        seen["after"] = keys(app)
+        seen["status"] = status(app)
+
+    drive(script)
+    assert seen["before"] == ["P1"]
+    assert "label=" not in str(seen["status"]) and len(seen["after"]) == 5  # type: ignore[arg-type]
+
+
+def test_a_view_switch_starts_on_the_first_row(store: Store) -> None:
+    populate(store)
+    seen: list[str | None] = []
+
+    async def script(app: BrowseApp, pilot: object) -> None:
+        press = pilot.press  # type: ignore[attr-defined]
+        await press("j", "j", "j", "j")
+        await press("2")
+        seen.append(cursor_key(app))
+
+    drive(script)
+    assert seen == ["w-aaaaaaaaaa"]

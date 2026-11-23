@@ -77,6 +77,18 @@ def error_text(exc: BaseException) -> str:
     return f"internal error ({type(exc).__name__})"
 
 
+class FilterInput(Input):
+    """The filter box: tab and shift+tab stay in it (they must not move focus away mid-typing)."""
+
+    BINDINGS: ClassVar = [
+        Binding("tab", "stay", show=False),
+        Binding("shift+tab", "stay", show=False),
+    ]
+
+    def action_stay(self) -> None:
+        pass
+
+
 class HelpScreen(ModalScreen[None]):
     BINDINGS: ClassVar = [Binding("escape,q,question_mark,enter", "close", "close")]
     DEFAULT_CSS = """
@@ -163,7 +175,7 @@ class BrowseApp(App[int]):
         yield DataTable(id="table", cursor_type="row", zebra_stripes=True)
         with VerticalScroll(id="detail-scroll"):
             yield Static("", markup=False, id="detail")
-        yield Input(placeholder="filter text", id="filter")
+        yield FilterInput(placeholder="filter text", id="filter")
         yield Static("", markup=False, id="status")
         yield Footer()
 
@@ -171,12 +183,15 @@ class BrowseApp(App[int]):
         self.query_one("#filter", Input).display = False
         self.query_one("#detail-scroll").can_focus = True
         self.query_one("#table", DataTable).focus()
-        self._install_signal_handlers()
         self.action_refresh()
         self.set_interval(self._refresh_seconds, self.action_refresh)
         self.set_interval(1.0, self._render_status)
 
     # -- signals and failures ------------------------------------------------------------
+
+    def on_load(self) -> None:
+        # The earliest hook, before the driver starts: a signal from here on takes the exit path.
+        self._install_signal_handlers()
 
     def _install_signal_handlers(self) -> None:
         try:
@@ -240,8 +255,13 @@ class BrowseApp(App[int]):
         )
 
     def _populate(self, *, columns: bool = False) -> None:
-        """Fill the table from the snapshot and the filters, keeping the cursor on the same key."""
+        """Fill the table from the snapshot and the filters, keeping the cursor on the same key
+        (`columns`: a view switch, where a view with nothing remembered starts on its first row)."""
         table = self._table()
+        if self._label is not None and self._label not in bm.label_choices(
+            self._snap.items(self._view)
+        ):
+            self._label = None  # the labelled items are gone (a refresh)
         items = self._items()
         previous_index = table.cursor_row
         want = self._selected[self._view]
@@ -259,7 +279,10 @@ class BrowseApp(App[int]):
                 table.add_row(*(Text(c) for c in item.cells), key=item.key)
             if items:
                 keys = [i.key for i in items]
-                row = keys.index(want) if want in keys else min(previous_index, len(items) - 1)
+                if want in keys:
+                    row = keys.index(want)
+                else:
+                    row = 0 if columns else min(previous_index, len(items) - 1)
                 table.move_cursor(row=max(row, 0), animate=False)
         self._selected[self._view] = items[table.cursor_row].key if items else None
         self._render_views()
@@ -269,6 +292,10 @@ class BrowseApp(App[int]):
     def _current(self) -> bm.Item | None:
         key = self._selected[self._view]
         return next((i for i in self._shown if i.key == key), None)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        event.stop()  # DataTable binds enter to select_cursor, so enter arrives here
+        self.action_open()
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         key = event.row_key.value
@@ -280,10 +307,15 @@ class BrowseApp(App[int]):
     def _render_views(self) -> None:
         names = {"prs": "PRs", "watches": "watches", "events": "events"}
         parts = [
-            f"[{names[v]} {len(self._snap.items(v))}]" if v == self._view else f"{names[v]}"
+            f"[{names[v]} {self._count_text(v)}]" if v == self._view else f"{names[v]}"
             for v in bm.VIEWS
         ]
         self.query_one("#views", Static).update("  ".join(parts))
+
+    def _count_text(self, view: str) -> str:
+        """The item count of a view; `N+` when the events window is full (older ones exist)."""
+        count = len(self._snap.items(view))
+        return f"{count}+" if view == "events" and count >= bm.EVENT_WINDOW else str(count)
 
     def _render_detail(self) -> None:
         detail = self.query_one("#detail", Static)
@@ -311,8 +343,7 @@ class BrowseApp(App[int]):
     def _render_status(self) -> None:
         now = self._clock()
         shown = len(self._items())
-        total = len(self._snap.items(self._view))
-        parts = [f"{shown}/{total} shown"]
+        parts = [f"{shown}/{self._count_text(self._view)} shown"]
         if self._read_ok_at is not None:
             parts.append(f"data {bm.age_text(self._read_ok_at, now)} old")
         else:
@@ -363,7 +394,9 @@ class BrowseApp(App[int]):
 
     def action_dismiss_filter(self) -> None:
         filt = self.query_one("#filter", Input)
-        if filt.display:
+        if self.focused is not None and self.focused.id == "detail-scroll":
+            self._table().focus()  # only back to the table: a kept filter stays
+        elif filt.display:
             self._text = ""
             filt.value = ""
             filt.display = False
