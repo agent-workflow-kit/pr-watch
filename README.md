@@ -15,13 +15,14 @@ This README is a guide. The normative rules, exact JSON shapes and every edge ca
 
 ## Status
 
-Implemented and released (see [CHANGELOG.md](CHANGELOG.md)); the interface is documented in [docs/interface.md](docs/interface.md) and the design decisions in [docs/design.md](docs/design.md). There is no TUI in 0.x. Platforms: Linux, WSL and macOS ([Platform notes](docs/interface.md#platform-notes)).
+Implemented and released (see [CHANGELOG.md](CHANGELOG.md)); the interface is documented in [docs/interface.md](docs/interface.md) and the design decisions in [docs/design.md](docs/design.md). `pr-watch browse` is a read-only terminal browser (optional extra, see Dependencies). Platforms: Linux, WSL and macOS ([Platform notes](docs/interface.md#platform-notes)).
 
 ## Dependencies
 
 - Python 3.12 or newer.
 - forgectl: binding A (hard). All host access goes through it, and it holds the credentials; set up its hosts and tokens first. pr-watch checks its version and exits 12 with an install hint when it is missing or too old. Install: `uv tool install git+https://github.com/agent-workflow-kit/forgectl`.
 - cron (optional), only for `pr-watch cron install`.
+- Textual (optional), only for `pr-watch browse`: `pip install 'pr-watch[browse]'`. Without it `browse` exits 2 with an install hint; every other command works as before ([TUI](docs/interface.md#tui)).
 
 ## Install
 

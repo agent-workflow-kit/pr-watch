@@ -7,6 +7,9 @@ requires-python = ">=3.12"
 license = "MIT"
 dependencies = ["pyyaml>=6", "pydantic>=2.5"]
 
+[project.optional-dependencies]
+browse = ["textual>=8.1,<9"]
+
 [project.scripts]
 pr-watch = "pr_watch._entry:main"
 
@@ -26,6 +29,7 @@ dev = [
     "jsonschema>=4.23",
     "referencing>=0.35",
     "types-pyyaml>=6.0.12",
+    "textual>=8.1,<9",
 ]
 
 [tool.ruff]
