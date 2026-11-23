@@ -67,7 +67,7 @@ def test_populated_snapshot_has_items_in_order(store: Store) -> None:
     assert {i.status for i in snap.prs} == {"active", "terminal", "unreachable"}
     assert [i.cells[2] for i in snap.events] == ["pushed", "closed"]  # newest first
     assert snap.last_poll == "2026-06-01T02:00:00.000000Z"
-    assert any("github.com" in h for h in snap.hosts)
+    assert any(h.split()[0] == "github.com" for h in snap.hosts)
 
 
 def test_pr_labels_are_the_union_of_its_watches(store: Store) -> None:
