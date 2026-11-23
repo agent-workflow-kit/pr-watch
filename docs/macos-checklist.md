@@ -15,7 +15,7 @@ The acceptance bullet "every `--json` output validated against `schemas/`" has n
 - A backgrounded poll is always started as `"$PRW/pw" ... & POLLPID=$!`, never as the shell function `pw`: a function run with `&` is a forked subshell, so `$!` would not be the pr-watch process (M0.2).
 - Result values for the record: `PASS` (expected result seen), `FAIL` (differs: copy the output), `OBS` (a **to be observed** item: copy the value and say whether the invariant holds), `SKIP` (with the reason).
 - A `FAIL` or a broken invariant is a finding. Open an issue; do not edit the expected result to match.
-- Signals are only ever sent to PIDs captured with `$!` or read from a file this checklist wrote, and only after `ps` shows the expected command: `prw_sig` (M0.2) checks that `$POLLPID` is alive and is a `pr-watch` before every `kill`. No step uses `pkill`, `killall` or a pattern.
+- Signals are only ever sent to PIDs captured with `$!` or read from a file this checklist wrote, and only after `ps` shows the expected command (M8.2's manual signal: you run that `ps` yourself first): `prw_sig` (M0.2) checks that `$POLLPID` is alive and is a `pr-watch` before every `kill`; the one manual signal (M8.2) is sent only after you confirm the PID with `ps -o command= -p <pid>`. No step uses `pkill`, `killall` or a pattern.
 
 ## M0. Setup
 
@@ -68,7 +68,7 @@ exec '$PRW/bin/pr-watch' --config '$PRW/config-base.yaml' "\$@"
 EOF
 chmod 755 "$PRW/pw"
 pw() { "$PRW/pw" "$@"; }
-prw_sig() { if [ -n "$POLLPID" ] && kill -0 "$POLLPID" 2>/dev/null && ps -o command= -p "$POLLPID" | grep -q pr-watch; then kill -"$1" "$POLLPID"; else echo "prw_sig: pid '$POLLPID' is not a live pr-watch; no signal sent"; return 1; fi; }
+prw_sig() { if [ -n "$POLLPID" ] && kill -0 "$POLLPID" 2>/dev/null && ps -o command= -p "$POLLPID" | grep -qF "$PRW/bin/pr-watch"; then kill -"$1" "$POLLPID"; else echo "prw_sig: pid '$POLLPID' is not a live pr-watch; no signal sent"; return 1; fi; }
 prw_wait_file() { i=0; while [ ! -s "$1" ] && [ "$i" -lt 100 ]; do sleep 0.2; i=$((i+1)); done; [ -s "$1" ]; }
 prw_reset() { [ -n "$PRW" ] && rm -f "$PRW"/leader.pids "$PRW"/child.pids "$PRW"/leader.ps; }
 prw_alive() { for p in $(cat "$PRW/child.pids" "$PRW/leader.pids" 2>/dev/null); do kill -0 "$p" 2>/dev/null && echo "ALIVE $(ps -o pid=,pgid=,command= -p "$p")"; done; echo "alive check done"; }
@@ -493,10 +493,11 @@ sysctl -n kern.bootsessionuuid
 echo "$PRW"
 ```
 
-The expiry is 30 minutes ahead (`3 x 600 s`). Reboot the Mac now. After login, in a new shell:
+The expiry is 30 minutes ahead (`3 x 600 s`). Reboot the Mac now. After login, in a new shell (replace `/tmp/prw.XXXXXX` with the value printed above; the first line makes zsh accept `#` comments):
 
 ```sh
-export PRW=/tmp/prw.XXXXXX      # the value printed above
+[ -n "$ZSH_VERSION" ] && setopt interactivecomments
+export PRW=/tmp/prw.XXXXXX
 export XDG_STATE_HOME="$PRW/state" PR='github.com/OWNER/REPO#123'
 export PATH="$PRW/stub:$PRW/bin:$PATH"
 pw() { "$PRW/pw" "$@"; }
@@ -809,7 +810,11 @@ Only continue after the dry runs above were clean, M6.1 printed `backup ok` and 
 
 ```sh
 echo pass > "$PRW/mode"
-pw --config "$PRW/config-cron.yaml" cron install --every 1m --json; echo "exit=$?"
+if [ -f "$PRW/backup.ok" ]; then
+  pw --config "$PRW/config-cron.yaml" cron install --every 1m --json; echo "exit=$?"
+else
+  echo "STOP: no verified backup; do not install"
+fi
 crontab -l
 ls -l "$XDG_STATE_HOME/pr-watch/cron.lock"; stat -f '%Sp %Lp %Su' "$XDG_STATE_HOME/pr-watch/cron.lock"
 ```
@@ -858,7 +863,7 @@ mklong 4 0; L0=$(mkline); echo "L0=$L0"
 mklong 4 $((999 - L0)); mkline
 ```
 
-Expected: `mkline` prints 999 (the length grows one byte per pad byte; if it does not, adjust the pad), and the block installs: `pw --config "$PRW/config-long.yaml" cron install --every 1m --json`, then `crontab -l | awk '{ print length($0) }' | sort -n | tail -1` prints 999 and `crontab -l` shows the block intact. Then `mklong 4 $((1000 - L0)); mkline` prints 1000 and `pw --config "$PRW/config-long.yaml" cron install --every 1m --dry-run --json` is refused with `config_invalid` and an unchanged crontab (`crontab -l | cmp - ...` against the 999 state, or against the backup if you skip the install). A pad over 250 bytes does not fit one name: use one more directory and a smaller pad. Finish with `rm -rf "$PRW/long"` and `pw --config "$PRW/config-cron.yaml" cron install --every 1m --json` to go back to the M6.5 block.
+Expected: `mkline` prints 999 (the length grows one byte per pad byte; if it does not, adjust the pad), and the block installs (run each real `cron install` below only as `if [ -f "$PRW/backup.ok" ]; then pw ... cron install ...; else echo "STOP: no verified backup"; fi`): `pw --config "$PRW/config-long.yaml" cron install --every 1m --json`, then `crontab -l | awk '{ print length($0) }' | sort -n | tail -1` prints 999 and `crontab -l` shows the block intact. Then `mklong 4 $((1000 - L0)); mkline` prints 1000 and `pw --config "$PRW/config-long.yaml" cron install --every 1m --dry-run --json` is refused with `config_invalid` and an unchanged crontab (`crontab -l | cmp - ...` against the 999 state, or against the backup if you skip the install). A pad over 250 bytes does not fit one name: use one more directory and a smaller pad. Finish with `rm -rf "$PRW/long"` and the same guarded `pw --config "$PRW/config-cron.yaml" cron install --every 1m --json` to go back to the M6.5 block.
 
 b. A table that does not end in a newline (vixie 4.x refuses it; pr-watch adds the newline). The test file is built from your **backup** with its trailing newline stripped, so no entry of yours is at risk, and the backup is restored on the next line. It needs a non-empty backup; with an empty one it is skipped:
 
@@ -871,7 +876,11 @@ if [ -f "$PRW/backup.ok" ] && [ -s "$PRW/crontab.backup" ]; then
 else
   echo "SKIP: no non-empty verified backup"
 fi
-pw --config "$PRW/config-cron.yaml" cron install --every 1m --json >/dev/null; echo "M6.5 block back: exit=$?"
+if [ -f "$PRW/backup.ok" ]; then
+  pw --config "$PRW/config-cron.yaml" cron install --every 1m --json >/dev/null; echo "M6.5 block back: exit=$?"
+else
+  echo "STOP: no verified backup; do not install"
+fi
 ```
 
 Expected (**to be observed**): vixie 4.x may refuse the table or accept it; record the first exit status. The restore exits 0 and `cmp` is silent (the crontab is the backup again; the managed block is put back by the last line for M6.8). Do not edit the commands: the file written is the backup minus its final newline, nothing else.
@@ -941,7 +950,7 @@ In Terminal.app, then again in iTerm2 (and in tmux, if you use it): the three vi
 pw browse --focus "$PR"; echo "exit=$?"
 ```
 
-Press `q`; then run it again and, from a second terminal tab, send `kill -TERM <pid>` to the PID shown by `ps -o pid=,command= -t <tty of the first tab>` (look the tty up with `tty` in the first tab). Expected: `--focus` opens on that PR; `q` exits 0; the SIGTERM exits 143 and the first terminal is usable afterwards (echo is on, the cursor is back, the alternate screen is gone: run `stty -a | head -3` and type a command). Repeat for `-HUP` (129). A broken terminal after any of them is a finding (`reset` fixes it).
+Press `q`; then run it again and, from a second terminal tab, send `kill -TERM <pid>` to the PID shown by `ps -o pid=,command= -t <tty of the first tab>` (look the tty up with `tty` in the first tab). Before signalling, confirm with `ps -o command= -p <pid>` that the PID is `pr-watch browse`; send nothing otherwise. Expected: `--focus` opens on that PR; `q` exits 0; the SIGTERM exits 143 and the first terminal is usable afterwards (echo is on, the cursor is back, the alternate screen is gone: run `stty -a | head -3` and type a command). Repeat for `-HUP` (129). A broken terminal after any of them is a finding (`reset` fixes it).
 
 - [ ] pass  - [ ] fail
 
