@@ -176,6 +176,13 @@ class EnumerationResult:
             self.interrupted = True
         return self.interrupted
 
+    def ended_by_signal(self, code: str | None) -> bool:
+        """A call that failed `interrupted` (exit 128+N) or `killed` (the child died by a signal,
+        for example forgectl's SIGTERM before its handlers exist, or the shutdown's SIGKILL of a
+        child that was slow to obey) while pr-watch itself was signalled: the signal's doing, not
+        a failure of the host (docs/interface.md, Signals: the signal wins wherever it lands)."""
+        return code in ("interrupted", "killed") and self.signalled()
+
     def facts(self, host: str) -> HostFacts:
         found = self.hosts.get(host)
         if found is None:
@@ -382,7 +389,7 @@ def load_host_list(
         host_list = _from_whoami(store, outcome, decision, now, res, restrict_host)
         res.host_list = host_list
         return host_list, res
-    if decision.code == "interrupted" and res.signalled():  # our own signal ended the call
+    if res.ended_by_signal(decision.code):  # our own signal ended the call
         res.host_list = HostList(
             cached[1] if cached is not None else (), frozenset(), cached is not None,
             stale=cached is not None,
@@ -758,7 +765,7 @@ def record_failure(
     host or query failure is named by the host."""
     effect = decision.effect
     code = decision.code or "internal"
-    if code == "interrupted" and res.signalled():
+    if res.ended_by_signal(code):
         return  # pr-watch's own signal ended the call: not a failure of the host
     if effect.stop_poll:
         res.stop_poll = True
