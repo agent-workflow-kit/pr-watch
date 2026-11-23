@@ -651,12 +651,14 @@ class ForgectlClient:
             env=environment,
         )
 
-    def _run(self, argv: list[str], *, max_output: int) -> gateway.Result:
+    def _run(
+        self, argv: list[str], *, max_output: int, deadline: float | None = None
+    ) -> gateway.Result:
         try:
             return gateway.run(
                 [self.exe, *argv],
                 env=self.env,
-                timeout=self.deadline,
+                timeout=self.deadline if deadline is None else deadline,
                 max_output=max_output,
                 term_grace=self.term_grace,
             )
@@ -667,11 +669,13 @@ class ForgectlClient:
         self.version()  # fail closed: no call to an unchecked forgectl
         return classify(command, self._run(argv, max_output=self.max_output), expect=expect)
 
-    def version(self) -> ToolVersion:
-        """`forgectl --version` checked against MIN_FORGECTL; cached on success only."""
+    def version(self, *, deadline: float | None = None) -> ToolVersion:
+        """`forgectl --version` checked against MIN_FORGECTL; cached on success only.
+
+        `deadline` (seconds) replaces the client's call deadline for this one call."""
         if self._version is not None:
             return self._version
-        res = self._run(["--version"], max_output=VERSION_MAX_OUTPUT)
+        res = self._run(["--version"], max_output=VERSION_MAX_OUTPUT, deadline=deadline)
         if res.too_large or res.timed_out or res.abandoned or res.returncode is None:
             raise ToolMissing("forgectl --version did not finish in time or answered too much")
         if res.returncode < 0 or res.returncode > 128:

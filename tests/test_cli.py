@@ -52,6 +52,7 @@ VALID: dict[str, list[str]] = {
     "cron uninstall": ["cron", "uninstall"],
     "export": ["export"],
     "browse": ["browse"],
+    "validate": ["validate"],
 }
 
 # Bad usage for each command (an unknown flag is always one more).
@@ -69,6 +70,7 @@ BAD: dict[str, list[str]] = {
     "cron uninstall": ["cron", "uninstall", "extra"],
     "export": ["export", "--bogus"],
     "browse": ["browse", "--bogus"],
+    "validate": ["validate", "--bogus"],
 }
 
 

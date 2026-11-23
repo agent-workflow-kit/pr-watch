@@ -63,6 +63,7 @@ Every command takes `--json`, `--config PATH`, `--verbose` and `--quiet` ([Globa
 - `pr-watch events [--label k=v]... [--pr <ref>]... [--type T]... [--since <cursor>] [--limit N]`
 - `pr-watch label add|remove <pr|--watch ID> k=v... [--owner O]`
 - `pr-watch prune [--dry-run]`, `cron install|uninstall [--dry-run]`
+- `pr-watch validate [--probe]`: offline, read-only check of the config, forgectl and the state directory (`--probe` also asks `forgectl whoami`)
 - `pr-watch export [--since D] [--label k=v]... [--type T]... [--pr <ref>]...`
 
 A watch has owners (it ends when its last owner removes its reference) and labels; `watch remove` removes only the named owner's reference. Details: [Watches, owners and members](docs/interface.md#watches-owners-and-members).

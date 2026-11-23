@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pr-watch/cli/validate.json",
+  "title": "validate --json",
+  "description": "Printed only on success (exit 0); every failed check ends the command with the error envelope instead. `warnings` is always present and empty when there is none. `probe` is null without --probe.",
+  "type": "object",
+  "properties": {
+    "ok": {
+      "const": true
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "enum": ["config", "forgectl", "state_dir", "probe"]
+          },
+          "ok": {
+            "const": true
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 256
+          }
+        },
+        "additionalProperties": false,
+        "required": ["name", "ok", "message"]
+      }
+    },
+    "forgectl": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]{1,9}\\.[0-9]{1,9}\\.[0-9]{1,9}$"
+        }
+      },
+      "additionalProperties": false,
+      "required": ["path", "version"]
+    },
+    "probe": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "hosts": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": ["hosts"]
+        }
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "enum": ["config_warning", "probe_partial", "host_unknown"]
+          },
+          "key": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 256
+          }
+        },
+        "additionalProperties": false,
+        "required": ["code", "key", "message"]
+      }
+    }
+  },
+  "if": {
+    "properties": {
+      "checks": {
+        "contains": {
+          "properties": {
+            "name": {
+              "const": "probe"
+            }
+          },
+          "required": ["name"]
+        }
+      }
+    },
+    "required": ["checks"]
+  },
+  "then": {
+    "properties": {
+      "probe": {
+        "type": "object"
+      }
+    }
+  },
+  "else": {
+    "properties": {
+      "probe": {
+        "type": "null"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": ["ok", "checks", "forgectl", "probe", "warnings"]
+}

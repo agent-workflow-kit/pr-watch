@@ -1,0 +1,26 @@
+{
+  "checks": [
+    {
+      "message": "1 file, 1 host, 1 hook",
+      "name": "config",
+      "ok": true
+    },
+    {
+      "message": "forgectl 0.55.3",
+      "name": "forgectl",
+      "ok": true
+    },
+    {
+      "message": "not created yet",
+      "name": "state_dir",
+      "ok": true
+    }
+  ],
+  "forgectl": {
+    "path": "<path>",
+    "version": "0.55.3"
+  },
+  "ok": true,
+  "probe": null,
+  "warnings": []
+}
