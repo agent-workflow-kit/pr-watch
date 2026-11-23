@@ -674,7 +674,7 @@ def _converted_to_draft(ctx: Ctx) -> list[dict[str, Any]]:
     ]
 
 
-_CI_CODES: Final = frozenset({"checks_pending", "checks_failing"})
+_LAGGING_CODES: Final = frozenset({"draft", "checks_pending", "checks_failing"})
 
 
 def _pairs(items: object) -> list[tuple[str, str]]:
@@ -682,6 +682,11 @@ def _pairs(items: object) -> list[tuple[str, str]]:
         (str(_map(i).get("code")), str(_map(i).get("detail", "")))
         for i in (items if isinstance(items, list) else ())
     ]
+
+
+# Entries per side in the `mergeability` payload (the comparison uses the full sets): 100 long
+# non-ASCII `other` details on both sides would not fit `MAX_PAYLOAD_BYTES`.
+MAX_MERGEABILITY_LIST: Final = 20
 
 
 def _mergeability(ctx: Ctx) -> list[dict[str, Any]]:
@@ -700,17 +705,16 @@ def _mergeability(ctx: Ctx) -> list[dict[str, Any]]:
     set_changed = _pairs(old["blocked_by"]) != _pairs(new["blocked_by"])
     flipped = isinstance(before, bool) and isinstance(after, bool) and before != after
     if flipped and not set_changed:
-        ci_before = {c for c, _ in _pairs(ctx.old.get("blocked_by")) if c in _CI_CODES}
-        ci_after = {c for c, _ in _pairs(ctx.new.get("blocked_by")) if c in _CI_CODES}
-        if ctx.old.get("draft") != ctx.new.get("draft") or ci_before != ci_after:
+        raw = {c for c, _ in _pairs(ctx.old.get("blocked_by")) + _pairs(ctx.new.get("blocked_by"))}
+        if ctx.old.get("draft") != ctx.new.get("draft") or raw & _LAGGING_CODES:
             return []
     if not (set_changed or flipped):
         return []
     return [
         {
             "occurred_at": None,
-            "from_blocked_by": _blocked({"blocked_by": old["blocked_by"]}),
-            "blocked_by": _blocked({"blocked_by": new["blocked_by"]}),
+            "from_blocked_by": _blocked({"blocked_by": old["blocked_by"]})[:MAX_MERGEABILITY_LIST],
+            "blocked_by": _blocked({"blocked_by": new["blocked_by"]})[:MAX_MERGEABILITY_LIST],
             "from_mergeable": before,
             "mergeable": after,
         }

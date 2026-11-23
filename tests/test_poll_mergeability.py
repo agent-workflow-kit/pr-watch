@@ -166,3 +166,20 @@ def test_the_event_is_valid_listed_by_type_and_runs_its_hook(
     )
     (event,) = json.loads(text)["events"]
     assert schema_errors("event", event) == []
+
+
+def test_an_oversized_blocker_list_still_commits_and_stores_a_bounded_event(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    big = [{"code": "other", "detail": f"{n:03d}" + "\u00e9" * 253} for n in range(100)]
+    other = [{"code": "other", "detail": f"{n:03d}" + "\u00e8" * 253} for n in range(100)]
+    snap = watched(fake, capsys, 9, mergeable=False, blocked_by=big)
+    fake.update(snap["pr"], updated_at=LATER, mergeable=False, blocked_by=other)
+    poll(capsys)
+    assert events(store) == ["mergeability"]
+    (event,) = payloads(store)
+    assert len(event["from_blocked_by"]) == len(event["blocked_by"]) == 20
+    full = {**event, "id": "ev-aaaaaaaaaaaa", "seq": 1, "type": "mergeability",
+            "pr": snap["pr"], "pr_id": snap["pr_id"], "detected_at": "2026-10-03T10:00:00.000000Z",
+            "labels": [], "watches": []}  # fmt: skip
+    assert schema_errors("event", full) == []

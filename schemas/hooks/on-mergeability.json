@@ -67,10 +67,26 @@
       "uniqueItems": true
     },
     "from_blocked_by": {
-      "$ref": "../defs.json#/$defs/blocked_by"
+      "allOf": [
+        {
+          "$ref": "../defs.json#/$defs/blocked_by"
+        },
+        {
+          "maxItems": 20
+        }
+      ],
+      "description": "At most 20 entries (the first 20 in sorted order)."
     },
     "blocked_by": {
-      "$ref": "../defs.json#/$defs/blocked_by"
+      "allOf": [
+        {
+          "$ref": "../defs.json#/$defs/blocked_by"
+        },
+        {
+          "maxItems": 20
+        }
+      ],
+      "description": "At most 20 entries (the first 20 in sorted order)."
     },
     "from_mergeable": {
       "oneOf": [

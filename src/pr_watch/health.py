@@ -14,8 +14,9 @@ They are the two exceptions to "a failure never produces an event":
 
 Neither says anything about the PR's state: `not_found` never means closed or merged, and a
 recovery that shows the PR merged or closed also carries that event. Both need the common
-`head_sha`: the row's stored digest head (a recovery prefers the new digest's head); a row with no
-valid head (never baselined) gets no event, and the caller logs the drop (`invalid_head_sha`).
+`head_sha`, the row's stored digest head and nothing else (so a `recovered` always pairs with an
+`unreachable` that had the same head); a row with no valid stored head (never baselined) gets no
+event, and the caller logs the drop (`invalid_head_sha`).
 """
 
 from __future__ import annotations
@@ -40,8 +41,6 @@ def health_event(
     kind: str,
     code: str | None,
     failures: int,
-    *,
-    head_sha: object = None,
 ) -> tuple[DiffEvent | None, Drop | None]:
     """The `unreachable` or `recovered` event of `pr_id` (read inside the writing transaction),
     or the drop when no valid head is known. `(None, None)` when the row is gone."""
@@ -49,7 +48,7 @@ def health_event(
     if row is None:
         return None, None
     stored: dict[str, Any] = digest_from_json(row[2]) or {}
-    head = _valid(head_sha) or _valid(stored.get("head_sha"))
+    head = _valid(stored.get("head_sha"))
     if head is None:
         return None, Drop(kind, DROP_REASON)
     payload = {

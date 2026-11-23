@@ -134,7 +134,7 @@ def test_a_recovery_carries_the_changes_of_the_same_snapshot_after_it(
     fake.update(snap["pr"], updated_at=LATER, head={"sha": "c" * 40})
     poll(capsys, "--pr", snap["pr"])
     assert events(store) == ["unreachable", "recovered", "pushed"]
-    assert stored(store)[1]["head_sha"] == "c" * 40
+    assert stored(store)[1]["head_sha"] == snap["head"]["sha"]  # the stored head, as unreachable
 
 
 def test_a_recovery_that_shows_the_pr_closed_is_recovered_then_closed_never_inferred(
@@ -237,3 +237,48 @@ def test_the_stored_events_validate_and_list_by_type(
     assert all(schema_errors("event", e) == [] for e in got)
     code, out, _ = run(capsys, "events", "--since", f"v1.{store.store_id}.0")
     assert "not_found" in out and store_path(store)
+
+
+def test_a_recovery_of_a_row_that_never_had_a_digest_is_dropped_not_orphaned(
+    fake: FakeForgectl, store: Store, state_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    snap = pr(10)
+    fake.add(snap)
+    code, out, _ = run(
+        capsys, "--json", "watch", "add", snap["pr"], "--owner", "human:a", "--no-baseline"
+    )
+    assert code == 0, out
+    for _ in range(2):
+        fail_once(fake, snap["pr"])
+        poll(capsys, "--pr", snap["pr"])
+    assert col(store, snap["pr_id"], "status") == "unreachable" and events(store) == []
+    poll(capsys, "--pr", snap["pr"])
+    assert "recovered" not in events(store)
+    assert col(store, snap["pr_id"], "status") == "active"
+    reasons = [r["reasons"] for r in log_records(state_dir) if r["event"] == "events_dropped"]
+    assert ["invalid_head_sha"] in reasons
+
+
+def test_an_event_error_at_the_crossing_keeps_the_count_and_the_status(
+    fake: FakeForgectl,
+    store: Store,
+    state_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pr_watch.store import EventError
+
+    snap = pr(11)
+    fake.add(snap)
+    watch_pr(capsys, snap["pr"])
+
+    def boom(self: Store, *a: Any, **kw: Any) -> Any:
+        raise EventError("forced")
+
+    monkeypatch.setattr(Store, "append_event", boom)
+    for _ in range(2):
+        fail_once(fake, snap["pr"])
+        poll(capsys, "--pr", snap["pr"])
+    assert col(store, snap["pr_id"], "status") == "unreachable"
+    assert col(store, snap["pr_id"], "failure_count") == 2 and events(store) == []
+    assert any(r["event"] == "events_dropped" for r in log_records(state_dir))

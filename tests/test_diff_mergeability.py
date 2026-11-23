@@ -38,7 +38,7 @@ def test_the_conflict_going_away_fires_again() -> None:
     assert event.payload["blocked_by"] == [] and event.payload["mergeable"] is True
 
 
-@pytest.mark.parametrize("code", ["reviews_required", "changes_requested", "branch_behind"])
+@pytest.mark.parametrize("code", ["reviews_required", "branch_behind"])
 def test_the_non_ci_blockers_fire(code: str) -> None:
     (event,) = run(snap(True), snap(True, code))
     assert event.payload["blocked_by"] == codes(code)
@@ -258,3 +258,92 @@ def test_the_event_validates_against_the_schema() -> None:
     stored["mergeable"] = None
     stored["from_mergeable"] = None
     assert schema_errors("event", stored) == []
+
+
+# --- review round 1 ------------------------------------------------------------------------
+
+
+def test_changes_requested_is_no_readiness_code_either_way() -> None:
+    # the `changes_requested` review event reports it; mergeability would duplicate it
+    assert run(snap(True), snap(True, "changes_requested")) == []
+    assert run(snap(True, "changes_requested"), snap(True)) == []
+    d = build_digest(snap(True, "changes_requested", "conflicts"))
+    assert d["readiness"]["blocked_by"] == codes("conflicts")
+
+
+def test_reviews_required_clearing_fires_mergeability() -> None:
+    (event,) = run(snap(True, "reviews_required"), snap(True))
+    assert event.payload["from_blocked_by"] == codes("reviews_required")
+    assert event.payload["blocked_by"] == []
+
+
+def test_a_real_flap_fires_once_per_change() -> None:
+    a, b = snap(False, "conflicts"), snap(True)
+    d = build_digest(a)
+    got = []
+    for s in (b, a, b):
+        new = build_digest(s, d)
+        got += diff(d, new, s)
+        d = new
+    assert types(got) == ["mergeability"] * 3
+
+
+def test_other_blockers_compare_on_their_detail() -> None:
+    a = new_pr(mergeable=False, blocked_by=[{"code": "other", "detail": "BLOCKED"}])
+    b = new_pr(mergeable=False, blocked_by=[{"code": "other", "detail": "BEHIND"}])
+    assert types(run(a, b)) == ["mergeability"]
+
+
+def test_a_draft_turning_ready_through_a_computing_spell_fires_only_ready() -> None:
+    draft = snap(False, "draft", draft=True)
+    unknown = snap(None, "mergeability_unknown", draft=False)
+    ready = snap(True, draft=False)
+    d0 = build_digest(draft)
+    assert d0["readiness"]["mergeable"] is None  # a draft's mergeable is no reading
+    d1 = build_digest(unknown, d0)
+    assert types(diff(d0, d1, unknown)) == ["ready"]
+    d2 = build_digest(ready, d1)
+    assert diff(d1, d2, ready) == []
+
+
+def test_a_mergeable_flip_lagging_a_check_change_is_silent() -> None:
+    old = snap(True, "checks_failing")
+    assert run(old, snap(False, "checks_failing")) == []
+    assert run(snap(False, "checks_pending"), snap(True, "checks_pending")) == []
+    assert run(snap(True, "draft", draft=True), snap(False, "draft", draft=True)) == []
+    # the new snapshot alone holding a check blocker is enough too
+    assert run(snap(True), snap(False, "checks_pending")) == []
+
+
+def test_the_payload_carries_at_most_twenty_entries_a_side() -> None:
+    many = [{"code": "other", "detail": f"s{n:03d}"} for n in range(60)]
+    old = new_pr(mergeable=False, blocked_by=many)
+    new = new_pr(mergeable=False, blocked_by=many[:50] + [{"code": "other", "detail": "zzz"}])
+    (event,) = run(old, new)
+    assert len(event.payload["from_blocked_by"]) == len(event.payload["blocked_by"]) == 20
+    assert event.payload["blocked_by"][0] == many[0]
+
+
+def test_a_reopen_then_a_computing_spell_then_a_change_is_silent() -> None:
+    closed = snap(True, state="closed")
+    d0 = build_digest(snap(True))
+    d0 = build_digest(closed, d0)
+    unknown = snap(None, "mergeability_unknown", state="open")
+    d1 = build_digest(unknown, d0)
+    assert d1["readiness"] == {"blocked_by": None, "mergeable": None}
+    conflict = snap(False, "conflicts")
+    d2 = build_digest(conflict, d1)
+    assert diff(d1, d2, conflict) == []
+
+
+def test_the_schema_caps_the_payload_lists_at_twenty() -> None:
+    (event,) = run(snap(True), snap(False, "conflicts"))
+    stored = {
+        "id": "ev-aaaaaaaaaaaa", "seq": 1, "type": "mergeability", "pr": event.pr,
+        "pr_id": event.pr_id, "detected_at": "2026-10-03T10:00:00.000000Z", "labels": [],
+        "watches": [], **copy.deepcopy(dict(event.payload)),
+    }  # fmt: skip
+    stored["blocked_by"] = [{"code": "other", "detail": f"d{n:02d}"} for n in range(20)]
+    assert schema_errors("event", stored) == []
+    stored["blocked_by"].append({"code": "other", "detail": "d99"})
+    assert schema_errors("event", stored) != []

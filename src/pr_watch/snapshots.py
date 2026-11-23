@@ -614,9 +614,8 @@ class _Pool:
             recovered = None
             if row is not None and row[0] == "unreachable":
                 recovered, lost = health_event(
-                    conn, entry.task.pr_id, "recovered", row[2], int(row[1]),
-                    head_sha=p.plan.digest.get("head_sha"),
-                )  # fmt: skip
+                    conn, entry.task.pr_id, "recovered", row[2], int(row[1])
+                )
                 if lost is not None:
                     rename_drops.append(lost)
             if "pr" in p.fields or "repo" in p.fields:
@@ -755,7 +754,10 @@ class _Pool:
                     labels, ids = event_context(conn, entry.task.pr_id)
                     if len(labels) > MAX_LABELS:
                         capped, labels = (MAX_LABELS, len(labels)), labels[:MAX_LABELS]
-                    stored = self.store.append_event(found.to_new_event(labels, ids))
+                    try:
+                        stored = self.store.append_event(found.to_new_event(labels, ids))
+                    except EventError:  # the count and the status change still commit
+                        lost = Drop("unreachable", "invalid_payload")
         pr = start.state.pr
         if effect.record and table.should_record(row[2], code, count, start.unreachable_after):
             self._log("snapshot_failed", "warn", pr=pr, pr_id=entry.task.pr_id, code=code,

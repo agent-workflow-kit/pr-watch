@@ -336,9 +336,10 @@ def _blocked_by(value: object) -> object:
 
 
 # Blocker codes `mergeability` leaves to other events or to "still computing": draft is `ready`
-# and `converted_to_draft`, the check codes are `ci`, the unknown code is no reading at all.
+# and `converted_to_draft`, the check codes are `ci`, `changes_requested` is its own review event,
+# the unknown code is no reading at all.
 NON_READINESS_CODES: Final = frozenset(
-    {"draft", "checks_pending", "checks_failing", "mergeability_unknown"}
+    {"draft", "checks_pending", "checks_failing", "changes_requested", "mergeability_unknown"}
 )
 
 
@@ -376,16 +377,20 @@ def previous_readiness(previous: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 def _readiness(
-    snapshot: Mapping[str, Any], state: object, old: Mapping[str, Any]
+    snapshot: Mapping[str, Any], state: object, old: Mapping[str, Any], *, rebaseline: bool = False
 ) -> dict[str, Any] | None:
     """The last known readiness reading (the `mergeability` event's input): the blockers other
     than draft, checks and unknown, and a boolean `mergeable`. A reading the snapshot does not
     give (unknown mergeability, an unreadable list, a null `mergeable`, a PR that is not open)
     keeps the previous one, so a change across a computing spell is still seen. `blocked_by` is
-    null until a first known reading."""
+    null until a first known reading. A reopen (the stored state is not `open`) and a rebaseline
+    start over: what changed while the PR was closed is not reported. A draft's `mergeable` is no
+    reading (GitLab says false for every draft), so it is only taken while the PR is not a draft."""
     before = previous_readiness(old)
     if state != "open":
         return before
+    if rebaseline or old.get("state") != "open":
+        before = {"blocked_by": None, "mergeable": None} if before is not None else None
     blocked = before["blocked_by"] if before else None
     mergeable = before["mergeable"] if before else None
     fresh = _blocked_by(snapshot.get("blocked_by"))
@@ -393,7 +398,7 @@ def _readiness(
         codes = [_dict(i).get("code") for i in fresh]
         if "mergeability_unknown" not in codes:
             blocked = [i for i in fresh if _dict(i).get("code") not in NON_READINESS_CODES]
-    if isinstance(snapshot.get("mergeable"), bool):
+    if isinstance(snapshot.get("mergeable"), bool) and snapshot.get("draft") is not True:
         mergeable = snapshot["mergeable"]
     return {"blocked_by": blocked, "mergeable": mergeable}
 
@@ -651,7 +656,7 @@ def build_digest(
         ),
     }
 
-    digest["readiness"] = _readiness(snapshot, digest["state"], old)
+    digest["readiness"] = _readiness(snapshot, digest["state"], old, rebaseline=rebaseline)
 
     if "reviews" in incomplete:
         digest["reviewers"] = _previous_reviewers(old)
