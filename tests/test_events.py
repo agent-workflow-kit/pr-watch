@@ -63,6 +63,13 @@ def add_event(
         payload = {"from_sha": "b" * 40, "to_sha": "a" * 40, "forced": None, **payload}
     if type_ in ("ready", "converted_to_draft"):
         payload = {"from_blocked_by": [], "blocked_by": [], **payload}
+    if type_ == "renamed":
+        payload = {
+            "from_pr": "example.net/o/old#1", "to_pr": "example.net/o/r#1",
+            "from_repo": "example.net/o/old", "to_repo": "example.net/o/r", **payload,
+        }  # fmt: skip
+    if type_ == "retargeted":
+        payload = {"from": "main", "to": "dev", **payload}
     if type_ == "approval_withdrawn":
         payload = {
             "reviewer": {"id": "1", "login": "a", "is_bot": False}, "to": "dismissed",
@@ -394,6 +401,21 @@ def test_type_filter_accepts_approval_withdrawn(
     assert code == 0 and [json.loads(x)["type"] for x in out.splitlines()] == ["approval_withdrawn"]
 
 
+def test_type_filter_accepts_renamed_and_retargeted(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    add_event(store, "renamed")  # 1
+    add_event(store, "retargeted")  # 2
+    add_event(store, "pushed")  # 3
+    since = ("--since", cur(store, 0))
+    assert seqs(events(capsys, *since, "--type", "renamed")) == [1]
+    assert seqs(events(capsys, *since, "--type", "retargeted")) == [2]
+    assert seqs(events(capsys, *since, "--type", "renamed", "--type", "retargeted")) == [1, 2]
+    code, out, _ = run(capsys, "events", *since)
+    lines = out.splitlines()[1:]  # the first line is the count
+    assert code == 0 and "from example.net/o/old#1" in lines[0] and "main -> dev" in lines[1]
+
+
 def test_label_filter_is_and(store: Store, capsys: pytest.CaptureFixture[str]) -> None:
     populate(store)
     since = ("--since", cur(store, 0))
@@ -533,9 +555,14 @@ def test_events_json_golden(store: Store, capsys: pytest.CaptureFixture[str]) ->
 def test_every_event_type_validates(store: Store, capsys: pytest.CaptureFixture[str]) -> None:
     author = {"id": "u", "login": "l", "is_bot": None}
     extras: dict[str, dict[str, Any]] = {
+        "renamed": {
+            "from_pr": "example.net/o/old#1", "to_pr": "example.net/o/r#1",
+            "from_repo": "example.net/o/old", "to_repo": "example.net/o/r",
+        },
         "opened": {},
         "reopened": {},
         "pushed": {"from_sha": "b" * 40, "to_sha": "a" * 40, "forced": True},
+        "retargeted": {"from": "main", "to": "release/1.x"},
         "comment": {"comment_id": "gh:ic:1", "thread_id": None, "author": author},
         "review_comment": {
             "comment_id": "gh:rc:1", "thread_id": "gh:rt:1", "author": author, "path": "a/b.py",

@@ -30,7 +30,9 @@ Judgment calls where the interface is silent (kept conservative):
 - A snapshot over the output cap (`too_large`) ends `watch add` with exit 12 and records nothing;
   the `show` fallback of the poll is for PRs already stored. `--no-baseline` still works.
 - A snapshot fetched for a stored row (an ambiguous name, a poll that won the race) refreshes the
-  row's `pr` and `repo` (a rename) even when its baseline is discarded; `rev` is not bumped.
+  row's `pr` and `repo` (a rename) even when its baseline is discarded; `rev` is not bumped. When
+  the row has a digest the rename is also one `renamed` event, stored here (and counted in
+  `events_emitted`) unless the poll or a listing stored the new name first.
 - A snapshot whose `pr_id` is not a valid id, or whose `updated_at` is not a string, is a
   `contract` failure.
 - A baseline discarded because a listing already saw a newer state of a closed PR
@@ -41,7 +43,7 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -52,8 +54,9 @@ from .commit import commit_in_transaction
 from .failures import decide, decide_tool, to_cli_error
 from .forgectl_client import ForgectlClient, ToolError
 from .refs import PrRef, RefError, duration_ms, watch_key
+from .renames import rename_event
 from .rows import pr_row
-from .store import PR_ID_RE, PR_RE, REPO_RE, NewEvent, Store
+from .store import MAX_LABELS, PR_ID_RE, PR_RE, REPO_RE, NewEvent, Store
 
 MAX_ATTEMPTS = 3
 
@@ -67,6 +70,8 @@ class _Outcome:
     events: int
     cursor: str
     pr: dict[str, Any] | None
+    # log records to write after the transaction: (kind, pr_id, fields)
+    records: list[tuple[str, str, dict[str, Any]]] = field(default_factory=list)
 
 
 class _NeedSnapshot(Exception):
@@ -290,22 +295,39 @@ def _write_pr(
             )
             baselined, emitted = result.committed, len(result.events)
         renamed = False
+        records: list[tuple[str, str, dict[str, Any]]] = []
         if snap is not None and not baselined and not created_row:
             planned = planned_names.get(pr_id)
             if planned is not None and (snap["pr"], snap["repo"]) != (row[0], row[1]):
                 # Only over the name the plan saw: a newer rename committed since is kept.
+                head = snap.get("head")
+                rename, drop = rename_event(
+                    conn, pr_id, snap["pr"], snap["repo"],
+                    head_sha=head.get("sha") if isinstance(head, dict) else None,
+                )  # fmt: skip
                 cur = conn.execute(
                     "UPDATE prs SET pr = ?, repo = ? WHERE pr_id = ? AND pr = ? AND repo = ?",
                     (snap["pr"], snap["repo"], pr_id, planned[0], planned[1]),
                 )
                 renamed = cur.rowcount > 0
+                if renamed and drop is not None:
+                    records.append(("events_dropped", pr_id, {"reasons": [drop.reason]}))
+                if renamed and rename is not None:  # a row that was seen reports its rename once
+                    labels_now, ids = watches.event_context(conn, pr_id)
+                    if len(labels_now) > MAX_LABELS:
+                        records.append(
+                            ("labels_capped", pr_id, {"kept": MAX_LABELS, "total": len(labels_now)})
+                        )
+                        labels_now = labels_now[:MAX_LABELS]
+                    store.append_event(rename.to_new_event(labels_now, ids))
+                    emitted += 1
         view = watches.watch_view(conn, watch_id)
         prrow = pr_row(conn, pr_id, now=now, pending_max_age_ms=pending_ms)
     assert view is not None
     changed = (
         created_row or replaced or created or source or owner or labels or baselined or renamed
     )
-    return _Outcome(view, created, changed, baselined, emitted, cursor, prrow)
+    return _Outcome(view, created, changed, baselined, emitted, cursor, prrow, records)
 
 
 def _add_pr(ctx: Context, args: argparse.Namespace) -> _Outcome:
@@ -355,6 +377,12 @@ def _human(args: argparse.Namespace, out: _Outcome) -> str:
 
 def watch_add(ctx: Context, args: argparse.Namespace) -> int:
     out = _add_query(ctx, args) if args.pr is None else _add_pr(ctx, args)
+    for kind, pr_id, extra in out.records:
+        name = str(out.pr["pr"]) if out.pr is not None else pr_id
+        if kind == "events_dropped":
+            ctx.log.write("events_dropped", "warn", pr=name, pr_id=pr_id, count=1, **extra)
+        else:
+            ctx.log.write(kind, "warn", pr=name, pr_id=pr_id, **extra)
     ctx.emit(
         {
             "watch": out.watch,

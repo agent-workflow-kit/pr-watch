@@ -13,10 +13,13 @@ import pytest
 
 from pr_watch import enumeration as en
 from pr_watch.config import Config
+from pr_watch.digest import build_digest
 from pr_watch.forgectl_client import ForgectlClient, resolve_executable
 from pr_watch.state_dir import open_state_dir
 from pr_watch.store import Store, format_ts, open_store
+from pr_watch.watches import new_watch_id
 from tests.forgectl_support import FakeForgectl, new_pr
+from tests.test_snapshots import Rec
 
 NOW = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 WATCH = "w-aaaaaaaaaa"
@@ -937,6 +940,81 @@ def test_a_renamed_repo_is_refreshed_by_its_old_scope_listing(
     assert col(store, s, "listed_updated_at") == "2026-10-02T11:00:00.000000Z"
     assert scope(store) == [(REPO, "2026-10-02T11:00:00.000000Z")]
     assert s["pr_id"] in res.candidates and res.new_members == []
+
+
+def seen_row(store: Store, snap: dict[str, Any], **digest: Any) -> None:
+    """A per-PR row whose digest says it was snapshotted."""
+    text = json.dumps({**build_digest(snap), **digest})
+    c = store.conn
+    c.execute(
+        "INSERT INTO prs (pr_id, pr, repo, host, digest, snap_updated_at) VALUES (?,?,?,?,?,?)",
+        (snap["pr_id"], snap["pr"], snap["repo"], HOST, text, "2026-10-02T10:00:00.000000Z"),
+    )
+    wid = new_watch_id()  # an event reads its watch ids, which must be well formed
+    c.execute("INSERT INTO watches VALUES (?, 'pr', ?, '2026-01-01T00:00:00.000000Z')",
+              (wid, snap["pr_id"]))  # fmt: skip
+    c.execute("INSERT INTO sources (pr_id, watch_id) VALUES (?, ?)", (snap["pr_id"], wid))
+    c.commit()
+
+
+def renamed_listing(fake: FakeForgectl, s: dict[str, Any], new: str) -> None:
+    fake.add(
+        s, listing={"repo": new, "pr": f"{new}#1", "updated_at": "2026-10-02T11:00:00.000000Z"}
+    )
+
+
+def test_a_rename_of_a_snapshotted_row_is_one_renamed_event_and_a_repeat_is_none(
+    store: Store, fake: FakeForgectl
+) -> None:
+    s = pr(1)
+    seen_row(store, s)
+    new = "github.com/example-org/gadgets"
+    renamed_listing(fake, s, new)
+    res = run(store)
+    (event,) = res.events
+    assert event.type == "renamed" and event.pr == f"{new}#1" and event.pr_id == s["pr_id"]
+    assert event.payload["from_pr"] == s["pr"] and event.payload["to_repo"] == new
+    assert event.payload["head_sha"] == s["head"]["sha"] and event.payload["watches"]
+    assert [r[0] for r in store.conn.execute("SELECT type FROM events")] == ["renamed"]
+    assert run(store).events == []  # the stored name is the listed one now
+
+
+def test_a_row_without_a_digest_or_a_merged_one_is_refreshed_without_an_event(
+    store: Store, fake: FakeForgectl
+) -> None:
+    new = "github.com/example-org/gadgets"
+    fresh, done = pr(1), pr(2)
+    add_pr_watch(store, fresh, digest=None, snap_updated_at=None)
+    seen_row(store, done, state="merged")
+    renamed_listing(fake, fresh, new)
+    fake.add(done, listing={"repo": new, "pr": f"{new}#2", "updated_at": "2026-10-02T11:00:00Z"})
+    res = run(store)
+    assert res.events == [] and col(store, fresh, "pr") == f"{new}#1"
+    assert col(store, done, "pr") == f"{new}#2"
+
+
+def test_a_case_only_change_in_a_listing_is_refreshed_without_an_event(
+    store: Store, fake: FakeForgectl
+) -> None:
+    s = pr(1)
+    seen_row(store, s)
+    renamed_listing(fake, s, "github.com/Example-Org/Widgets")
+    res = run(store)
+    assert res.events == [] and col(store, s, "pr") == "github.com/Example-Org/Widgets#1"
+
+
+def test_a_rename_without_a_valid_head_is_not_reported_and_is_logged(
+    store: Store, fake: FakeForgectl
+) -> None:
+    s = pr(1)
+    seen_row(store, s, head_sha=None)
+    new = "github.com/example-org/gadgets"
+    renamed_listing(fake, s, new)
+    log = Rec()
+    res = run(store, log=log)
+    assert res.events == [] and col(store, s, "pr") == f"{new}#1"
+    (rec,) = log.of("events_dropped")
+    assert rec["reasons"] == ["invalid_head_sha"] and rec["pr_id"] == s["pr_id"]
 
 
 @pytest.mark.parametrize("pr_id", ["--evil", ".x", "x" * 129, "a..b", "a b", ""])

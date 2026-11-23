@@ -29,9 +29,11 @@
     "incomplete": 0
   },
   "events": {
+    "renamed": 0,
     "opened": 0,
     "reopened": 0,
     "pushed": 0,
+    "retargeted": 0,
     "comment": 0,
     "review_comment": 0,
     "review": 0,

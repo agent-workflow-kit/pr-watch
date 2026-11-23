@@ -1,0 +1,26 @@
+{
+  "detected_at": "2026-10-03T00:00:00.000000Z",
+  "event_id": "ev-aaaaaaaaaaab",
+  "from_pr": "example.net/o/old#1",
+  "from_repo": "example.net/o/old",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "hook": "on-renamed",
+  "id": "ev-aaaaaaaaaaab",
+  "labels": [
+    "k=v"
+  ],
+  "object_id": "P1",
+  "object_type": "pr",
+  "occurred_at": null,
+  "pr": "example.net/o/r#1",
+  "pr_id": "P1",
+  "repo": "example.net/o/r",
+  "seq": 1,
+  "to_pr": "example.net/o/r#1",
+  "to_repo": "example.net/o/r",
+  "tool": "pr-watch",
+  "type": "renamed",
+  "watches": [
+    "w-aaaaaaaaaa"
+  ]
+}

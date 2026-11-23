@@ -700,6 +700,27 @@ def test_the_new_event_hook_payload_goldens(kind: str) -> None:
     check_golden(f"on-{kind}", payload)
 
 
+def test_the_on_renamed_payload_golden() -> None:
+    event = ev(1, "renamed")
+    event.payload.update(
+        from_pr="example.net/o/old#1", to_pr="example.net/o/r#1",
+        from_repo="example.net/o/old", to_repo="example.net/o/r",
+    )  # fmt: skip
+    payload = hooks.event_payload(event)
+    assert_valid("hooks/on-renamed", payload)
+    assert payload["hook"] == "on-renamed" and payload["type"] == "renamed"
+    check_golden("on-renamed", payload)
+
+
+def test_the_on_retargeted_payload_golden() -> None:
+    event = ev(1, "retargeted")
+    event.payload.update(**{"from": "main", "to": "release/1.x"})
+    payload = hooks.event_payload(event)
+    assert_valid("hooks/on-retargeted", payload)
+    assert payload["hook"] == "on-retargeted" and payload["type"] == "retargeted"
+    check_golden("on-retargeted", payload)
+
+
 def test_the_on_approval_withdrawn_payload_golden() -> None:
     event = ev(1, "approval_withdrawn")
     event.payload.update(

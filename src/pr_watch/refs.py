@@ -116,9 +116,11 @@ def check_hook_cmd(cmd: str) -> bool:
 
 
 EVENT_TYPES: Final = (
+    "renamed",
     "opened",
     "reopened",
     "pushed",
+    "retargeted",
     "comment",
     "review_comment",
     "review",

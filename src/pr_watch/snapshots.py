@@ -84,13 +84,14 @@ from .baseline import (
 )
 from .commit import CommitResult, DiscardReason, commit_snapshot
 from .config import Config
-from .diff import ForcedCheck, forced_from_compare
+from .diff import Drop, ForcedCheck, forced_from_compare
 from .digest import digest_from_json
 from .enumeration import EnumerationResult, Failure, note_rate, parse_stamp, record_failure
 from .forgectl_client import ForgectlClient, Outcome, ToolError
 from .leases import Lease, Leases
 from .log import Log
 from .refs import duration_ms, parse_pr
+from .renames import rename_event
 from .selection import Selection, Task, still_due
 from .store import MAX_LABELS, EventError, NewEvent, Store, StoredEvent, StoreError, format_ts
 from .watches import event_context
@@ -592,20 +593,44 @@ class _Pool:
 
     def _commit(self, host: _Host, entry: _Entry, p: _Prepared) -> None:
         capped: tuple[int, int] | None = None  # (kept, total)
+        rename_drops: list[Drop] = []
+        fields = dict(p.fields)  # `prepare` may drop the name columns (stale plan)
 
         def prepare(conn: sqlite3.Connection) -> Sequence[NewEvent]:
             nonlocal capped
             # read before the membership rule below removes a source (the last one included)
             labels, ids = event_context(conn, entry.task.pr_id)
+            # `renamed` is read against the name the row holds now, inside this transaction, so a
+            # rename a listing (or another poll) stored meanwhile is not reported twice; it
+            # comes first in the snapshot's events. The name is applied only while the row still
+            # has the one the plan saw: a snapshot taken under an older name must neither undo a
+            # newer rename nor report it backwards.
+            rename = drop = None
+            if "pr" in p.fields or "repo" in p.fields:
+                now_name = conn.execute(
+                    "SELECT pr, repo FROM prs WHERE pr_id = ?", (entry.task.pr_id,)
+                ).fetchone()
+                planned = (entry.start.state.pr, entry.start.state.repo)
+                if now_name is not None and (now_name[0], now_name[1]) != planned:
+                    fields.pop("pr", None)
+                    fields.pop("repo", None)
+                else:
+                    rename, drop = rename_event(
+                        conn, entry.task.pr_id, p.fields.get("pr"), p.fields.get("repo"),
+                        head_sha=p.plan.digest.get("head_sha"),
+                    )  # fmt: skip
+            found = ([rename] if rename is not None else []) + list(p.plan.events)
+            if drop is not None:
+                rename_drops.append(drop)
             if p.plan.digest.get("state") == "open":
                 conn.execute(
                     "DELETE FROM sources WHERE pr_id = ? AND left_count >= 2 AND watch_id IN "
                     "(SELECT id FROM watches WHERE kind = 'query')",
                     (entry.task.pr_id,),
                 )
-            if p.plan.events and len(labels) > MAX_LABELS:
+            if found and len(labels) > MAX_LABELS:
                 capped, labels = (MAX_LABELS, len(labels)), labels[:MAX_LABELS]
-            return [e.to_new_event(labels, ids) for e in p.plan.events]
+            return [e.to_new_event(labels, ids) for e in found]
 
         try:
             result = commit_snapshot(
@@ -613,18 +638,18 @@ class _Pool:
                 pr_id=entry.task.pr_id,
                 expected_rev=entry.start.rev,
                 snapshot_pr_id=p.snapshot_pr_id,
-                fields=p.fields,
+                fields=fields,
                 prepare=prepare,
                 snapshot_updated_at=p.updated_at,
             )
         except EventError:
             self._fail(host, entry, table.decision_for("contract", "pr"))
             return
-        pr = str(p.fields.get("pr", entry.start.state.pr))
+        pr = str(fields.get("pr", entry.start.state.pr))
         if not result.committed:
             self._discarded(host, entry, result)
             return
-        self._committed(host, entry, p, result, pr, capped)
+        self._committed(host, entry, p, result, pr, capped, tuple(rename_drops))
 
     def _committed(
         self,
@@ -634,6 +659,7 @@ class _Pool:
         result: CommitResult,
         pr: str,
         capped: tuple[int, int] | None,
+        extra_drops: tuple[Drop, ...] = (),
     ) -> None:
         run = self.out.host(host.name)
         run.snapshots += 1
@@ -646,7 +672,7 @@ class _Pool:
         for part in p.plan.persistent:
             self._log("part_incomplete", pr_id=pr_id, pr=pr, part=part,
                       snapshots=p.plan.incomplete[part])  # fmt: skip
-        drops = p.plan.events.dropped
+        drops = (*p.plan.events.dropped, *extra_drops)
         if drops:
             self._log("events_dropped", "warn", pr=pr, pr_id=pr_id, count=len(drops),
                       reasons=sorted({d.reason for d in drops}))  # fmt: skip

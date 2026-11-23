@@ -184,10 +184,38 @@ def test_digest_has_exactly_the_documented_keys() -> None:
     assert set(d) == {
         "head_sha", "state", "draft", "mergeable", "blocked_by", "ci", "review_decision",
         "approvals_at_head", "reviewers", "seen", "pushed_at", "merged_head_sha",
-        "merge_commit_sha", "baselined", "review_requests",
+        "merge_commit_sha", "baselined", "review_requests", "base_ref",
     }  # fmt: skip
     assert set(d["seen"]) == {"comments", "reviews"}
     assert set(d["ci"]) == {"state", "head_sha", "hold", "hold_to", "checks", "checks_more"}
+
+
+def test_base_ref_is_the_snapshots_one_line_base_branch() -> None:
+    assert build_digest(gh(base={"ref": "release/1.x"}))["base_ref"] == "release/1.x"
+    assert build_digest(gh(base={"ref": "a\nb"}))["base_ref"] == "a<U+000A>b"
+    long = build_digest(gh(base={"ref": "x" * 1000}))["base_ref"]
+    assert len(long) == 256 and long.endswith("...")
+
+
+@pytest.mark.parametrize("bad", [None, "", 7, ["main"], {"ref": "main"}, True])
+def test_an_unreadable_base_ref_keeps_the_previous_one_else_is_null(bad: Any) -> None:
+    previous = build_digest(gh(base={"ref": "main"}))
+    assert build_digest(gh(base={"ref": bad}), previous)["base_ref"] == "main"
+    assert build_digest(gh(base={"ref": bad}))["base_ref"] is None
+
+
+def test_a_snapshot_without_a_base_object_keeps_the_previous_base_ref() -> None:
+    previous = build_digest(gh())
+    snap = gh()
+    del snap["base"]
+    assert build_digest(snap, previous)["base_ref"] == previous["base_ref"]
+    assert build_digest(snap)["base_ref"] is None
+
+
+def test_a_stored_digest_without_base_ref_is_filled_from_the_snapshot() -> None:
+    previous = build_digest(gh())
+    del previous["base_ref"]
+    assert build_digest(gh(base={"ref": "dev"}), previous)["base_ref"] == "dev"
 
 
 def test_no_host_text_beyond_one_line_fields_is_kept() -> None:

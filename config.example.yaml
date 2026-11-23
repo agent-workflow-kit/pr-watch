@@ -44,9 +44,11 @@ hooks:
   concurrency: 4              # hook workers, 1 to 32
   env_allow: []               # extra environment names hooks may see; hooks get a clean environment otherwise
   # Each hook name takes a list of {cmd, timeout (seconds, 1 to 600), async}; uncomment to use:
+  # on-renamed: [{cmd: "my-script", timeout: 30, async: true}]
   # on-opened: [{cmd: "my-script", timeout: 30, async: true}]
   # on-reopened: [{cmd: "my-script", timeout: 30, async: true}]
   # on-pushed: [{cmd: "my-script", timeout: 30, async: true}]
+  # on-retargeted: [{cmd: "my-script", timeout: 30, async: true}]
   # on-comment: [{cmd: "my-script", timeout: 30, async: true}]
   # on-review_comment: [{cmd: "my-script", timeout: 30, async: true}]
   # on-review: [{cmd: "my-script", timeout: 30, async: true}]

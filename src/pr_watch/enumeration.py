@@ -65,11 +65,13 @@ from typing import Any, Final
 
 from . import failures as table
 from .config import Config
+from .diff import Drop
 from .forgectl_client import ForgectlClient, Outcome
 from .log import Log
 from .refs import RefError, duration_ms, parse_host
-from .store import PR_ID_RE, PR_RE, REPO_RE, Store, format_ts
-from .watches import QUERY_KIND, watch_exists
+from .renames import rename_event
+from .store import MAX_LABELS, PR_ID_RE, PR_RE, REPO_RE, Store, StoredEvent, format_ts
+from .watches import QUERY_KIND, event_context, watch_exists
 
 LISTING_LIMIT: Final = 1000
 MAX_REF_CHARS: Final = 256
@@ -161,6 +163,7 @@ class EnumerationResult:
     new_members: list[str] = field(default_factory=list)
     reactivated: list[str] = field(default_factory=list)
     candidates: set[str] = field(default_factory=set)  # listed PRs that have a stored row
+    events: list[StoredEvent] = field(default_factory=list)  # `renamed`, committed by listings
     scopes_listed: list[str] = field(default_factory=list)  # repos listed successfully
     interrupted: bool = False
     stop_poll: bool = False  # forgectl's own config_invalid on a host call: the poll ends (exit 12)
@@ -456,14 +459,27 @@ def _from_whoami(
 # --- applying a listing (step 3, State transaction 1) ---
 
 
-def _upsert_listed(conn: sqlite3.Connection, item: Listed) -> bool:
+def _upsert_listed(store: Store, conn: sqlite3.Connection, item: Listed, out: _Applied) -> bool:
     """Record the listing on a stored row: `listed_updated_at` (the larger), `pr` and `repo`.
-    Returns whether the row exists."""
+    A changed name of a row that has been snapshotted is also one `renamed` event, stored in the
+    same transaction (the first item of a `pr_id` in a listing decides; a snapshot that follows
+    finds the name already stored). Returns whether the row exists."""
     row = conn.execute(
         "SELECT listed_updated_at FROM prs WHERE pr_id = ? AND host = ?", (item.pr_id, item.host)
     ).fetchone()
     if row is None:
         return False
+    if item.pr_id not in out.named:
+        out.named.add(item.pr_id)
+        rename, drop = rename_event(conn, item.pr_id, item.pr, item.repo)
+        if rename is not None:
+            labels, ids = event_context(conn, item.pr_id)
+            if len(labels) > MAX_LABELS:  # the stored cap: more would fail the whole listing
+                out.capped.append((item.pr, item.pr_id, len(labels)))
+                labels = labels[:MAX_LABELS]
+            out.events.append(store.append_event(rename.to_new_event(labels, ids)))
+        elif drop is not None:
+            out.drops.append((item.pr, item.pr_id, drop))
     conn.execute(
         "UPDATE prs SET listed_updated_at = ?, pr = ?, repo = ? WHERE pr_id = ? AND host = ?",
         (_later(row[0], item.updated_at), item.pr, item.repo, item.pr_id, item.host),
@@ -496,6 +512,10 @@ class _Applied:
     new_members: list[str] = field(default_factory=list)
     reactivated: list[tuple[str, str]] = field(default_factory=list)  # (pr, pr_id)
     candidates: set[str] = field(default_factory=set)
+    events: list[StoredEvent] = field(default_factory=list)  # `renamed`, stored by this listing
+    drops: list[tuple[str, str, Drop]] = field(default_factory=list)  # (pr, pr_id, unreportable)
+    capped: list[tuple[str, str, int]] = field(default_factory=list)  # (pr, pr_id, total)
+    named: set[str] = field(default_factory=set)  # `pr_id`s whose name this listing compared
 
 
 def apply_query_listing(
@@ -522,7 +542,7 @@ def apply_query_listing(
     open_items = [i for i in items if i.state == "open" and inside(i)]
     with store.transaction() as conn:
         for item in items:
-            if _upsert_listed(conn, item) and inside(item):
+            if _upsert_listed(store, conn, item, out) and inside(item):
                 out.candidates.add(item.pr_id)
                 if _reactivate(conn, item):
                     out.reactivated.append((item.pr, item.pr_id))
@@ -611,7 +631,7 @@ def apply_repo_listing(
     out = _Applied()
     with store.transaction() as conn:
         for item in items:
-            if _upsert_listed(conn, item):
+            if _upsert_listed(store, conn, item, out):
                 out.candidates.add(item.pr_id)
                 if _reactivate(conn, item):
                     out.reactivated.append((item.pr, item.pr_id))
@@ -934,7 +954,14 @@ def _absorb(
 ) -> None:
     _newer(items, res.listed)
     res.candidates |= applied.candidates
+    res.events.extend(applied.events)
+    for pr, pr_id, drop in applied.drops:
+        if log is not None:
+            log.write("events_dropped", "warn", pr=pr, pr_id=pr_id, count=1, reasons=[drop.reason])
     res.new_members.extend(p for p in applied.new_members if p not in res.new_members)
+    for pr, pr_id, total in applied.capped:
+        if log is not None:
+            log.write("labels_capped", "warn", pr=pr, pr_id=pr_id, kept=MAX_LABELS, total=total)
     for pr, pr_id in applied.reactivated:
         if pr_id not in res.reactivated:
             res.reactivated.append(pr_id)

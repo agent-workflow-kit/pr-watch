@@ -1234,7 +1234,11 @@ def _prs_store(session: Session) -> dict[str, dict[str, Any]]:
 
 
 def _find(session: Session, pr: str) -> dict[str, Any]:
-    entry = _prs_store(session).get(pr.lower())
+    store = _prs_store(session)
+    entry = store.get(pr.lower())
+    if entry is None:  # a renamed repo's old name still resolves (a host redirect), never listed
+        target = session.scenario.get("redirects", {}).get(pr.lower())
+        entry = store.get(str(target).lower()) if target is not None else None
     if entry is None:
         raise ForgectlError("not_found", "pull request not found")
     return entry

@@ -103,11 +103,20 @@
       "x-untrusted": true,
       "description": "Untrusted one-line check name, already sanitized by forgectl."
     },
+    "branch_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "x-untrusted": true,
+      "description": "Untrusted one-line branch name, sanitized and bounded to 256 characters."
+    },
     "event_type": {
       "enum": [
+        "renamed",
         "opened",
         "reopened",
         "pushed",
+        "retargeted",
         "comment",
         "review_comment",
         "review",

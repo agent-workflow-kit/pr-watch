@@ -260,8 +260,10 @@ def summary(e: dict[str, Any]) -> str:
         return f"by {_login(e.get('author'))} {_s(e.get('review_state'))}"
     if kind in ("approved", "changes_requested", "approval_withdrawn"):
         return f"by {_login(e.get('reviewer'))}"
-    if kind == "ci":
+    if kind in ("ci", "retargeted"):
         return f"{_s(e.get('from'))} -> {_s(e.get('to'))}"
+    if kind == "renamed":
+        return f"from {_s(e.get('from_pr'))}"
     return ""
 
 
