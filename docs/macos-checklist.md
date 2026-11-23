@@ -4,15 +4,18 @@ Run this once on a Mac before 1.0 (issue #32; [plan.md, Stage 6](plan.md#stage-6
 
 **Status: not run on macOS.** Nothing below was observed on a Mac. Every expected result is derived from the code and from [interface.md](interface.md) (the section is named in each step). Items marked **to be observed** state the invariant that must hold and leave the value to the person running the step: record it, do not pre-fill it. Issue #32 stays open until the [run record](#run-record) is filled in and committed.
 
-The sections are independent after [M0](#m0-setup), except that M3 to M5 reuse the watch that M2 adds. Sections M6 and M7 touch your **real crontab** and say so in their first line.
+The sections are independent after [M0](#m0-setup), with these prerequisites: M3 to M5 reuse the watch that M2 adds, and [M3.1](#m31-install-the-stand-in) (the stub `forgectl` and the `mode` file) is a prerequisite of M4, M5, M6.6 and M7. Sections M6 and M7 touch your **real crontab** and say so in their first line.
+
+The acceptance bullet "every `--json` output validated against `schemas/`" has no step of its own: the golden-file tests do that on every platform, and [M1.6](#m16-make-verify-from-a-checkout-optional) runs them on a Mac. The steps here only check that `--json` output is JSON.
 
 ## How to run it
 
 - Use a Mac (Apple silicon or Intel) with the stock `/bin/zsh`, `uv`, `git`, `python3` and `sqlite3` (the last two ship with the Xcode command line tools or macOS), and a forgectl that can read one pull request you can see (set up its host and token first; see [README, Dependencies](../README.md#dependencies)).
-- Every command below runs in one interactive shell (`zsh` or `bash`; the snippets avoid shell-specific syntax). Keep that shell open: it holds the variables. Use an interactive shell so background jobs keep job control (a non-interactive shell starts `&` jobs with SIGINT ignored, which would make M3.5 meaningless).
+- Every command below runs in one interactive shell (`zsh` or `bash`; the snippets avoid shell-specific syntax). Keep that shell open: it holds the variables. Use an interactive shell so background jobs keep job control (a non-interactive shell starts `&` jobs with SIGINT ignored, which would make M3.5 meaningless). In zsh, `#` comments are only comments after `setopt interactivecomments` (M0.2 sets it).
+- A backgrounded poll is always started as `"$PRW/pw" ... & POLLPID=$!`, never as the shell function `pw`: a function run with `&` is a forked subshell, so `$!` would not be the pr-watch process (M0.2).
 - Result values for the record: `PASS` (expected result seen), `FAIL` (differs: copy the output), `OBS` (a **to be observed** item: copy the value and say whether the invariant holds), `SKIP` (with the reason).
 - A `FAIL` or a broken invariant is a finding. Open an issue; do not edit the expected result to match.
-- Signals are only ever sent to PIDs captured with `$!` or read from a file this checklist wrote, and only after `ps` shows the expected command. No step uses `pkill`, `killall` or a pattern.
+- Signals are only ever sent to PIDs captured with `$!` or read from a file this checklist wrote, and only after `ps` shows the expected command: `prw_sig` (M0.2) checks that `$POLLPID` is alive and is a `pr-watch` before every `kill`. No step uses `pkill`, `killall` or a pattern.
 
 ## M0. Setup
 
@@ -38,21 +41,34 @@ Expected: `Darwin arm64` or `Darwin x86_64`, and every tool prints a version. Re
 ### M0.2 Scratch directory and helpers
 
 ```sh
-export PRW=$(mktemp -d /tmp/prw.XXXXXX)
-chmod 700 "$PRW"
-mkdir -p "$PRW/state" "$PRW/out" "$PRW/stub" "$PRW/tools" "$PRW/bin"
-export XDG_STATE_HOME="$PRW/state"
-export UV_TOOL_DIR="$PRW/tools" UV_TOOL_BIN_DIR="$PRW/bin"
-export PR='github.com/OWNER/REPO#123'   # replace: one open PR you can read; it is only read
-echo "$PRW"
+[ -n "$ZSH_VERSION" ] && setopt interactivecomments
+PRW=$(mktemp -d /tmp/prw.XXXXXX)
+case $PRW in /tmp/prw.??????) [ -d "$PRW" ] || PRW= ;; *) PRW= ;; esac
+if [ -n "$PRW" ]; then
+  export PRW
+  chmod 700 "$PRW"
+  mkdir -p "$PRW/state" "$PRW/out" "$PRW/stub" "$PRW/tools" "$PRW/bin"
+  export XDG_STATE_HOME="$PRW/state"
+  export UV_TOOL_DIR="$PRW/tools" UV_TOOL_BIN_DIR="$PRW/bin"
+  export PR='github.com/OWNER/REPO#123'   # replace: one open PR you can read; it is only read
+  echo "scratch: $PRW"
+else
+  echo "STOP: mktemp failed; run nothing below"
+fi
 ```
 
-Expected: `/tmp/prw.` and six characters (`/tmp` is a symlink to `/private/tmp` on macOS; pr-watch accepts a symlinked parent of the state directory). Edit `PR` before going on.
+Expected: `scratch: /tmp/prw.` and six characters (`/tmp` is a symlink to `/private/tmp` on macOS; pr-watch accepts a symlinked parent of the state directory). Anything else prints `STOP`: do not go on, since the variables are unset. Edit `PR` before going on.
 
-Define the helpers once (they only touch `$PRW`, and a process only when `ps` shows `sleep 600`):
+Define the helpers once (they only touch `$PRW`, and a process only when `ps` shows `sleep 600` or, for `prw_sig`, a `pr-watch`). `$PRW/pw` is a script that `exec`s pr-watch, so a backgrounded `"$PRW/pw" ... &` has the pr-watch process itself as `$!` (the `exec` keeps the pid). The function `pw` is for foreground use only. A second `--config` on the command line replaces the first, so `pw --config OTHER ...` works.
 
 ```sh
-pw() { "$PRW/bin/pr-watch" --config "$PRW/config-base.yaml" "$@"; }
+cat > "$PRW/pw" <<EOF
+#!/bin/sh
+exec '$PRW/bin/pr-watch' --config '$PRW/config-base.yaml' "\$@"
+EOF
+chmod 755 "$PRW/pw"
+pw() { "$PRW/pw" "$@"; }
+prw_sig() { if [ -n "$POLLPID" ] && kill -0 "$POLLPID" 2>/dev/null && ps -o command= -p "$POLLPID" | grep -q pr-watch; then kill -"$1" "$POLLPID"; else echo "prw_sig: pid '$POLLPID' is not a live pr-watch; no signal sent"; return 1; fi; }
 prw_wait_file() { i=0; while [ ! -s "$1" ] && [ "$i" -lt 100 ]; do sleep 0.2; i=$((i+1)); done; [ -s "$1" ]; }
 prw_reset() { [ -n "$PRW" ] && rm -f "$PRW"/leader.pids "$PRW"/child.pids "$PRW"/leader.ps; }
 prw_alive() { for p in $(cat "$PRW/child.pids" "$PRW/leader.pids" 2>/dev/null); do kill -0 "$p" 2>/dev/null && echo "ALIVE $(ps -o pid=,pgid=,command= -p "$p")"; done; echo "alive check done"; }
@@ -71,7 +87,7 @@ EOF
 chmod 600 "$PRW/config-base.yaml"
 ```
 
-Expected: no output. (`forgectl.timeout: 5s` makes a lease live about a minute, see M4.)
+Expected: no output. (`forgectl.timeout: 5s` makes a stalled forgectl call end by itself after about 15 seconds, see M3 and M4.)
 
 - [ ] pass  - [ ] fail
 
@@ -99,7 +115,7 @@ UV_TOOL_DIR="$PRW/tools-core" UV_TOOL_BIN_DIR="$PRW/bin-core" uv tool install --
 "$PRW/bin-core/pr-watch" browse; echo "exit=$?"
 ```
 
-Expected: exit 2, an error naming the missing extra with the `pip install 'pr-watch[browse]'` hint ([TUI](interface.md#tui): `details.kind: tui_missing`). Every other command works with this install (M1.3 can be run with it too).
+Expected: exit 2, an error naming the missing extra with the hint `uv tool install 'pr-watch[browse] @ git+https://github.com/agent-workflow-kit/pr-watch'` in the message and in `details.install` ([TUI](interface.md#tui): `details.kind: tui_missing`). Every other command works with this install (M1.3 can be run with it too).
 
 - [ ] pass  - [ ] fail
 
@@ -156,7 +172,7 @@ pw watch add "$PR" --owner checklist --json
 stat -f '%Sp %Lp %Su %N' "$XDG_STATE_HOME/pr-watch" "$XDG_STATE_HOME/pr-watch"/* 
 ```
 
-Expected: the watch is added and baselined. `stat` shows, for the `pr-watch` directory and `hooks-cwd`, `drwx------ 700` and your user; for `state.db`, `log.jsonl` and any `-wal` or `-shm`, `-rw------- 600` and your user. `cron.lock` does not exist yet (M6 creates it). Record the listing ([Files](interface.md#files)).
+Expected: the watch is added and baselined. `stat` shows, for the `pr-watch` directory and `hooks-cwd`, `drwx------ 700` and your user; for `state.db` and any `-wal` or `-shm`, `-rw------- 600` and your user. `log.jsonl` and `cron.lock` do not exist yet: `watch add` writes no log record (the first poll creates `log.jsonl`, see M2.3) and M6 creates `cron.lock`. Record the listing ([Files](interface.md#files)).
 
 - [ ] pass  - [ ] fail
 
@@ -174,18 +190,19 @@ Expected: an empty list, exit 0, and `ls -A` prints nothing (no directory, no `h
 
 ### M2.3 Unsafe modes are refused with exit 12 `state_unsafe`
 
-Each line corrects its change before the next one. They touch only `$PRW/state`.
+Each line corrects its change before the next one. They touch only `$PRW/state`. The first poll (one read-only forgectl call) creates `log.jsonl`.
 
 ```sh
 S="$XDG_STATE_HOME/pr-watch"
+pw poll --pr "$PR" --json >/dev/null; echo "first poll exit=$?"; ls -l "$S/log.jsonl"
 chmod 770 "$S";            pw list --json; echo "dir g+w exit=$?";        chmod 700 "$S"
 chmod 707 "$S/hooks-cwd";  pw list --json; echo "hooks-cwd o+rwx exit=$?"; chmod 700 "$S/hooks-cwd"
 chmod 664 "$S/state.db";   pw list --json; echo "state.db g+w exit=$?";   chmod 600 "$S/state.db"
-chmod 666 "$S/log.jsonl";  pw list --json; echo "log g+w exit=$?";        chmod 600 "$S/log.jsonl"
+chmod 666 "$S/log.jsonl";  pw poll --pr "$PR" --json >/dev/null; echo "log g+w exit=$?"; chmod 600 "$S/log.jsonl"
 pw list --json >/dev/null; echo "restored exit=$?"
 ```
 
-Expected: the first four print an error envelope with `code: state_unsafe` and exit 12, and the last prints exit 0. Group- and world-readable but not writable (`chmod 750`) is also refused if the owner rule says so: **to be observed**, record the result of `chmod 750 "$S"; pw list; chmod 700 "$S"` ([Files](interface.md#files): "group- or world-writable").
+Expected: the first poll exits 0 and `log.jsonl` is `-rw-------`; the first three refusals print an error envelope with `code: state_unsafe` and exit 12; the log line exits 0 (a log that cannot be written never fails a command) and prints a `log.jsonl not written` notice on stderr (**to be observed**: the exact wording); the last line prints exit 0. Group- and world-readable but not writable (`chmod 750`) is also refused if the owner rule says so: **to be observed**, record the result of `chmod 750 "$S"; pw list; chmod 700 "$S"` ([Files](interface.md#files): "group- or world-writable").
 
 - [ ] pass  - [ ] fail
 
@@ -215,18 +232,19 @@ Expected: the first and the third exit 12 `state_unsafe`; the second exits 0; th
 ### M2.5 `HOME` and `XDG_STATE_HOME` fallbacks
 
 ```sh
+PRW_BEFORE=$(ls -A "$HOME/.local/state" 2>/dev/null | grep -c '^pr-watch$'); echo "pr-watch dirs before: $PRW_BEFORE"
 env -i PATH="$PRW/bin:/usr/bin:/bin" "$PRW/bin/pr-watch" --config "$PRW/config-base.yaml" validate --json | head -c 200; echo
 env -i HOME=relative XDG_STATE_HOME=relative PATH="$PRW/bin:/usr/bin:/bin" "$PRW/bin/pr-watch" --config "$PRW/config-base.yaml" validate --json | head -c 200; echo
-ls -A "$HOME/.local/state" 2>/dev/null | grep -c '^pr-watch$'
+echo "pr-watch dirs after: $(ls -A "$HOME/.local/state" 2>/dev/null | grep -c '^pr-watch$')"
 ```
 
-Expected: both validate runs succeed (a relative `HOME` and a relative `XDG_STATE_HOME` are ignored: the account's home directory from the password database is used). The count is the same as before the step (these runs create nothing: `validate` writes nothing). **To be observed**: that `pwd.getpwuid` agrees with `dscl . -read /Users/$(id -un) NFSHomeDirectory`.
+Expected: both validate runs succeed (a relative `HOME` and a relative `XDG_STATE_HOME` are ignored: the account's home directory from the password database is used). The count after equals `PRW_BEFORE` (these runs create nothing: `validate` writes nothing). **To be observed**: that `pwd.getpwuid` agrees with `dscl . -read /Users/$(id -un) NFSHomeDirectory`.
 
 - [ ] pass  - [ ] fail
 
 ## M3. Process groups and signals
 
-pr-watch runs every forgectl call and every hook in its own session and process group, and on shutdown sends SIGTERM to those groups, then SIGKILL after 5 seconds (`SHUTDOWN_KILL_AFTER`), only while the group leader is unreaped ([Signals](interface.md#signals), [gateway.py](../src/pr_watch/gateway.py)). A stand-in `forgectl` makes a call that takes long enough to signal. It passes everything except `snapshot` to the real forgectl.
+pr-watch runs every forgectl call and every hook in its own session and process group, and on shutdown sends SIGTERM to those groups, then SIGKILL after 5 seconds (`SHUTDOWN_KILL_AFTER`), only while the group leader is unreaped ([Signals](interface.md#signals), [gateway.py](../src/pr_watch/gateway.py)). A stand-in `forgectl` makes a call that takes long enough to signal. It passes everything except `snapshot` to the real forgectl. A stalled call ends by itself after `forgectl.timeout` plus the 10 s slack (15 s with the base config), so paste each step's commands without a pause, and M3.2 and M3.3 together.
 
 ### M3.1 Install the stand-in
 
@@ -263,21 +281,21 @@ Expected: `command -v forgectl` prints `$PRW/stub/forgectl`, and `--version` pri
 
 ```sh
 prw_reset; echo stall > "$PRW/mode"
-pw poll --pr "$PR" --json > "$PRW/out/m32.json" 2> "$PRW/out/m32.err" & POLLPID=$!
+"$PRW/pw" poll --pr "$PR" --json > "$PRW/out/m32.json" 2> "$PRW/out/m32.err" & POLLPID=$!
 prw_wait_file "$PRW/leader.ps" && sleep 1
 cat "$PRW/leader.ps"
 echo "poll pid: $POLLPID, poll pgid: $(ps -o pgid= -p "$POLLPID")"
 ps -o pid=,pgid=,tty=,command= -p "$(cat "$PRW/child.pids")"
 ```
 
-Expected: the leader line has `pid == pgid` (it leads its own group), `ppid` equal to the pid of the poll (`$POLLPID`), the tty column `??` (no controlling terminal: a session of its own), and the poll's own pgid differs from the leader's. The `sleep 600` has the leader's pgid. Leave the poll running for the next step.
+Expected: the leader line has `pid == pgid` (it leads its own group), `ppid` equal to the pid of the poll (`$POLLPID`), the tty column `??` (no controlling terminal: a session of its own), and the poll's own pgid differs from the leader's. The `sleep 600` has the leader's pgid. Leave the poll running and go straight to M3.3 (it ends by itself after about 15 seconds).
 
 - [ ] pass  - [ ] fail
 
 ### M3.3 SIGTERM during a forgectl call
 
 ```sh
-kill -TERM "$POLLPID"; wait "$POLLPID"; echo "exit=$?"
+prw_sig TERM; wait "$POLLPID"; echo "exit=$?"
 prw_alive
 cat "$PRW/out/m32.json" "$PRW/out/m32.err"
 grep poll_end "$XDG_STATE_HOME/pr-watch/log.jsonl" | tail -1
@@ -292,9 +310,9 @@ Expected: `exit=143`, `prw_alive` prints no `ALIVE` line (the group got SIGTERM,
 
 ```sh
 prw_reset
-pw poll --pr "$PR" --json > "$PRW/out/m34.json" 2>&1 & POLLPID=$!
+"$PRW/pw" poll --pr "$PR" --json > "$PRW/out/m34.json" 2>&1 & POLLPID=$!
 prw_wait_file "$PRW/child.pids" && sleep 1
-kill -HUP "$POLLPID"; wait "$POLLPID"; echo "exit=$?"
+prw_sig HUP; wait "$POLLPID"; echo "exit=$?"
 prw_alive
 ```
 
@@ -306,13 +324,13 @@ Expected: `exit=129` and no `ALIVE` line.
 
 ```sh
 prw_reset
-pw poll --pr "$PR" --json > "$PRW/out/m35.json" 2>&1 & POLLPID=$!
+"$PRW/pw" poll --pr "$PR" --json > "$PRW/out/m35.json" 2>&1 & POLLPID=$!
 prw_wait_file "$PRW/child.pids" && sleep 1
-kill -INT "$POLLPID"; wait "$POLLPID"; echo "exit=$?"
+prw_sig INT; wait "$POLLPID"; echo "exit=$?"
 prw_alive
 ```
 
-Expected: `exit=130` and no `ALIVE` line. If the poll ignored the signal (the job started with SIGINT ignored), the shell is not interactive: stop the stalled poll with `kill -TERM "$POLLPID"`, run `set -m`, and repeat. Also press Ctrl-C once in a terminal on a poll run in the foreground (`pw poll --pr "$PR"`, in `stall` mode, in a second terminal tab) and confirm exit 130 and no `ALIVE` lines.
+Expected: `exit=130` and no `ALIVE` line. If the poll ignored the signal (the job started with SIGINT ignored), the shell is not interactive: stop the stalled poll with `prw_sig TERM`, run `set -m`, and repeat. Also press Ctrl-C once in a terminal on a poll run in the foreground (`pw poll --pr "$PR"`, in `stall` mode, in a second terminal tab) and confirm exit 130 and no `ALIVE` lines.
 
 - [ ] pass  - [ ] fail
 
@@ -320,9 +338,9 @@ Expected: `exit=130` and no `ALIVE` line. If the poll ignored the signal (the jo
 
 ```sh
 prw_reset; echo ignore > "$PRW/mode"
-pw poll --pr "$PR" --json > "$PRW/out/m36.json" 2>&1 & POLLPID=$!
+"$PRW/pw" poll --pr "$PR" --json > "$PRW/out/m36.json" 2>&1 & POLLPID=$!
 prw_wait_file "$PRW/child.pids" && sleep 1
-START=$(date +%s); kill -TERM "$POLLPID"; wait "$POLLPID"; echo "exit=$? seconds=$(( $(date +%s) - START ))"
+START=$(date +%s); prw_sig TERM; wait "$POLLPID"; echo "exit=$? seconds=$(( $(date +%s) - START ))"
 prw_alive
 ```
 
@@ -350,9 +368,9 @@ On Linux the gateway sees the leader exit without reaping it and SIGKILLs the re
 
 ```sh
 prw_reset; echo leak > "$PRW/mode"
-pw poll --pr "$PR" --json > "$PRW/out/m38.json" 2>&1 & POLLPID=$!
+"$PRW/pw" poll --pr "$PR" --json > "$PRW/out/m38.json" 2>&1 & POLLPID=$!
 prw_wait_file "$PRW/child.pids" && sleep 1
-kill -TERM "$POLLPID"; wait "$POLLPID"; echo "exit=$?"
+prw_sig TERM; wait "$POLLPID"; echo "exit=$?"
 sleep 2
 prw_alive
 ```
@@ -367,9 +385,9 @@ Decision to record (issue #32, comment on #46): accept this residual risk, or ad
 
 ```sh
 prw_reset; echo stall > "$PRW/mode"
-pw poll --full --json > "$PRW/out/m39.json" 2>&1 & POLLPID=$!
+"$PRW/pw" poll --full --json > "$PRW/out/m39.json" 2>&1 & POLLPID=$!
 prw_wait_file "$PRW/child.pids" && sleep 2
-kill -TERM "$POLLPID"; wait "$POLLPID"; echo "exit=$?"
+prw_sig TERM; wait "$POLLPID"; echo "exit=$?"
 prw_alive
 ```
 
@@ -381,19 +399,20 @@ Set the mode back: `echo pass > "$PRW/mode"`.
 
 ## M4. Leases without `/proc`
 
-On Linux a lease holder is identified by pid, process start time (`/proc/<pid>/stat`) and boot id (`/proc/sys/kernel/random/boot_id`). On macOS there is no `/proc`: start time and boot id are recorded as `unknown`, and an unknown holder counts as alive until its lease expires ([Locks and commit](interface.md#locks-and-commit), [leases.py](../src/pr_watch/leases.py)). The expiry is `3 x forgectl.timeout`, never less than two forgectl calls plus 30 seconds: with `forgectl.timeout: 5s` it is `max(15, 2 x 15 + 30) = 60` seconds.
+On Linux a lease holder is identified by pid, process start time (`/proc/<pid>/stat`) and boot id (`/proc/sys/kernel/random/boot_id`). On macOS there is no `/proc`: start time and boot id are recorded as `unknown`, and an unknown holder counts as alive until its lease expires ([Locks and commit](interface.md#locks-and-commit), [leases.py](../src/pr_watch/leases.py)). The expiry is `3 x forgectl.timeout`, never less than two forgectl calls plus 30 seconds (each call has the 10 s slack): with `forgectl.timeout: 5s` it is `max(15, 2 x 15 + 30) = 60` seconds. A stalled poll ends by itself (and releases its lease) after `forgectl.timeout` plus the slack, 15 s with the base config, which is too short for M4.1 to M4.3. These steps therefore use `forgectl.timeout: 60s` (the stalled poll lives 70 s; the lease expires `max(180, 2 x 70 + 30) = 180` seconds after it was taken). Paste M4.1 to M4.3 without a pause.
 
 ### M4.1 What the lease row holds
 
 ```sh
 prw_reset; echo stall > "$PRW/mode"
-pw poll --pr "$PR" --json > "$PRW/out/m41.json" 2>&1 & POLLPID=$!
+printf 'forgectl:\n  timeout: 60s\n' > "$PRW/config-m4.yaml"; chmod 600 "$PRW/config-m4.yaml"
+"$PRW/pw" --config "$PRW/config-m4.yaml" poll --pr "$PR" --json > "$PRW/out/m41.json" 2>&1 & POLLPID=$!
 prw_wait_file "$PRW/child.pids" && sleep 1
 sqlite3 -readonly -header "$XDG_STATE_HOME/pr-watch/state.db" 'select pr_id, holder_pid, holder_start, boot_id, expires_at from leases'
 echo "poll pid: $POLLPID"; date -u +%Y-%m-%dT%H:%M:%SZ
 ```
 
-Expected: one row, `holder_pid` equal to `$POLLPID`, `holder_start` and `boot_id` both `unknown`, and `expires_at` about 60 seconds ahead.
+Expected: one row, `holder_pid` equal to `$POLLPID`, `holder_start` and `boot_id` both `unknown`, and `expires_at` about 180 seconds ahead (the time printed by `date`, plus three minutes).
 
 - [ ] pass  - [ ] fail
 
@@ -410,7 +429,7 @@ Expected: exit 0, `already_running: true` (a `--pr` poll reports `polled: false`
 ### M4.3 Crash: the dead holder is still treated as alive until expiry
 
 ```sh
-kill -KILL "$POLLPID"; wait "$POLLPID" 2>/dev/null; echo "poll killed"
+prw_sig KILL; wait "$POLLPID" 2>/dev/null; echo "poll killed"
 ps -p "$POLLPID" >/dev/null 2>&1 && echo "STILL RUNNING" || echo "poll is gone"
 prw_alive
 sqlite3 -readonly "$XDG_STATE_HOME/pr-watch/state.db" 'select holder_pid, holder_start, expires_at from leases'
@@ -429,7 +448,7 @@ echo pass > "$PRW/mode"
 sqlite3 -readonly "$XDG_STATE_HOME/pr-watch/state.db" 'select expires_at from leases'; date -u +%Y-%m-%dT%H:%M:%SZ
 ```
 
-Wait until the UTC time printed by `date` is past `expires_at` (about a minute after M4.1), then:
+Wait until the UTC time printed by `date` is past `expires_at` (about three minutes after M4.1), then:
 
 ```sh
 pw prune --dry-run --json
@@ -466,10 +485,10 @@ cat > "$PRW/config-lease.yaml" <<'EOF'
 forgectl:
   timeout: 600s
 EOF
-pw --config "$PRW/config-lease.yaml" poll --pr "$PR" --json > "$PRW/out/m46.json" 2>&1 & POLLPID=$!
+"$PRW/pw" --config "$PRW/config-lease.yaml" poll --pr "$PR" --json > "$PRW/out/m46.json" 2>&1 & POLLPID=$!
 prw_wait_file "$PRW/child.pids" && sleep 1
 sqlite3 -readonly "$XDG_STATE_HOME/pr-watch/state.db" 'select holder_start, boot_id, expires_at from leases'
-kill -KILL "$POLLPID"; prw_reap
+prw_sig KILL; prw_reap
 sysctl -n kern.bootsessionuuid
 echo "$PRW"
 ```
@@ -480,7 +499,7 @@ The expiry is 30 minutes ahead (`3 x 600 s`). Reboot the Mac now. After login, i
 export PRW=/tmp/prw.XXXXXX      # the value printed above
 export XDG_STATE_HOME="$PRW/state" PR='github.com/OWNER/REPO#123'
 export PATH="$PRW/stub:$PRW/bin:$PATH"
-pw() { "$PRW/bin/pr-watch" --config "$PRW/config-base.yaml" "$@"; }
+pw() { "$PRW/pw" "$@"; }
 echo pass > "$PRW/mode"
 sysctl -n kern.bootsessionuuid
 sqlite3 -readonly "$XDG_STATE_HOME/pr-watch/state.db" 'select holder_start, boot_id, expires_at from leases'
@@ -497,10 +516,24 @@ Set the mode back: `echo pass > "$PRW/mode"`.
 
 Hooks run as `/bin/sh -c <cmd>`, in `<state>/hooks-cwd`, in their own session, with stdin a pipe carrying the payload, stdout and stderr to `/dev/null`, a cleaned environment, and the group SIGTERMed at the timeout, then SIGKILLed 5 seconds later, only while the leader is unreaped ([Hooks](interface.md#hooks), comment on #28). The `fail` mode makes the stand-in forgectl return garbage, and `failures.unreachable_after: 1` turns one failure into an `unreachable` event and a `post-poll`, which gives two hook runs without changing the PR.
 
+A PR that is already `unreachable` and fails again fires no `on-unreachable` and no `post-poll` ([hooks.py](../src/pr_watch/hooks.py), `should_post_poll`), and re-adding a watch does not reset that. So every step that needs hooks first removes the watch, re-adds it in `pass` mode (baselined, active) and only then switches to `fail`, and every config below sets `unreachable_after: 1` so that the one failing run makes the PR newly unreachable. `prw_fresh` does this; each failing run in M5 uses a fresh watch.
+
+```sh
+prw_fresh() {
+  echo pass > "$PRW/mode"
+  pw watch remove "$PR" --owner checklist >/dev/null
+  pw watch add "$PR" --owner checklist >/dev/null
+  echo fail > "$PRW/mode"
+  pw list --json --pr "$PR" | head -c 300; echo
+}
+```
+
+Expected after each `prw_fresh`: the listed PR is `active` (record it if it is not; the step after it will not fire hooks).
+
 ### M5.1 Environment, stdio and group
 
 ```sh
-echo fail > "$PRW/mode"; prw_reset
+prw_reset
 cat > "$PRW/hook-env.sh" <<EOF
 #!/bin/sh
 d='$PRW/out'
@@ -523,12 +556,13 @@ hooks:
   post-poll: [{cmd: "$PRW/hook-env.sh", timeout: 30, async: false}]
 EOF
 chmod 600 "$PRW/config-hooks.yaml"
+prw_fresh
 GITHUB_TOKEN=prw-canary-token GH_TOKEN=prw-canary-token GITLAB_TOKEN=prw-canary-token FORGECTL_CANARY=prw-canary PR_WATCH_CANARY=1 \
   pw --config "$PRW/config-hooks.yaml" poll --pr "$PR" --json; echo "exit=$?"
 ls "$PRW/out"
 ```
 
-Expected: exit 0, the report shows `hooks.run` 2 and `events.unreachable` 1, and `$PRW/out` holds `on-unreachable.*` and `post-poll.*` files. Nothing of `to-stdout` or `to-stderr` appears in the terminal (stdout and stderr go to `/dev/null`).
+Expected: exit 0, the report shows `hooks.run` 2 and `events.unreachable` 1, and `$PRW/out` holds `on-unreachable.*` and `post-poll.*` files. Nothing of `to-stdout` or `to-stderr` appears in the terminal (stdout and stderr go to `/dev/null`). The canary tokens are fake, and the non-snapshot forgectl calls (`whoami`, `--version`) go through the stand-in to the **real** forgectl with them in its environment: if that gives an auth error and the report shows a host failure instead of `events.unreachable` 1, record it and repeat the step with only `PR_WATCH_CANARY=1 FORGECTL_CANARY=prw-canary PRW_CANARY_TOKEN=prw-canary-token` (the checks in M5.2 look for the string `canary`).
 
 - [ ] pass  - [ ] fail
 
@@ -552,21 +586,21 @@ Expected: the working directory resolves to `.../state/pr-watch/hooks-cwd` (macO
 
 ```sh
 rm -f "$PRW/out"/*.env
-echo fail > "$PRW/mode"
+prw_fresh
 HOME=relhome XDG_CONFIG_HOME=relcfg \
   pw --config "$PRW/config-hooks.yaml" poll --pr "$PR" --json >/dev/null; echo "exit=$?"
 grep -E '^(HOME|XDG_[A-Z_]+)=' "$PRW/out/on-unreachable.env" "$PRW/out/post-poll.env"
 dscl . -read "/Users/$(id -un)" NFSHomeDirectory
 ```
 
-Expected: the PR is already `unreachable`, so only `post-poll` may run again (**to be observed**: an already unreachable PR makes no second `unreachable` event; if no `.env` is written the step is `SKIP` for the file, and `PR` can be re-added first with `pw watch add`). Where a file exists: `HOME=` equals the `NFSHomeDirectory` (the password-database home), and no `XDG_CONFIG_HOME=relcfg` line.
+Expected: the fresh watch becomes `unreachable` in this run, so both `on-unreachable.env` and `post-poll.env` are written; `HOME=` in each equals the `NFSHomeDirectory` (the password-database home), and there is no `XDG_CONFIG_HOME=relcfg` line.
 
-- [ ] pass  - [ ] fail  - [ ] skip
+- [ ] pass  - [ ] fail
 
 ### M5.4 Timeout: SIGTERM, then SIGKILL after 5 seconds
 
 ```sh
-echo pass > "$PRW/mode"; prw_reset
+prw_reset
 cat > "$PRW/hook-hang.sh" <<EOF
 #!/bin/sh
 echo \$\$ >> '$PRW/leader.pids'
@@ -586,18 +620,20 @@ chmod 700 "$PRW/hook-hang.sh" "$PRW/hook-ignore.sh"
 cat > "$PRW/config-hang.yaml" <<EOF
 forgectl:
   timeout: 5s
+failures:
+  unreachable_after: 1
 hooks:
   post-poll: [{cmd: "$PRW/hook-hang.sh", timeout: 2, async: false}]
 EOF
 chmod 600 "$PRW/config-hang.yaml"
-echo fail > "$PRW/mode"
+prw_fresh
 START=$(date +%s)
 pw --config "$PRW/config-hang.yaml" poll --pr "$PR" --json >/dev/null; echo "exit=$? seconds=$(( $(date +%s) - START ))"
 prw_alive
 grep hook_run "$XDG_STATE_HOME/pr-watch/log.jsonl" | tail -1
 ```
 
-Expected: the hook is stopped after about 2 seconds (the poll takes a few seconds in total), no `ALIVE` line, and the last `hook_run` record has `timed_out` true. (If the `post-poll` hook does not fire because the PR is already unreachable, re-add a fresh watch with `pw watch add` for another PR, or `rm` the state and repeat M2.1 and this step; **record** which.) Then repeat with the `ignore` variant: change the config's `cmd` to `$PRW/hook-ignore.sh` and run again: expect about 7 seconds (2 s timeout plus 5 s), no `ALIVE` line.
+Expected: the hook is stopped after about 2 seconds (the poll takes a few seconds in total), no `ALIVE` line, and the last `hook_run` record has `timed_out` true. Then repeat with the `ignore` variant: change the config's `cmd` to `$PRW/hook-ignore.sh`, run `prw_fresh` again (the PR is `unreachable` after the first run, and a second failing run would fire nothing), and run the poll again: expect about 7 seconds (2 s timeout plus 5 s), no `ALIVE` line.
 
 - [ ] pass  - [ ] fail
 
@@ -612,6 +648,7 @@ echo \$! >> '$PRW/child.pids'
 EOF
 chmod 700 "$PRW/hook-leak.sh"
 sed "s#hook-hang.sh#hook-leak.sh#" "$PRW/config-hang.yaml" > "$PRW/config-leak.yaml"
+prw_fresh
 pw --config "$PRW/config-leak.yaml" poll --pr "$PR" --json >/dev/null; echo "exit=$?"
 sleep 1; prw_alive
 ```
@@ -623,25 +660,28 @@ Expected: the hook's leader exits at once and the `sleep 600` survives (**one `A
 ### M5.6 Signals while a hook runs
 
 ```sh
-echo fail > "$PRW/mode"; prw_reset
+prw_reset
 cat > "$PRW/config-hang-long.yaml" <<EOF
 forgectl:
   timeout: 5s
+failures:
+  unreachable_after: 1
 hooks:
   post-poll: [{cmd: "$PRW/hook-hang.sh", timeout: 600, async: false}]
 EOF
 chmod 600 "$PRW/config-hang-long.yaml"
+BEFORE=$(grep -c hook_run "$XDG_STATE_HOME/pr-watch/log.jsonl"); echo "hook_run before: $BEFORE"
 for SIG in TERM INT HUP; do
-  prw_reset
-  pw --config "$PRW/config-hang-long.yaml" poll --pr "$PR" --json >/dev/null 2>&1 & POLLPID=$!
+  prw_reset; prw_fresh
+  "$PRW/pw" --config "$PRW/config-hang-long.yaml" poll --pr "$PR" --json >/dev/null 2>&1 & POLLPID=$!
   prw_wait_file "$PRW/child.pids" && sleep 1
-  kill -"$SIG" "$POLLPID"; wait "$POLLPID"; echo "$SIG exit=$?"
+  prw_sig "$SIG"; wait "$POLLPID"; echo "$SIG exit=$?"
   prw_alive
 done
-grep -c hook_run "$XDG_STATE_HOME/pr-watch/log.jsonl"
+echo "hook_run after: $(grep -c hook_run "$XDG_STATE_HOME/pr-watch/log.jsonl")"
 ```
 
-Expected: `TERM exit=143`, `INT exit=130`, `HUP exit=129`, and no `ALIVE` line after any of them (the hook's group got SIGTERM, then SIGKILL after 5 seconds if needed). A hook stopped by a shutdown signal writes no `hook_run` record (the final count equals the count before this step). If the PR is not `unreachable` for `post-poll` to fire, see M5.4's note. Run `prw_reap` for any survivor.
+Expected: `TERM exit=143`, `INT exit=130`, `HUP exit=129`, and no `ALIVE` line after any of them (the hook's group got SIGTERM, then SIGKILL after 5 seconds if needed). A hook stopped by a shutdown signal writes no `hook_run` record (the count after equals `BEFORE`). Each pass of the loop uses a fresh watch (`prw_fresh`), so `post-poll` fires in each. Run `prw_reap` for any survivor.
 
 - [ ] pass  - [ ] fail
 
@@ -649,15 +689,29 @@ Set the mode back: `echo pass > "$PRW/mode"`.
 
 ## M6. Cron (real crontab)
 
-**This section reads and, from M6.5 on, writes your real crontab.** It takes a backup first, uses `--dry-run` before every write, and ends with `uninstall` and a comparison with the backup. Do not run it on a machine whose crontab holds anything you cannot restore from the backup. `crontab -r` is never typed by hand here: pr-watch calls it itself only when the crontab is left empty. If anything goes wrong, restore with `crontab "$PRW/crontab.backup"` (only when the backup is non-empty; otherwise `crontab -l` showing `no crontab` is the original state).
+**This section reads and, from M6.5 on, writes your real crontab.** It takes a backup first, uses `--dry-run` before every write, and ends with `uninstall` and a comparison with the backup. Do not run it on a machine whose crontab holds anything you cannot restore from the backup. If anything goes wrong, the restore is `crontab "$PRW/crontab.backup"` when the backup is non-empty, and `crontab -r` only when the backup is empty (you had no crontab, so removing the table is the restore): `prw_restore` below does exactly that and nothing else. No other step types `crontab -r`; pr-watch itself calls it only when an uninstall leaves the crontab empty.
 
 ### M6.1 Before touching anything
 
 ```sh
-crontab -l > "$PRW/crontab.backup" 2> "$PRW/crontab.backup.err"; echo "crontab -l exit=$?"
+rm -f "$PRW/backup.ok"
+crontab -l > "$PRW/crontab.backup" 2> "$PRW/crontab.backup.err"; rc=$?; echo "crontab -l exit=$rc"
 cat "$PRW/crontab.backup.err"; wc -c "$PRW/crontab.backup"
 ls -l /var/mail/"$(id -un)" 2>&1 | head -1
+if [ "$rc" -ne 0 ] && ! grep -q 'no crontab for' "$PRW/crontab.backup.err"; then
+  echo "STOP: crontab -l failed for another reason (Full Disk Access?); skip M6 and M7"
+elif grep -q 'pr-watch managed' "$PRW/crontab.backup"; then
+  echo "STOP: the crontab already holds a pr-watch managed block; skip M6 and M7"
+else
+  : > "$PRW/backup.ok"; echo "backup ok"
+fi
+prw_restore() {
+  [ -f "$PRW/backup.ok" ] || { echo "STOP: no verified backup"; return 1; }
+  if [ -s "$PRW/crontab.backup" ]; then crontab "$PRW/crontab.backup"; else crontab -r; fi
+}
 ```
+
+Continue with M6 and M7 only if this printed `backup ok`.
 
 Expected: **to be observed**: with no crontab, the exact wording (`crontab: no crontab for <user>`) and the exit status (1 on vixie 4.x); with one, exit 0 and the content in the backup. Record both. A failure with `Operation not permitted` or similar means the terminal lacks Full Disk Access (System Settings > Privacy & Security > Full Disk Access): grant it to the terminal, restart it, and repeat. pr-watch maps any crontab failure to exit 1 `internal` with a fixed hint and does not print crontab's own text, so the user would see no cause: record whether the hint should name this (comment on #29).
 
@@ -667,9 +721,18 @@ Expected: **to be observed**: with no crontab, the exact wording (`crontab: no c
 
 The cron run must not touch your real pr-watch state, and it must show what cron's environment looks like. The env file is sourced before `poll` (`. 'env_file' && pr-watch poll --quiet`), so it ends with `true`.
 
+The cron entry has no `--config` ([interface.md, Cron](interface.md#cron), `build_block` in [cron.py](../src/pr_watch/cron.py)), so under cron pr-watch loads **your real** `~/.config/pr-watch` configuration (`config.yaml` and `config.d`) and would run its hooks against the scratch state. Check that there is none:
+
+```sh
+ls -A "$HOME/.config/pr-watch" 2>&1
+```
+
+Expected: `No such file or directory`, or nothing. If it lists anything, **STOP**: skip M6.5 to M7 (the dry runs M6.3 and M6.4 are still safe), since a hook of yours could fire from cron. The env file below exports `PR_WATCH_FORGECTL__TIMEOUT=5s`, so the 5 s timeout of `config-cron.yaml` (which only the install command reads) holds under cron too.
+
 ```sh
 cat > "$PRW/cron-env.sh" <<EOF
 export XDG_STATE_HOME='$PRW/state'
+export PR_WATCH_FORGECTL__TIMEOUT=5s
 {
   date
   echo "user=\$(id -un) shell=\$0 sh=\$(readlink /bin/sh 2>/dev/null || echo /bin/sh)"
@@ -712,12 +775,12 @@ Expected: exit 0, `dry_run: true`, `block` an array of the lines a real run woul
 
 ```text
 # pr-watch managed v1 every=1m
-PATH=~/.local/bin:<forgectl dir>:/usr/local/bin:/usr/bin:/bin
+PATH=<home>/.local/bin:<forgectl dir>:/usr/local/bin:/usr/bin:/bin
 * * * * * . '<PRW>/cron-env.sh' && '<PRW>/bin/pr-watch' poll --quiet
 # pr-watch managed end
 ```
 
-(the `PATH=` line holds `$PRW/stub` or `$PRW/bin` as the forgectl directory, depending on which `forgectl` the shell resolves; both are user-owned and not group-writable); `warnings` empty; uninstall's dry run reports nothing to remove; no `cron.lock` was created; and the crontab is byte for byte the backup (`cmp` silent; with no backup crontab `crontab -l` fails and the comparison is of two empty inputs: record).
+(`<home>` is your absolute home directory, written out: the line has no `~`, and `<home>/.local/bin` is left out with a warning if it fails the same ownership check; the `PATH=` line holds `$PRW/stub` or `$PRW/bin` as the forgectl directory, depending on which `forgectl` the shell resolves; both are user-owned and not group-writable); `warnings` empty; uninstall's dry run reports nothing to remove; no `cron.lock` was created; and the crontab is byte for byte the backup (`cmp` silent; with no backup crontab `crontab -l` fails and the comparison is of two empty inputs: record).
 
 - [ ] pass  - [ ] fail
 
@@ -742,9 +805,10 @@ Expected: in (a) and (c) the directory is left out of `PATH=` and `warnings` say
 
 ### M6.5 Install for real
 
-Only continue after the dry runs above were clean. Between the install and the uninstall, a `pr-watch poll --quiet` entry runs every minute against **scratch state** (the env file overrides `XDG_STATE_HOME`).
+Only continue after the dry runs above were clean, M6.1 printed `backup ok` and M6.2's configuration check was clean. Between the install and the uninstall, a `pr-watch poll --quiet` entry runs every minute against **scratch state** (the env file overrides `XDG_STATE_HOME`) with the stand-in `forgectl` in `pass` mode, so a cron poll leaves no `sleep 600` behind. The entry has no `--config`: it uses the default configuration (which M6.2 checked is empty) plus the `PR_WATCH_*` overrides of the env file, not `config-cron.yaml`.
 
 ```sh
+echo pass > "$PRW/mode"
 pw --config "$PRW/config-cron.yaml" cron install --every 1m --json; echo "exit=$?"
 crontab -l
 ls -l "$XDG_STATE_HOME/pr-watch/cron.lock"; stat -f '%Sp %Lp %Su' "$XDG_STATE_HOME/pr-watch/cron.lock"
@@ -765,41 +829,52 @@ grep -E 'poll_(start|end)' "$XDG_STATE_HOME/pr-watch/log.jsonl" | tail -2
 ls -l /var/mail/"$(id -un)" 2>&1 | head -1
 ```
 
-Expected (**to be observed**: all of the environment values): `cron-run.txt` exists, proving the entry ran and the env file was sourced by cron's `/bin/sh` (its own `echo` lines appear); `PATH=` equals the block's line (cron's default `/usr/bin:/bin` is replaced); `command -v forgectl` prints the directory written in the block; `validate --json` inside cron reports `ok: true` and the forgectl path and version, with `validate exit=0`; `HOME`, `LOGNAME` and `SHELL=/bin/sh` are set, and the working directory is your home. Two checks specific to the `~/.local/bin` entry: whether `command -v pr-watch` finds a `pr-watch` through it (cron and `/bin/sh` do not expand `~` in `PATH`, so it is probably not found there; the entry itself uses an absolute path, so the poll works either way: record it); and `poll_start` and `poll_end` records in `log.jsonl` with a timestamp that matches the cron run. Nothing new should land in the mailbox (`--quiet`, and the env file sends its output to a file); record a changed size.
+Expected (**to be observed**: all of the environment values): `cron-run.txt` exists, proving the entry ran and the env file was sourced by cron's `/bin/sh` (its own `echo` lines appear); `PATH=` equals the block's line (cron's default `/usr/bin:/bin` is replaced; `<home>/.local/bin` is an absolute directory there); `command -v forgectl` prints the directory written in the block; `validate --json` inside cron reports `ok: true` and the forgectl path and version, with `validate exit=0`; `HOME`, `LOGNAME` and `SHELL=/bin/sh` are set, and the working directory is your home. One check specific to the `<home>/.local/bin` entry: whether `command -v pr-watch` finds a `pr-watch` (it is probably not found, because the scratch install is in `$PRW/bin`, which is not on the block's `PATH`, unless you have your own `pr-watch` in `~/.local/bin`; the entry itself uses an absolute path, so the poll works either way: record it); and `poll_start` and `poll_end` records in `log.jsonl` with a timestamp that matches the cron run. Nothing new should land in the mailbox (`--quiet`, and the env file sends its output to a file); record a changed size.
 
 - [ ] pass  - [ ] fail
 
 ### M6.7 crontab limits (optional, still the real crontab)
 
-a. A block line of exactly 999 bytes is accepted by vixie 4.x and 1000 bytes is refused by pr-watch before `crontab` sees it:
+a. A block line of exactly 999 bytes is accepted by vixie 4.x and 1000 bytes is refused by pr-watch before `crontab` sees it. The `env_file` path makes the entry line long. A file name is at most 255 bytes on APFS, so the path is built from `$1` directories of 200 bytes each plus a file name `e<pad>.sh` whose `pad` bytes tune the total length byte by byte:
 
 ```sh
 PY="$PRW/tools/pr-watch/bin/python"
-mkdir -p "$PRW/long" && chmod 700 "$PRW/long"
-mklong() {   # $1 = length of the last directory name
-  d="$PRW/long"
-  for n in 200 200 200 "$1"; do
-    d="$d/$("$PY" -c "print('a'*$n)")"; mkdir -p "$d"; chmod 700 "$d"
-  done
-  cp "$PRW/cron-env.sh" "$d/e.sh"; chmod 600 "$d/e.sh"
-  printf 'cron:\n  env_file: %s/e.sh\nforgectl:\n  timeout: 5s\n' "$d" > "$PRW/config-long.yaml"; chmod 600 "$PRW/config-long.yaml"
+mklong() {   # $1 = number of 200-byte directories, $2 = pad bytes in the file name (0 to 250)
+  rm -rf "$PRW/long"; d="$PRW/long"; mkdir -p "$d" && chmod 700 "$d"
+  i=0; while [ "$i" -lt "$1" ]; do d="$d/$("$PY" -c "print('a'*200)")"; mkdir "$d" && chmod 700 "$d"; i=$((i+1)); done
+  f="$d/e$("$PY" -c "print('a'*$2)").sh"
+  cp "$PRW/cron-env.sh" "$f"; chmod 600 "$f"
+  printf 'cron:\n  env_file: %s\nforgectl:\n  timeout: 5s\n' "$f" > "$PRW/config-long.yaml"; chmod 600 "$PRW/config-long.yaml"
 }
-mklong 100
-pw --config "$PRW/config-long.yaml" cron install --every 1m --dry-run --json | "$PY" -c 'import json,sys; b=json.load(sys.stdin)["block"]; print([len(l.encode()) for l in b])'
+mkline() {   # the longest block line, in bytes
+  pw --config "$PRW/config-long.yaml" cron install --every 1m --dry-run --json | "$PY" -c 'import json,sys; print(max(len(l.encode()) for l in json.load(sys.stdin)["block"]))'
+}
+mklong 4 0; L0=$(mkline); echo "L0=$L0"
 ```
 
-Take the longest line length `L` printed and rebuild with `mklong $((100 + 999 - L))` (remove `$PRW/long` first with `rm -rf "$PRW/long"`), then check again that the longest line is 999. Expected: the 999-byte block installs (`pw --config "$PRW/config-long.yaml" cron install --every 1m --json`, then `crontab -l | awk '{ print length($0) }' | sort -n | tail -1` prints 999, and `crontab -l` shows the block intact), and `mklong $((100 + 1000 - L))` is refused by `--dry-run` with `config_invalid` and an unchanged crontab. A directory name over 255 bytes is not a pr-watch problem: lower the pad. Finish with `pw --config "$PRW/config-cron.yaml" cron install --every 1m --json` to go back to the M6.5 block.
-
-b. A table that does not end in a newline (vixie 4.x refuses it; pr-watch adds the newline): only if the backup is empty or you accept restoring it:
+`L0` is the longest line with no pad (the entry line; about 900, below 999, so the dry run succeeds; if `mkline` fails with a traceback, use `mklong 3 0` and a pad of up to 250 for the rest). Then rebuild with the pad that makes the line exactly 999 bytes and check:
 
 ```sh
-crontab -l | cat > "$PRW/crontab.current"
-printf '# prw-no-newline' > "$PRW/nonl"
-crontab "$PRW/nonl"; echo "crontab file exit=$?"
-crontab -l
+mklong 4 $((999 - L0)); mkline
 ```
 
-Expected (**to be observed**): vixie 4.x may refuse the table or accept it; record it. Then restore the managed state with `crontab "$PRW/crontab.current"` (this writes the table captured one line above, including the M6.5 block), and confirm `crontab -l | cmp - "$PRW/crontab.current"`.
+Expected: `mkline` prints 999 (the length grows one byte per pad byte; if it does not, adjust the pad), and the block installs: `pw --config "$PRW/config-long.yaml" cron install --every 1m --json`, then `crontab -l | awk '{ print length($0) }' | sort -n | tail -1` prints 999 and `crontab -l` shows the block intact. Then `mklong 4 $((1000 - L0)); mkline` prints 1000 and `pw --config "$PRW/config-long.yaml" cron install --every 1m --dry-run --json` is refused with `config_invalid` and an unchanged crontab (`crontab -l | cmp - ...` against the 999 state, or against the backup if you skip the install). A pad over 250 bytes does not fit one name: use one more directory and a smaller pad. Finish with `rm -rf "$PRW/long"` and `pw --config "$PRW/config-cron.yaml" cron install --every 1m --json` to go back to the M6.5 block.
+
+b. A table that does not end in a newline (vixie 4.x refuses it; pr-watch adds the newline). The test file is built from your **backup** with its trailing newline stripped, so no entry of yours is at risk, and the backup is restored on the next line. It needs a non-empty backup; with an empty one it is skipped:
+
+```sh
+if [ -f "$PRW/backup.ok" ] && [ -s "$PRW/crontab.backup" ]; then
+  printf '%s' "$(cat "$PRW/crontab.backup")" > "$PRW/nonl"
+  crontab "$PRW/nonl"; echo "crontab file exit=$?"
+  crontab "$PRW/crontab.backup"; echo "restored from backup exit=$?"
+  crontab -l | cmp - "$PRW/crontab.backup"; echo "cmp exit=$?"
+else
+  echo "SKIP: no non-empty verified backup"
+fi
+pw --config "$PRW/config-cron.yaml" cron install --every 1m --json >/dev/null; echo "M6.5 block back: exit=$?"
+```
+
+Expected (**to be observed**): vixie 4.x may refuse the table or accept it; record the first exit status. The restore exits 0 and `cmp` is silent (the crontab is the backup again; the managed block is put back by the last line for M6.8). Do not edit the commands: the file written is the backup minus its final newline, nothing else.
 
 - [ ] pass  - [ ] fail  - [ ] skip
 
@@ -812,6 +887,8 @@ crontab -l 2>&1; echo "crontab -l exit=$?"
 crontab -l 2>/dev/null | cmp - "$PRW/crontab.backup"; echo "restored exactly: exit=$?"
 ```
 
+If `cmp` reports a difference you cannot explain by the final newline, restore with `prw_restore` (that is `crontab "$PRW/crontab.backup"`, or `crontab -r` only when the backup is empty, the no-crontab original) and record what differed.
+
 Expected: the dry run reports the block would be removed; the real run exits 0 with the block removed. If your original crontab had content, `crontab -l` equals the backup byte for byte (`cmp` silent), except that a missing final newline in the original is now present. If it was empty, pr-watch calls `crontab -r` itself because nothing is left: **to be observed**: its exit status and that `crontab -l` now says there is no crontab (the same wording as M6.1). A second `cron uninstall` is a no-op (exit 0, nothing removed). Finally confirm no `pr-watch` line remains: `crontab -l 2>/dev/null | grep -c pr-watch` prints 0. Leave no entry behind: if this step failed, fix it before going on.
 
 - [ ] pass  - [ ] fail
@@ -820,10 +897,16 @@ Expected: the dry run reports the block would be removed; the real run exits 0 w
 
 M6.6 proved the environment. This step proves a poll that calls forgectl through the block's `PATH`. It uses the same scratch state and the PR watched in M2.1, and the real forgectl through the stand-in (mode `pass`), with the same backup and uninstall discipline as M6. **It writes your real crontab again.**
 
+Only after M6 passed its uninstall step (the crontab is the backup again), M6.1 printed `backup ok` and M6.2's configuration check was clean:
+
 ```sh
 echo pass > "$PRW/mode"; crontab -l > "$PRW/crontab.backup2" 2>/dev/null
-pw --config "$PRW/config-cron.yaml" cron install --every 1m --dry-run
-pw --config "$PRW/config-cron.yaml" cron install --every 1m --json
+if [ -f "$PRW/backup.ok" ] && cmp -s "$PRW/crontab.backup2" "$PRW/crontab.backup"; then
+  pw --config "$PRW/config-cron.yaml" cron install --every 1m --dry-run
+  pw --config "$PRW/config-cron.yaml" cron install --every 1m --json
+else
+  echo "STOP: the crontab is not the verified backup; fix that (prw_restore) and skip M7 if unsure"
+fi
 ```
 
 Wait for two runs (about three minutes), then:
@@ -831,10 +914,10 @@ Wait for two runs (about three minutes), then:
 ```sh
 grep -E 'poll_(start|end)' "$XDG_STATE_HOME/pr-watch/log.jsonl" | tail -4
 pw list --json | head -c 600; echo
-pw cron uninstall --json; crontab -l 2>&1; crontab -l 2>/dev/null | cmp - "$PRW/crontab.backup2"; echo "restored exit=$?"
+pw cron uninstall --json; crontab -l 2>&1; crontab -l 2>/dev/null | cmp - "$PRW/crontab.backup"; echo "restored exit=$?"
 ```
 
-Expected: `poll_start` and `poll_end` records for each cron run, `poll_end` without `interrupted`, no `tool_missing` and no `failed` entry for forgectl (so cron's `PATH` found forgectl and the credentials were readable under cron: forgectl reads `HOME`, which cron sets), `last_polled_at` of the watched PR moving, and the crontab restored.
+Expected: `poll_start` and `poll_end` records for each cron run, `poll_end` without `interrupted`, no `tool_missing` and no `failed` entry for forgectl (so cron's `PATH` found forgectl and the credentials were readable under cron: forgectl reads `HOME`, which cron sets), `last_polled_at` of the watched PR moving, and the crontab restored (`cmp` silent; otherwise `prw_restore`).
 
 - [ ] pass  - [ ] fail  - [ ] skip
 
@@ -887,15 +970,19 @@ In one terminal: `pw browse`. In another, with the stand-in in `pass` mode: `pw 
 crontab -l 2>/dev/null | grep -c 'pr-watch' ; ps -ax -o pid=,command= | grep -c '[s]leep 600'
 ```
 
-Expected: both print 0 (no managed block left, no leftover `sleep 600`; if the second is not 0, check with `prw_alive` and `prw_reap`, never a pattern kill). Then remove the scratch directory, after checking what it is:
+Expected: both print 0 (no managed block left, no leftover `sleep 600`; if the second is not 0, check with `prw_alive` and `prw_reap`, never a pattern kill). Your real crontab was backed up in `crontab.backup` and `crontab.backup2` inside the scratch directory: keep them if anything differs. Check that the crontab is the backup, then remove the scratch directory only if the check passed and `PRW` is what M0.2 made:
 
 ```sh
-echo "$PRW"            # must print /tmp/prw.XXXXXX
-rm -rf "$PRW"
+PRW_OK=1
+if [ -f "$PRW/crontab.backup" ]; then
+  crontab -l 2>/dev/null | cmp -s - "$PRW/crontab.backup" && echo "crontab matches the backup" || { echo "STOP: the crontab differs from the backup; run prw_restore or fix it, keep $PRW"; PRW_OK=0; }
+fi
+case $PRW in /tmp/prw.??????) ;; *) echo "STOP: unexpected PRW='$PRW'"; PRW_OK=0 ;; esac
+if [ "$PRW_OK" = 1 ] && [ -n "$PRW" ] && [ -d "$PRW" ]; then rm -rf "$PRW" && echo removed; fi
 unset PRW XDG_STATE_HOME UV_TOOL_DIR UV_TOOL_BIN_DIR PR
 ```
 
-(`/tmp/prw.*` holds only this run: the state, the tool installs, the stand-ins and the outputs. Your real crontab was backed up in `crontab.backup` and `crontab.backup2` inside it; keep the one you need if anything differs.) Close the shell, or restore your `PATH`.
+(`/tmp/prw.*` holds only this run: the state, the tool installs, the stand-ins and the outputs. If the check printed `STOP`, `unset` still clears the variables but nothing was deleted: remove the directory by hand once the crontab is right. If you skipped M6, there is no backup and no check.) Close the shell, or restore your `PATH`.
 
 - [ ] pass  - [ ] fail
 
@@ -911,10 +998,11 @@ unset PRW XDG_STATE_HOME UV_TOOL_DIR UV_TOOL_BIN_DIR PR
 | Issue body | state directory permissions | M2.1 to M2.5 |
 | Issue body | forgectl resolution on a cron PATH | M1.4, M6.4, M6.6, M7 |
 | Issue body | `validate`, `browse` | M1.3 to M1.5, M8 |
+| Issue body | golden `--json` output validated against `schemas/` | M1.6 (the test suite; no separate step) |
 | Comment on #46 (gateway) | `os.waitid` missing: accept or add a fallback | M3.8 (decision recorded) |
 | Comment on #12 (leases) | unknown holder takeover after expiry; boot time via sysctl | M4.3, M4.4, M4.5, M4.6 |
 | Comment on #28 (hooks) | `/bin/sh -c`, `hooks-cwd`, cleaned env, `/dev/null` stdio, TERM then KILL after 5 s only while the leader is unreaped, descendants not killed | M5.1 to M5.6 |
-| Comment on #29 (cron) | `crontab -l` and `-r` wording and status, `crontab -` with empty stdin | M6.1, M6.5, M6.8 |
+| Comment on #29 (cron) | `crontab -l` and `-r` wording and status. `crontab -` with empty stdin is not exercised: pr-watch uses `crontab -r` for an empty table and never pipes empty stdin | M6.1, M6.8 |
 | Comment on #29 | Full Disk Access and the fixed hint | M6.1 (decision recorded), M6.6 |
 | Comment on #29 | 999-byte line limit on vixie 4.x | M6.7a |
 | Comment on #29 | trailing-newline refusal, `crontab -` stdin | M6.7b, M6.5 |
