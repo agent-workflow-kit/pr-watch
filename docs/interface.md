@@ -1,6 +1,6 @@
 # pr-watch: interface
 
-Status: implemented, pre-1.0 (current version 0.25.0). This document is the single normative source for pr-watch's rules. `design.md` records the decisions and the internal structure and links to the headings here instead of restating them; the README, the architecture and the schemas follow it. Machine-readable shapes are in `schemas/`.
+Status: implemented, pre-1.0 (the current version is in `pyproject.toml` and `CHANGELOG.md`). This document is the single normative source for pr-watch's rules. `design.md` records the decisions and the internal structure and links to the headings here instead of restating them; the README, the architecture and the schemas follow it. Machine-readable shapes are in `schemas/`.
 
 ## Concepts
 
