@@ -148,6 +148,7 @@ Codes 11, 13 to 19 and 21 are unused. A poll that exits 12 prints its normal rep
 
 - [docs/interface.md](docs/interface.md): the normative interface
 - [docs/design.md](docs/design.md): decisions and structure
+- [docs/macos-checklist.md](docs/macos-checklist.md): the manual macOS run (issue #32)
 - [awkit architecture](https://github.com/agent-workflow-kit/awkit-docs/blob/main/architecture.md)
 - [awkit design guide](https://github.com/agent-workflow-kit/awkit-docs/blob/main/design-guide.md)
 
