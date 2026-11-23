@@ -289,6 +289,19 @@ Prints events after the cursor, oldest first. Never contacts a host and never ch
 
 Adds or removes labels on a watch (a watch is named by its id, or by a per-PR watch's reference), owned by the owner (Identifiers). `label add` needs the owner to hold a reference (else exit 10, `details.kind: owner_not_held`) and a watch (a PR with no per-PR watch: exit 10, `details.kind: no_watch`); adding a label the owner already has is a no-op. A watch carries at most 64 labels, counted as the union over its owners: a `label add` that would leave the union above 64 is refused before anything is written (exit 2, `code: usage`, `details.kind: too_many_labels`, with `details.limit` 64 and `details.count`); a label that is already present (from any owner) does not count again, so re-adding at the cap is a no-op success. `label remove` is idempotent like `watch remove`: an absent label (`reason` null, `watch` the unchanged watch), an owner that holds no reference, or a PR with no watch is exit 0 with `changed: false` (and `reason: not_held` or `no_watch` where it applies, with `watch` null), without taking the write lock; `label add` keeps exit 10. Labels already stored on past events do not change.
 
+### `validate`
+
+`pr-watch validate [--probe]`
+
+An offline, read-only check of the configuration and the environment, for a person or a doctor (`awkit doctor` runs `validate --json`: exit 0 is ok, with a warning when `warnings` is non-empty; any other exit is a failure named by the envelope `code`). It never prompts, never writes (no state directory, no `state.db`, no log record, no crontab) and never opens the database. Without `--probe` it makes no network call. Checks, in this order; the first failure ends the command with the error envelope of the same failure elsewhere, and later checks are not run:
+
+1. `config`: the config loads (exit 2 `config_invalid` naming the key). Every key, host key and `hooks` entry (`cmd`, `timeout`, `async`) is validated by loading, so a hook that `poll` would refuse is refused here.
+2. `forgectl`: resolved on the absolute `PATH` entries and `forgectl --version` run once (a local child process through the gateway, with the process environment like every forgectl call; it contacts no host) against `MIN_FORGECTL` (Failures: Version rule). Missing is exit 12 `tool_missing`, too old or unreadable exit 12 `tool_too_old`: a failure, because `poll` cannot work without it.
+3. `state_dir`: when the state directory exists it gets the checks of every start (owner, mode, symlink, `hooks-cwd`, `cron.lock`); unsafe is exit 12 `state_unsafe`. A missing directory is fine and stays missing. `state.db` is not opened, so a newer or older schema is not reported here.
+4. `probe` (only with `--probe`): one `forgectl whoami` call, the only call that may reach a host. It fails as `poll` would for the same answer (exit 12, 20, ...; a `contract` violation included). A partial answer is a warning, not a failure.
+
+With `--json` it prints one object ([schemas/cli/validate.json](../schemas/cli/validate.json)): `{ok, checks: [{name, ok, message}], forgectl: {path, version}, probe, warnings}`. It is printed only on success (`ok` is always true); a failure prints the error envelope (Output by exit code). `probe` is `{hosts}` (the number of hosts forgectl knows) with `--probe`, else `null`. `warnings` is always present, `[]` when there is none, and holds `{code, key, message}`: `config_warning` (the config's own warnings, for example a credential-like name in `hooks.env_allow`; `key` is the config key), `probe_partial` (`whoami` reported errors for some hosts) and `host_unknown` (`--probe` only: `hosts.<host>` names a host forgectl does not list, `key` is `hosts.<host>`). Without `--json` it prints one `<name>: ok: <message>` line per check and one `warning: <key>: <message>` line per warning (nothing with `--quiet`).
+
 ### `prune`
 
 `pr-watch prune [--dry-run]`

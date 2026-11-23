@@ -212,7 +212,7 @@ Handler = Callable[[Context, argparse.Namespace], int]
 # Commands that only read state: they open (and so verify) the state directory but write no
 # log record, so a consumer that polls `events` or `list` cannot fill log.jsonl with the same
 # configuration warnings on every call.
-READ_ONLY_COMMANDS = frozenset({"list", "show", "events", "export", "browse"})
+READ_ONLY_COMMANDS = frozenset({"list", "show", "events", "export", "browse", "validate"})
 
 # One entry per command. A later issue replaces its stub with the real handler.
 HANDLERS: dict[str, Handler] = {
@@ -227,6 +227,7 @@ HANDLERS: dict[str, Handler] = {
     "show": lambda ctx, args: _show(ctx, args),
     "export": lambda ctx, args: _export(ctx, args),
     "browse": lambda ctx, args: _browse(ctx, args),
+    "validate": lambda ctx, args: _validate(ctx, args),
     "cron install": lambda ctx, args: _cron_install(ctx, args),
     "cron uninstall": lambda ctx, args: _cron_uninstall(ctx, args),
 }
@@ -237,7 +238,7 @@ HANDLERS: dict[str, Handler] = {
 # Commands whose `--dry-run` is read-only.
 DRY_RUN_COMMANDS = frozenset({"prune", "cron install", "cron uninstall"})
 # Commands that never read or write state.db: they must not fail on a bad or newer database.
-NO_STORE_COMMANDS = frozenset({"cron install", "cron uninstall", "browse"})
+NO_STORE_COMMANDS = frozenset({"cron install", "cron uninstall", "browse", "validate"})
 
 
 def store_error_to_cli(exc: StoreError) -> CliError:
@@ -286,6 +287,12 @@ def _browse(ctx: Context, args: argparse.Namespace) -> int:
     from .browse import browse_command  # lazy: it imports this module
 
     return browse_command(ctx, args)
+
+
+def _validate(ctx: Context, args: argparse.Namespace) -> int:
+    from .validate import validate_command  # lazy: it imports this module
+
+    return validate_command(ctx, args)
 
 
 def _list(ctx: Context, args: argparse.Namespace) -> int:
@@ -568,6 +575,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = _command(sub, "browse", "browse", "browse watches, PRs and events in a terminal UI")
     p.add_argument("--focus", metavar="PR", help="open on this stored PR")
+
+    p = _command(sub, "validate", "validate", "check the config and the environment (offline)")
+    p.add_argument(
+        "--probe", action="store_true", help="also ask forgectl whoami (may reach hosts)"
+    )
 
     label = _group(sub, "label", "add or remove labels on a watch")
     for verb in ("add", "remove"):
