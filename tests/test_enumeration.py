@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -889,6 +890,51 @@ def test_should_stop_prevents_calls(store: Store, fake: FakeForgectl) -> None:
     add_query(store)
     res = run(store, should_stop=lambda: True)
     assert res.interrupted and fake.calls() == []
+
+
+def _signalled_once_called(fake: FakeForgectl, command: str):
+    """A stop flag that rises once the child is running, as a real signal does: never before."""
+    return lambda: bool(fake.calls(command))
+
+
+def _query_scope(store: Store) -> None:
+    add_query(store)
+
+
+def _repo_scope(store: Store) -> None:
+    per_pr(store)
+
+
+@pytest.mark.parametrize("scope_of", [_query_scope, _repo_scope], ids=["query", "repo"])
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGKILL])
+def test_a_listing_child_killed_by_the_signal_is_no_failure(
+    store: Store, fake: FakeForgectl, scope_of: Any, signum: int
+) -> None:
+    """Killed by SIGTERM (forgectl's startup window) or SIGKILL (the shutdown's escalation) while
+    pr-watch itself is being stopped: the signal's doing, not a failure of the host."""
+    scope_of(store)
+    fake.die_by_signal("prs", signum)
+    res = run(store, should_stop=_signalled_once_called(fake, "prs"))
+    assert res.interrupted and res.failures == [] and res.facts(HOST).errors == []
+
+
+@pytest.mark.parametrize("scope_of", [_query_scope, _repo_scope], ids=["query", "repo"])
+def test_a_listing_child_killed_without_a_signal_is_still_a_failure(
+    store: Store, fake: FakeForgectl, scope_of: Any
+) -> None:
+    scope_of(store)
+    fake.die_by_signal("prs", signal.SIGKILL)
+    res = run(store)
+    assert not res.interrupted and [f.code for f in res.failures] == ["killed"]
+
+
+def test_a_whoami_child_killed_by_the_signal_is_no_failure(
+    store: Store, fake: FakeForgectl
+) -> None:
+    add_query(store)
+    fake.die_by_signal("whoami", signal.SIGKILL)
+    res = run(store, should_stop=_signalled_once_called(fake, "whoami"))
+    assert res.interrupted and res.failures == []
 
 
 def test_rate_reading_is_kept_per_host(store: Store, fake: FakeForgectl) -> None:

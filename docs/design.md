@@ -1,6 +1,6 @@
 # pr-watch: design
 
-Status: implemented, pre-1.0 (current version 0.25.0). The rules are in [interface.md](interface.md), the single normative source; this document records the decisions, the structure and the test strategy and links to the headings there instead of restating them.
+Status: implemented, pre-1.0 (the current version is in `pyproject.toml` and `CHANGELOG.md`). The rules are in [interface.md](interface.md), the single normative source; this document records the decisions, the structure and the test strategy and links to the headings there instead of restating them.
 
 ## Role and layer
 
