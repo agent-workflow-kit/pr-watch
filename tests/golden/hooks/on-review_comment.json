@@ -1,0 +1,33 @@
+{
+  "author": {
+    "id": "77",
+    "is_bot": false,
+    "login": "reviewer-1"
+  },
+  "comment_id": "gh:rc:RC_example_1",
+  "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "detected_at": "2026-10-03T00:00:00.000000Z",
+  "event_id": "ev-aaaaaaaaaaab",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "hook": "on-review_comment",
+  "id": "ev-aaaaaaaaaaab",
+  "labels": [
+    "k=v"
+  ],
+  "line": 12,
+  "object_id": "P1",
+  "object_type": "pr",
+  "occurred_at": null,
+  "path": "src/app.py",
+  "pr": "example.net/o/r#1",
+  "pr_id": "P1",
+  "repo": "example.net/o/r",
+  "seq": 1,
+  "side": "RIGHT",
+  "thread_id": "gh:rt:RT_example_1",
+  "tool": "pr-watch",
+  "type": "review_comment",
+  "watches": [
+    "w-aaaaaaaaaa"
+  ]
+}
