@@ -891,6 +891,7 @@ def test_review_comment_line_bounded_by_store_limit(line: int, kept: bool, store
     odd = inline()
     odd["line"] = line
     (event,) = run(gh(), plus_threads(gh(), odd))
+    assert event.type == "review_comment"
     assert event.payload["line"] == (line if kept else None)
     with store.transaction():
         stored = store.append_event(event.to_new_event(labels=(), watches=(WATCH,)))

@@ -1222,6 +1222,7 @@ def test_r4_warnings_validate_against_the_log_schema(isolated_env: Path, write: 
             "message": w.message,
             "key": w.key,
         }
+        assert record["event"] == "config_warning"
         assert_valid("log", record)
 
 

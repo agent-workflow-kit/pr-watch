@@ -21,26 +21,26 @@ What each category is, and where its items come from:
 
 | Category | Source of the items | What a covering test does |
 |---|---|---|
-| commands | the leaf commands of the argparse parser (`build_parser`) | runs the command through `main()` and checks its result or error |
-| flags | every long flag of every leaf command, plus the global flags `--json`, `--config`, `--verbose`, `--quiet`, `--version` (`* <flag>`) | passes the flag; at least one of the named tests mentions the flag in its own body |
-| schemas | `schemas/cli/*.json`: the `--json` result of each command and the error envelope | validates real output against the schema (`assert_valid`), or compares it to a golden |
-| hooks | `schemas/hooks/*.json`: the 20 `on-<event>` payloads and `post-poll` | builds the payload and validates it against its schema; golden files in `tests/golden/hooks/` |
-| events | `event_type` in `schemas/defs.json` | validates an event of that type, as the poll or the diff produced it, against `schemas/event.json` |
-| log | the `oneOf` branches of `schemas/log.json` | writes or provokes a record of that `event` and validates it |
-| errors | `error_code` in `schemas/defs.json` | the envelope golden of that `code` (`tests/golden/cli/error-*.json`) and its exit code, plus a command that fails with it |
-| exit codes | the table in interface.md `Exit codes`, plus the `128+N` signal row | a command that ends with that code |
+| commands | the leaf commands of the argparse parser (`build_parser`) | a test of the named file that mentions every word of the command; the named tests run the command through `main()` or its handler |
+| flags | every long flag of every leaf command, plus the global flags `--json`, `--config`, `--verbose`, `--quiet`, `--version` (`* <flag>`) | a named test that mentions the flag in its own body; for flags that change behavior (`watch add`, `watch remove`, `poll`) the named tests run the command and check the effect, not only the parse |
+| schemas | `schemas/cli/*.json`: the `--json` result of each command and the error envelope | a named test whose body (or a same-file helper it calls) names the schema, as `assert_valid("cli/<command>", ...)`, on real output or a golden |
+| hooks | `schemas/hooks/*.json`: the 20 `on-<event>` payloads and `post-poll` | a named test that names the hook (or builds its name from the event) in its body or its helpers: it builds the payload and validates it against its schema; golden files in `tests/golden/hooks/` |
+| events | `event_type` in `schemas/defs.json` | a named test that names the event type in its body or its helpers and validates an event of that type, as the poll or the diff produced it, against `schemas/event.json` |
+| log | the `oneOf` branches of `schemas/log.json` | a named test that names the `event` in its body or its helpers: most provoke the record through a poll, a hook run or a config load and read it from the log; `test_every_record_validates_against_the_schema` also validates a synthetic sample of each |
+| errors | `error_code` in `schemas/defs.json` | the envelope golden of that `code` (`tests/golden/cli/error-*.json`) and its exit code, plus a second named test that names the code; that one runs a real command that ends with it (through `main()`, the fake forgectl or a crafted state) |
+| exit codes | the table in interface.md `Exit codes`, plus the `128+N` signal row | a named test that compares the literal code (`== 12`, `SystemExit`, `128 + signal`) in its body or its helpers; `0` is a command that succeeds, the others are commands that end with the code |
 
 ## How the coverage test works
 
 `tests/coverage_map.py` maps each item to test node ids (`tests/<file>::<function>`). `tests/test_interface_coverage.py` then fails when:
 
 - an item has no entry, or an entry names an item that no longer exists (add the new item's tests to the map in the same change that adds the item);
-- a named test does not exist, or does not mention the item. Flags are checked in the test's own body; the other categories in its module, because their schema checks sit in shared helpers beside the tests. A renamed or emptied test cannot keep a stale claim alive;
+- a named test does not exist, or does not mention the item. Flags are checked in the test's own body. Schemas, hooks, events, log records and errors are checked in the test's own body, its decorators (a `parametrize` list) and, one level deep, the same-file functions and module-level tables it names, as a whole name (`on-ci` is not `ci`, `review` is not `review_comment`). Exit codes are checked as a literal compared in that same scope. Only commands are checked at the module level. A renamed or emptied test cannot keep a stale claim alive;
 - an item is excused as uncoverable without a reason (`UNCOVERABLE`, keyed `<category>: <item>`, the reason naming `tests/live` when a real host is needed);
 - interface.md and the parser disagree about a command's flags (the `pr-watch <command> ...` synopses of the Commands section against the parser);
 - the table above is stale.
 
-The audit tests itself: it is run on maps with a missing item, a stale entry, a ghost test, a test that does not mention its item and an empty list, and must report each.
+The audit tests itself: it is run on maps with a missing item, a stale entry, a ghost test, a test that does not mention its item and an empty list, and on wrong mappings of every category checked in the test's scope (an exit code a test never compares, another hook's golden, another command's schema test, an event or log record the test never names, an error code it never names), and must report each. The hooks are cross-checked against the events (one `on-<event>` each, plus `post-poll`), and the global flags are read from the root parser.
 
 The map names tests that exist; it does not run them. They run in the normal suite, so a failing named test fails `make verify`.
 
@@ -50,9 +50,9 @@ The map names tests that exist; it does not run them. They run in the normal sui
 
 - shell comment lines (the numbered steps);
 - the installer line (`uv tool install ...`), which would install software;
-- non-shell blocks (the YAML hooks example is instead loaded as a real config by `validate`).
+- non-shell blocks: the test asserts that the YAML hooks example is the only one (loaded as a real config by `validate`). A block with no language, or `text` or `console`, that holds a `pr-watch` line is run as shell, never skipped; fences may be indented or `~~~`, and one that cannot be read fails the test.
 
-`cron install` and `cron uninstall` are only ever run with `--dry-run` (appended when the README line lacks it), and the test asserts that no crontab was written. The `Commands` bullets are inline code, not fenced blocks: a second test checks that every flag they name exists on the command they name.
+`cron install` and `cron uninstall` are only ever run with `--dry-run` (appended when the README line lacks it), and the test asserts that no crontab was written. The `Commands` bullets are inline code, not fenced blocks: a second test checks that every flag they name exists on the command they name, including the bare spans that follow a `pr-watch` span on the same line (`cron install|uninstall [--dry-run]`).
 
 ## What this audit added
 

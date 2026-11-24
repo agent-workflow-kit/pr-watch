@@ -25,16 +25,31 @@ from collections.abc import Callable
 from functools import cache
 from typing import Any
 
+import pytest
+
 from pr_watch.cli import build_parser
 from tests import coverage_map as cm
 from tests.harness import ROOT, load_schema, schema_names
 
 INTERFACE = (ROOT / "docs" / "interface.md").read_text(encoding="utf-8")
-GLOBAL_FLAGS = ("--json", "--config", "--verbose", "--quiet", "--version")
 CATEGORIES = ("commands", "flags", "schemas", "hooks", "events", "log", "errors", "exit codes")
 
 
 # --- the items, from their sources of truth ------------------------------------------------------
+
+
+def _global_flags() -> tuple[str, ...]:
+    """The long flags of the root parser (`--json`, `--config`, ...): what every command takes."""
+    root: Any = build_parser()
+    return tuple(
+        opt
+        for action in root._actions  # noqa: SLF001
+        for opt in action.option_strings
+        if opt.startswith("--") and opt != "--help"
+    )
+
+
+GLOBAL_FLAGS = _global_flags()
 
 
 def _leaf_commands() -> dict[str, set[str]]:
@@ -128,6 +143,23 @@ def _words(node: ast.AST) -> set[str]:
     return out
 
 
+def _strings(nodes: list[ast.AST]) -> list[str]:
+    return [
+        sub.value
+        for node in nodes
+        for sub in ast.walk(node)
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+    ]
+
+
+def _token_in(token: str, strings: list[str]) -> bool:
+    """`token` as a whole name in some string: `"on-ci"` or `"hooks/on-ci"` or `"on-ci:\n"`, but not
+    `"on-ci-x"`, `"poll_end_x"` or `"on-pushed"` for the token `pushed` (a name character, `-`,
+    `_` or a letter, on either side makes it part of another name)."""
+    pattern = re.compile(rf"(?<![\w-]){re.escape(token)}(?![\w-])")
+    return any(pattern.search(text) for text in strings)
+
+
 def _test_function(
     path: str, name: str
 ) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.Module] | None:
@@ -141,19 +173,75 @@ def _test_function(
     return None
 
 
-# What a test must mention to count for an item: (scope, tokens). `function` is the test's own
-# body; `module` is its file (the schema checks live in shared helpers beside the tests).
+def _scope(function: ast.FunctionDef | ast.AsyncFunctionDef, tree: ast.Module) -> list[ast.AST]:
+    """The nodes that count as "the test's own body" for the `function` scope.
+
+    The function and its decorators (a `parametrize` list), plus, one level deep and in the same
+    module only, the functions it calls by name and the module-level constants it reads by name:
+    the shared helpers and tables of a test, not the rest of its file."""
+    top: dict[str, ast.AST] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            top[node.name] = node
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    top[target.id] = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value:
+            top[node.target.id] = node.value
+    scope: list[ast.AST] = [function]
+    seen = {function.name}
+    for sub in ast.walk(function):
+        if isinstance(sub, ast.Name) and sub.id in top and sub.id not in seen:
+            seen.add(sub.id)
+            scope.append(top[sub.id])
+    return scope
+
+
+def _is_128(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value == 128
+
+
+def _compared_ints(nodes: list[ast.AST]) -> set[int]:
+    """Every int literal an exit code is compared with in `nodes` (`== 12`, `in (0, 1)`,
+    `SystemExit(2)`); -1 stands for a `128 + signal` sum, the signal row."""
+    out: set[int] = set()
+    for root in nodes:
+        for sub in ast.walk(root):
+            parts: list[ast.AST] = []
+            if isinstance(sub, ast.Compare):
+                parts = [sub.left, *sub.comparators]
+            elif isinstance(sub, ast.Call) and getattr(sub.func, "id", "") == "SystemExit":
+                parts = list(sub.args)
+            for part in parts:
+                for leaf in ast.walk(part):
+                    if isinstance(leaf, ast.Constant) and type(leaf.value) is int:
+                        out.add(leaf.value)
+                    elif (
+                        isinstance(leaf, ast.BinOp)
+                        and isinstance(leaf.op, ast.Add)
+                        and (_is_128(leaf.left) or _is_128(leaf.right))
+                    ):
+                        out.add(-1)
+    return out
+
+
+# What a test must mention to count for an item: (scope, tokens). `body` is the test function
+# alone; `function` adds its decorators and the same-module helpers and tables it names (`_scope`);
+# `module` is its whole file (commands, whose runs sit in shared helpers); `exit` means the test
+# compares the exit code literally (`signal`: a 128 + signal sum).
 Mention = Callable[[str], tuple[str, tuple[str, ...]]]
 
 MENTIONS: dict[str, Mention] = {
     "commands": lambda item: ("module", tuple(item.split())),
-    "flags": lambda item: ("function", (item.split()[-1],)),
-    "schemas": lambda item: ("module", (item,)),
-    "hooks": lambda item: ("module", (item.removeprefix("on-"),)),
-    "events": lambda item: ("module", (item,)),
-    "log": lambda item: ("module", (item,)),
-    "errors": lambda item: ("module", (item,)),
-    "exit codes": lambda item: ("module", ()),
+    "flags": lambda item: ("body", (item.split()[-1],)),
+    "schemas": lambda item: ("function", (item,)),
+    # a hook is named `on-ci` or, where a test builds the name from the event, `ci`
+    "hooks": lambda item: ("function", (item, item.removeprefix("on-"))),
+    "events": lambda item: ("function", (item,)),
+    "log": lambda item: ("function", (item,)),
+    "errors": lambda item: ("function", (item,)),
+    "exit codes": lambda item: ("exit", (item,)),
 }
 
 
@@ -166,8 +254,20 @@ def _node_problem(category: str, item: str, node_id: str) -> str | None:
         return f"{category}: {item}: no test function {node_id}"
     function, tree = found
     scope, tokens = MENTIONS[category](item)
-    words = _words(function if scope == "function" else tree)
-    missing = [t for t in tokens if t not in words]
+    if scope == "exit":
+        want = -1 if item == "signal" else int(item)
+        if want not in _compared_ints(_scope(function, tree)):
+            return f"{category}: {item}: {node_id} never compares the exit code {item}"
+        return None
+    nodes = {"module": [tree], "body": [function], "function": _scope(function, tree)}[scope]
+    if scope == "function":
+        strings = _strings(nodes)
+        missing = list(tokens) if not any(_token_in(t, strings) for t in tokens) else []
+    else:
+        words: set[str] = set()
+        for node in nodes:
+            words |= _words(node)
+        missing = [t for t in tokens if t not in words]
     if missing:
         return f"{category}: {item}: {node_id} never mentions {missing} (a {scope}-level check)"
     return None
@@ -216,6 +316,17 @@ def test_the_item_sources_are_not_empty() -> None:
     assert {"0", "1", "2", "10", "12", "20", "signal"} <= found["exit codes"]
 
 
+def test_the_global_flags_come_from_the_root_parser() -> None:
+    assert {"--json", "--config", "--verbose", "--quiet", "--version"} <= set(GLOBAL_FLAGS)
+    assert "--help" not in GLOBAL_FLAGS
+    assert {f for f in items()["flags"] if f.startswith("* ")} == {f"* {f}" for f in GLOBAL_FLAGS}
+
+
+def test_a_hook_per_event_plus_post_poll() -> None:
+    found = items()
+    assert found["hooks"] == {f"on-{event}" for event in found["events"]} | {"post-poll"}
+
+
 def test_the_audit_reports_a_missing_item() -> None:
     maps = mapping()
     broken = {**maps, "events": {k: v for k, v in maps["events"].items() if k != "ci"}}
@@ -249,6 +360,56 @@ def test_the_audit_reports_a_ghost_test_and_a_test_that_does_not_mention_the_ite
     assert any("not a `file::function`" in p for p in problems(items(), not_a_node, cm.UNCOVERABLE))
     empty = {**maps, "log": {**maps["log"], "poll_end": []}}
     assert any("empty test list" in p for p in problems(items(), empty, cm.UNCOVERABLE))
+
+
+def _rejects(category: str, item: str, node_id: str, fragment: str) -> None:
+    maps = mapping()
+    broken = {**maps, category: {**maps[category], item: [node_id]}}
+    found = problems(items(), broken, cm.UNCOVERABLE)
+    assert any(fragment in p and f"{category}: {item}:" in p for p in found), found
+
+
+@pytest.mark.parametrize(
+    ("category", "item", "node_id", "fragment"),
+    [
+        # a test that exits 0 does not cover exit code 20, nor a test with no exit code at all
+        ("exit codes", "20", "tests/test_cli.py::test_version_prints_version_and_exits_zero", "20"),
+        ("exit codes", "0", "tests/test_cli.py::test_exit_code_table_matches_the_interface", "0"),
+        # another hook's payload golden, or a schema test of another command, is not this item's
+        (
+            "hooks",
+            "on-closed",
+            "tests/test_hooks.py::test_the_on_pushed_payload_golden",
+            "on-closed",
+        ),
+        ("schemas", "cli/poll", "tests/test_list.py::test_empty_store", "cli/poll"),
+        (
+            "events",
+            "ci",
+            "tests/test_diff.py::test_review_comment_line_bounded_by_store_limit",
+            "ci",
+        ),
+        (
+            "log",
+            "poll_start",
+            "tests/test_cli.py::test_bad_usage_exits_2_with_envelope",
+            "poll_start",
+        ),
+        ("errors", "refused", "tests/test_cli.py::test_bad_usage_exits_2_with_envelope", "refused"),
+    ],
+)
+def test_the_audit_rejects_a_wrong_mapping(
+    category: str, item: str, node_id: str, fragment: str
+) -> None:
+    _rejects(category, item, node_id, fragment)
+
+
+def test_a_name_inside_another_name_does_not_count() -> None:
+    assert (
+        _token_in("on-ci", ["hooks/on-ci", "x"]) and _token_in("ci", ["on-ci:\n- cmd: x"]) is False
+    )
+    assert not _token_in("review", ["review_comment", "on-review"])
+    assert _token_in("review", ["a review sample"])
 
 
 def test_an_uncoverable_item_needs_a_reason_and_must_exist() -> None:

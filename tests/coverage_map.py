@@ -40,11 +40,20 @@ COMMANDS: dict[str, list[str]] = {
 
 # Exit codes of docs/interface.md `Exit codes` ("signal" is the 128+N row).
 EXIT_CODES: dict[str, list[str]] = {
-    "0": ["tests/test_cli.py::test_version_prints_version_and_exits_zero"],
-    "1": ["tests/test_cli.py::test_exit_code_table_matches_the_interface"],
+    "0": [
+        "tests/test_list.py::test_a_successful_command_exits_0_and_prints_its_result",
+        "tests/test_cli.py::test_version_prints_version_and_exits_zero",
+    ],
+    "1": [
+        "tests/test_cli_watches.py::test_a_corrupt_store_is_internal_exit_1",
+        "tests/test_cli.py::test_handler_oserror_is_still_an_internal_error",
+    ],
     "2": ["tests/test_cli.py::test_usage_errors_never_echo_argv_values"],
     "10": ["tests/test_events.py::test_show_an_unstored_pr_is_exit_10"],
-    "12": ["tests/test_failures.py::test_exit_12_of_poll_is_exactly_the_rows_marked_so"],
+    "12": [
+        "tests/test_cli_watches.py::test_a_newer_store_is_store_too_new_exit_12",
+        "tests/test_validate.py::test_probe_with_no_usable_result_is_exit_12_host_failed",
+    ],
     "20": ["tests/test_validate.py::test_probe_refusal_is_exit_20"],
     "signal": [
         "tests/test_signals.py::test_every_stop_signal_inside_a_watch_add_commit_exits_128_plus_it"
@@ -57,72 +66,59 @@ UNCOVERABLE: dict[str, str] = {}
 # Flags: "<command> <flag>"; "* <flag>" is a global flag.
 FLAGS: dict[str, list[str]] = {
     "watch add --host": [
-        "tests/test_cli.py::test_watch_add_per_pr_and_query_forms_parse",
-        "tests/test_cli_values.py::test_handlers_receive_validated_values",
+        "tests/test_watch_add.py::test_query_form_records_only_and_never_contacts_forgectl",
     ],
     "watch add --label": [
-        "tests/test_cli.py::test_watch_add_per_pr_and_query_forms_parse",
-        "tests/test_cli_values.py::test_handlers_receive_validated_values",
+        "tests/test_watch_add.py::test_labels_are_owned_per_pair_and_unioned",
+        "tests/test_watch_add.py::test_query_form_unfiltered_with_labels",
     ],
     "watch add --mine": [
-        "tests/test_cli.py::test_watch_add_per_pr_and_query_forms_parse",
-        "tests/test_cli_values.py::test_handlers_receive_validated_values",
+        "tests/test_watch_add.py::test_query_form_records_only_and_never_contacts_forgectl",
     ],
     "watch add --no-baseline": [
-        "tests/test_cli.py::test_watch_add_per_pr_and_query_forms_parse",
-        "tests/test_poll_health.py::test_a_row_without_a_digest_is_logged_not_stored_and_post_poll_still_names_it",
+        "tests/test_watch_add.py::test_no_baseline_calls_show_and_stores_a_row_without_digest",
     ],
     "watch add --open": [
-        "tests/test_cli.py::test_watch_add_per_pr_and_query_forms_parse",
-        "tests/test_cli_values.py::test_handlers_receive_validated_values",
+        "tests/test_watch_add.py::test_query_form_records_only_and_never_contacts_forgectl",
     ],
     "watch add --owner": [
-        "tests/test_cli.py::test_watch_add_per_pr_and_query_forms_parse",
-        "tests/test_cli_values.py::test_handlers_receive_validated_values",
+        "tests/test_watch_add.py::test_the_owner_flag_names_the_owner_of_the_watch",
     ],
     "watch add --repo": [
-        "tests/test_cli.py::test_watch_add_per_pr_and_query_forms_parse",
-        "tests/test_cli_values.py::test_handlers_receive_validated_values",
+        "tests/test_watch_add.py::test_query_form_records_only_and_never_contacts_forgectl",
     ],
     "watch remove --host": [
-        "tests/test_cli.py::test_watch_shape_errors",
-        "tests/test_cli_values.py::test_bad_values_are_usage_errors_with_a_kind",
+        "tests/test_cli_watches.py::test_remove_query_watch_by_exact_key",
     ],
     "watch remove --mine": [
-        "tests/test_cli.py::test_watch_shape_errors",
-        "tests/test_cli_values.py::test_bad_values_are_usage_errors_with_a_kind",
+        "tests/test_cli_watches.py::test_remove_query_watch_by_exact_key",
     ],
     "watch remove --open": [
-        "tests/test_cli.py::test_watch_shape_errors",
-        "tests/test_cli_values.py::test_bad_values_are_usage_errors_with_a_kind",
+        "tests/test_cli_watches.py::test_remove_query_watch_by_exact_key",
     ],
     "watch remove --owner": [
         "tests/test_cli_values.py::test_bad_values_are_usage_errors_with_a_kind",
         "tests/test_cli_watches.py::test_remove_the_last_owner_ends_the_watch",
     ],
     "watch remove --repo": [
-        "tests/test_cli.py::test_watch_shape_errors",
-        "tests/test_cli_values.py::test_bad_values_are_usage_errors_with_a_kind",
+        "tests/test_cli_watches.py::test_remove_query_watch_by_exact_key",
     ],
     "poll --full": [
         "tests/test_cli.py::test_poll_options_parse",
         "tests/test_hooks_poll.py::test_post_poll_for_a_newly_unreachable_pr_lists_it_but_a_repeat_failure_alone_does_not",
     ],
     "poll --hook": [
-        "tests/test_cli.py::test_poll_options_parse",
-        "tests/test_cli_values.py::test_handlers_receive_validated_values",
+        "tests/test_hooks_poll.py::test_the_hook_flag_adds_a_hook_and_no_hooks_skips_all_of_them",
     ],
     "poll --no-hooks": [
         "tests/test_cli.py::test_poll_options_parse",
         "tests/test_hooks_poll.py::test_the_hook_flag_adds_a_hook_and_no_hooks_skips_all_of_them",
     ],
     "poll --pr": [
-        "tests/test_cli.py::test_poll_options_parse",
-        "tests/test_cli_values.py::test_handlers_receive_validated_values",
+        "tests/test_poll.py::test_pr_poll_refreshes_one_pr_and_leaves_last_poll_finished_at",
     ],
     "poll --repo": [
-        "tests/test_cli.py::test_poll_options_parse",
-        "tests/test_cli_values.py::test_handlers_receive_validated_values",
+        "tests/test_poll.py::test_repo_poll_reports_only_its_host_and_never_sets_last_poll_finished_at",
     ],
     "list --label": [
         "tests/test_cli_values.py::test_bad_values_are_usage_errors_with_a_kind",
@@ -231,9 +227,7 @@ SCHEMAS: dict[str, list[str]] = {
         "tests/test_cron.py::test_a_poll_line_inside_the_block_does_not_warn",
     ],
     "cli/cron-uninstall": [
-        "tests/test_cron.py::test_dry_run_never_writes_takes_no_lock_and_creates_nothing",
-        "tests/test_cron.py::test_real_runs_report_dry_run_false_and_the_block",
-        "tests/test_cron.py::test_uninstall_dry_run_names_the_block_a_real_run_removes",
+        "tests/test_cron.py::test_uninstall_removes_only_the_block",
     ],
     "cli/error": [
         "tests/test_cli.py::test_bad_config_value_names_the_key_and_never_echoes_the_value"
@@ -353,7 +347,6 @@ EVENTS: dict[str, list[str]] = {
     "reopened": ["tests/test_diff.py::test_opened_and_reopened_validate_against_the_event_schema"],
     "pushed": [
         "tests/test_diff.py::test_every_event_validates_against_the_event_schema",
-        "tests/test_diff_approvals.py::test_every_new_event_validates_against_the_event_schema",
         "tests/test_store.py::test_stored_event_matches_the_event_schema",
     ],
     "retargeted": [
@@ -370,7 +363,6 @@ EVENTS: dict[str, list[str]] = {
     ],
     "review": [
         "tests/test_diff.py::test_every_event_validates_against_the_event_schema",
-        "tests/test_diff_approvals.py::test_every_new_event_validates_against_the_event_schema",
     ],
     "review_requested": [
         "tests/test_poll_review_requests.py::test_github_request_sequence_fires_once_per_new_request_and_again_after_a_review",
@@ -408,8 +400,12 @@ EVENTS: dict[str, list[str]] = {
 
 # schemas/log.json: one record shape per `event`.
 LOG: dict[str, list[str]] = {
-    "poll_start": ["tests/test_log.py::test_every_record_validates_against_the_schema"],
+    "poll_start": [
+        "tests/test_poll.py::test_poll_start_names_forgectl_once_and_poll_end_summarises",
+        "tests/test_log.py::test_every_record_validates_against_the_schema",
+    ],
     "poll_end": [
+        "tests/test_poll.py::test_poll_start_names_forgectl_once_and_poll_end_summarises",
         "tests/test_hooks_signals.py::test_a_signal_while_a_hook_runs_stops_it_and_its_group_and_prints_no_report",
         "tests/test_log.py::test_every_record_validates_against_the_schema",
     ],
@@ -418,7 +414,10 @@ LOG: dict[str, list[str]] = {
         "tests/test_poll.py::test_whoami_failure_with_a_stale_cache_goes_on_and_is_not_exit_12",
         "tests/test_log.py::test_optional_message_validates",
     ],
-    "part_incomplete": ["tests/test_log.py::test_every_record_validates_against_the_schema"],
+    "part_incomplete": [
+        "tests/test_snapshots.py::test_a_part_incomplete_for_unreachable_after_snapshots_is_logged_once",
+        "tests/test_log.py::test_every_record_validates_against_the_schema",
+    ],
     "commit_skipped": [
         "tests/test_log.py::test_every_record_validates_against_the_schema",
         "tests/test_snapshots.py::test_a_closed_snapshot_older_than_a_newer_listing_is_not_committed",
@@ -433,7 +432,10 @@ LOG: dict[str, list[str]] = {
         "tests/test_poll_renamed.py::test_a_listed_rename_with_an_over_cap_label_union_is_stored_and_logged",
         "tests/test_snapshots.py::test_a_label_union_over_the_cap_is_cut_sorted_and_logged",
     ],
-    "host_summary": ["tests/test_log.py::test_every_record_validates_against_the_schema"],
+    "host_summary": [
+        "tests/test_poll.py::test_poll_start_names_forgectl_once_and_poll_end_summarises",
+        "tests/test_log.py::test_every_record_validates_against_the_schema",
+    ],
     "snapshot_failed": [
         "tests/test_log.py::test_every_record_validates_against_the_schema",
         "tests/test_overcap.py::test_an_open_over_cap_pr_counts_one_failure_and_costs_one_show",
@@ -443,7 +445,7 @@ LOG: dict[str, list[str]] = {
         "tests/test_poll.py::test_closed_and_reopened_prs_are_reactivated_with_one_reopened_event",
     ],
     "hook_run": [
-        "tests/test_hooks_poll.py::test_a_flood_hits_the_per_poll_cap_and_the_report_and_log_say_so",
+        "tests/test_hooks_poll.py::test_an_on_event_hook_runs_after_the_commit_with_the_event_on_stdin_in_hooks_cwd",
         "tests/test_log.py::test_every_record_validates_against_the_schema",
     ],
     "hook_cap": [
@@ -454,7 +456,6 @@ LOG: dict[str, list[str]] = {
     "config_warning": [
         "tests/test_cli_state.py::test_config_warnings_are_logged_before_the_handler_runs",
         "tests/test_config.py::test_r4_warnings_validate_against_the_log_schema",
-        "tests/test_log.py::test_concurrent_appenders_never_interleave_or_lose_a_record",
     ],
 }
 
@@ -468,14 +469,44 @@ ERRORS: dict[str, list[str]] = {
         "tests/test_cli.py::test_envelope_golden_and_exit_code",
         "tests/test_cli.py::test_bad_config_value_names_the_key_and_never_echoes_the_value",
     ],
-    "invalid_pr": ["tests/test_cli.py::test_envelope_golden_and_exit_code"],
-    "not_found": ["tests/test_cli.py::test_envelope_golden_and_exit_code"],
-    "host_failed": ["tests/test_cli.py::test_envelope_golden_and_exit_code"],
-    "tool_missing": ["tests/test_cli.py::test_envelope_golden_and_exit_code"],
-    "tool_too_old": ["tests/test_cli.py::test_envelope_golden_and_exit_code"],
-    "contract": ["tests/test_cli.py::test_envelope_golden_and_exit_code"],
-    "store_too_new": ["tests/test_cli.py::test_envelope_golden_and_exit_code"],
-    "state_unsafe": ["tests/test_cli.py::test_envelope_golden_and_exit_code"],
-    "refused": ["tests/test_cli.py::test_envelope_golden_and_exit_code"],
-    "internal": ["tests/test_cli.py::test_envelope_golden_and_exit_code"],
+    "invalid_pr": [
+        "tests/test_cli.py::test_envelope_golden_and_exit_code",
+        "tests/test_watch_add.py::test_invalid_reference_exits_2_and_records_nothing",
+    ],
+    "not_found": [
+        "tests/test_cli.py::test_envelope_golden_and_exit_code",
+        "tests/test_events.py::test_show_an_unstored_pr_is_exit_10",
+    ],
+    "host_failed": [
+        "tests/test_cli.py::test_envelope_golden_and_exit_code",
+        "tests/test_validate.py::test_probe_with_no_usable_result_is_exit_12_host_failed",
+    ],
+    "tool_missing": [
+        "tests/test_cli.py::test_envelope_golden_and_exit_code",
+        "tests/test_validate.py::test_hung_version_ends_as_tool_missing_after_the_short_deadline",
+    ],
+    "tool_too_old": [
+        "tests/test_cli.py::test_envelope_golden_and_exit_code",
+        "tests/test_watch_add.py::test_forgectl_failures_map_to_the_envelope_and_record_nothing",
+    ],
+    "contract": [
+        "tests/test_cli.py::test_envelope_golden_and_exit_code",
+        "tests/test_validate.py::test_probe_failure_ends_with_the_forgectl_error",
+    ],
+    "store_too_new": [
+        "tests/test_cli.py::test_envelope_golden_and_exit_code",
+        "tests/test_cli_watches.py::test_a_newer_store_is_store_too_new_exit_12",
+    ],
+    "state_unsafe": [
+        "tests/test_cli.py::test_envelope_golden_and_exit_code",
+        "tests/test_validate.py::test_unsafe_state_dir_is_exit_12_state_unsafe",
+    ],
+    "refused": [
+        "tests/test_cli.py::test_envelope_golden_and_exit_code",
+        "tests/test_validate.py::test_probe_refusal_is_exit_20",
+    ],
+    "internal": [
+        "tests/test_cli.py::test_envelope_golden_and_exit_code",
+        "tests/test_cli_watches.py::test_a_corrupt_store_is_internal_exit_1",
+    ],
 }

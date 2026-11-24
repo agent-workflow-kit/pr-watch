@@ -15,11 +15,12 @@ from typing import Any
 
 import pytest
 
+from pr_watch import baseline as bl
 from pr_watch import enumeration as en
 from pr_watch import log as log_module
 from pr_watch import selection as sel
 from pr_watch import snapshots as sn
-from pr_watch.config import Config
+from pr_watch.config import Config, Failures
 from pr_watch.diff import Drop
 from pr_watch.forgectl_client import ForgectlClient, Outcome, resolve_executable
 from pr_watch.leases import Leases, ProcFs
@@ -334,6 +335,26 @@ def test_a_label_union_over_the_cap_is_cut_sorted_and_logged(
     (capped,) = log.of("labels_capped")
     assert capped == {"pr": snap["pr"], "pr_id": pr_id, "kept": 256, "total": 320}
     assert log.of("commit_skipped") == []
+
+
+def test_a_part_incomplete_for_unreachable_after_snapshots_is_logged_once(
+    store: Store, fake: FakeForgectl, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snap = pr(1)
+    pr_id = baseline(store, fake, snap)
+    # the fake's snapshots are always complete (forgectl's schema wants `incomplete` empty), so the
+    # authoritative set of incomplete parts is pinned to `threads` for the snapshots below
+    monkeypatch.setattr(bl, "incomplete_parts", lambda _snapshot: frozenset({"threads"}))
+    config = Config(failures=Failures(unreachable_after=2))
+    log = Rec()
+    for minute in (1, 2, 3):  # each snapshot sees `threads` incomplete: the 2nd reaches the limit
+        stamp = f"2026-10-02T11:0{minute}:00"
+        fake.update(snap["pr"], head={"sha": sha(minute)}, updated_at=f"{stamp}Z")
+        store.conn.execute("UPDATE prs SET listed_updated_at = ?", (f"{stamp}.000000Z",))
+        store.conn.commit()
+        cycle(store, config, log=log)
+    (record,) = log.of("part_incomplete")
+    assert record == {"pr_id": pr_id, "pr": snap["pr"], "part": "threads", "snapshots": 2}
 
 
 def test_a_label_union_over_the_cap_is_not_logged_when_the_snapshot_has_no_event(

@@ -40,7 +40,9 @@ SKIP_REASONS = {
     "other-tool": "not a pr-watch command (an installer or another program); never run",
     "not-shell": "a fenced block that is not shell (the YAML hook example is tested separately)",
 }
-FENCE = re.compile(r"^```(\w*)\s*$")
+FENCE = re.compile(r"^\s*(```+|~~~+)\s*([\w-]*)\s*$")  # indented and ~~~ fences too
+FENCE_START = ("```", "~~~")
+UNLABELED = {"", "text", "console"}  # a block of these is shell when it holds a pr-watch line
 PLACEHOLDER = re.compile(r"<(\w+)>")
 OPTIONAL = re.compile(r"\[([^\[\]]+)\]")
 
@@ -52,23 +54,41 @@ class Line:
 
 
 def fenced_blocks(text: str) -> list[tuple[str, list[str]]]:
-    """(language, lines) of every fenced block; an unterminated fence is an error."""
+    """(language, lines) of every fenced block (``` or ~~~, indented or not); a fence it cannot
+    read and an unterminated fence are errors."""
     blocks: list[tuple[str, list[str]]] = []
     lang: str | None = None
+    marker = ""
     body: list[str] = []
     for line in text.splitlines():
-        match = FENCE.match(line)
         if lang is None:
-            if line.startswith("```"):
+            if line.lstrip().startswith(FENCE_START):
+                match = FENCE.match(line)
                 assert match, f"unsupported fence line: {line!r}"
-                lang, body = match.group(1), []
-        elif line.rstrip() == "```":
-            blocks.append((lang, body))
-            lang = None
+                marker, lang, body = match.group(1), match.group(2), []
         else:
-            body.append(line)
+            stripped = line.strip()
+            if stripped and set(stripped) == {marker[0]} and len(stripped) >= len(marker):
+                blocks.append((lang, body))
+                lang = None
+            else:
+                body.append(line)
     assert lang is None, "unterminated code fence in README.md"
     return blocks
+
+
+def is_shell_block(lang: str, lines: list[str]) -> bool:
+    """A shell block by its language, or an unlabeled/text/console block with a `pr-watch ` line."""
+    if lang in SHELL_LANGS:
+        return True
+    return lang in UNLABELED and any(line.strip().startswith("pr-watch ") for line in lines)
+
+
+def skipped_languages(text: str) -> set[str]:
+    """The languages of the fenced blocks that are not run as shell (`plain` for no language)."""
+    return {
+        lang or "plain" for lang, lines in fenced_blocks(text) if not is_shell_block(lang, lines)
+    }
 
 
 def logical_lines(lines: list[str]) -> list[str]:
@@ -91,7 +111,7 @@ def extract(text: str) -> tuple[list[Line], list[tuple[str, str]]]:
     run: list[Line] = []
     skipped: list[tuple[str, str]] = []
     for index, (lang, lines) in enumerate(fenced_blocks(text)):
-        if lang not in SHELL_LANGS:
+        if not is_shell_block(lang, lines):
             skipped.append((f"<{lang or 'plain'} block, {len(lines)} lines>", "not-shell"))
             continue
         for line in logical_lines(lines):
@@ -145,8 +165,31 @@ def test_extract_finds_commands_comments_and_other_tools() -> None:
 
 
 def test_extract_skips_non_shell_blocks_by_name() -> None:
-    run, skipped = extract("```yaml\nhooks: {}\n```\n```\npr-watch list\n```\n")
-    assert run == [] and [reason for _, reason in skipped] == ["not-shell", "not-shell"]
+    text = "```yaml\nhooks: {}\n```\n```json\n{}\n```\n```text\nnothing to run\n```\n"
+    run, skipped = extract(text)
+    assert run == [] and [reason for _, reason in skipped] == ["not-shell"] * 3
+    assert skipped_languages(text) == {"yaml", "json", "text"}
+
+
+def test_an_unlabeled_text_or_console_block_with_a_pr_watch_line_is_shell() -> None:
+    for lang in ("", "text", "console"):
+        run, skipped = extract(f"```{lang}\npr-watch list\n```\n")
+        assert [line.text for line in run] == ["pr-watch list"] and skipped == [], lang
+    run, _ = extract("```json\npr-watch list\n```\n")
+    assert run == []  # a language that is not shell is never promoted
+
+
+def test_indented_and_tilde_fences_are_read() -> None:
+    run, _ = extract("- item\n\n  ```sh\n  pr-watch list\n  ```\n\n~~~sh\npr-watch poll\n~~~\n")
+    assert [line.text for line in run] == ["pr-watch list", "pr-watch poll"]
+    text = "````sh\n```\npr-watch list\n````\n"  # a shorter fence inside is content
+    assert len(fenced_blocks(text)) == 1
+    assert [line.text for line in extract(text)[0]] == ["pr-watch list"]
+
+
+def test_a_fence_that_cannot_be_read_is_an_error() -> None:
+    with pytest.raises(AssertionError):
+        fenced_blocks("``` sh extra\npr-watch list\n```\n")
 
 
 def test_an_unterminated_fence_is_an_error() -> None:
@@ -172,6 +215,9 @@ def test_every_skipped_readme_line_has_a_documented_reason() -> None:
     run, skipped = extract(README)
     assert run, "README.md has no pr-watch command line"
     assert {reason for _, reason in skipped} <= set(SKIP_REASONS)
+    # the only block not run is the YAML hooks example (loaded as a config by its own test): an
+    # unlabeled or text block of pr-watch lines would be run, any other kind fails here
+    assert skipped_languages(README) == {"yaml"}
     # The one non-pr-watch shell line is the installer: running it would install software.
     assert [line for line, reason in skipped if reason == "other-tool"] == [
         "uv tool install git+https://github.com/agent-workflow-kit/pr-watch"
@@ -281,32 +327,71 @@ def command_help_flags(path: list[str]) -> set[str]:
     }  # noqa: SLF001
 
 
+def top_level_commands() -> set[str]:
+    parser: Any = build_parser()
+    return {
+        name
+        for action in parser._actions  # noqa: SLF001
+        for name in (getattr(action, "choices", None) or {})
+        if isinstance(getattr(action, "choices", None), dict)
+    }
+
+
 def bullet_synopses(text: str) -> list[str]:
-    """Inline `pr-watch ...` code spans of the README's bullets (the `Commands` list)."""
+    """Inline `pr-watch ...` code spans of the README's bullets (the `Commands` list), each with
+    the bare `<command> ...` spans after it on its line (`pr-watch prune`, `cron install`), which
+    are returned with the `pr-watch ` they leave out."""
     spans: list[str] = []
+    commands = top_level_commands()
     for line in text.splitlines():
-        if line.startswith("- `pr-watch "):
-            spans.extend(re.findall(r"`(pr-watch [^`]+)`", line))
+        if not line.startswith("- `pr-watch "):
+            continue
+        after_first = False
+        for span in re.findall(r"`([^`]+)`", line):
+            if span.startswith("pr-watch "):
+                spans.append(span)
+                after_first = True
+            elif after_first and span.split()[0] in commands:
+                spans.append(f"pr-watch {span}")
     return spans
+
+
+def unknown_flags(span: str) -> set[str]:
+    """The flags `span` names that its command (or every command of `a|b`) does not have."""
+    words = []
+    for token in span.split()[1:]:
+        if token.startswith(("[", "<", "(", "-")):
+            break
+        words.append(token.rstrip(","))
+    paths: list[list[str]] = [[]]
+    for word in words:
+        paths = [p + [w] for p in paths for w in word.split("|")]
+    flags = set(re.findall(r"--[a-z][a-z-]*", span))
+    known = {"--json", "--config", "--verbose", "--quiet"}
+    for path in paths:
+        known |= command_help_flags(path)
+    return flags - known
+
+
+def test_bare_command_spans_after_a_pr_watch_span_are_checked_too() -> None:
+    line = (
+        "- `pr-watch prune [--dry-run]`, `cron install|uninstall [--dry-run]`, `show <pr>`, `--x`"
+    )
+    assert bullet_synopses(line) == [
+        "pr-watch prune [--dry-run]",
+        "pr-watch cron install|uninstall [--dry-run]",
+        "pr-watch show <pr>",
+    ]
+    assert unknown_flags("pr-watch cron install|uninstall [--dry-run]") == set()
+    assert unknown_flags("pr-watch cron install|uninstall [--nope]") == {"--nope"}
 
 
 def test_the_commands_bullets_name_real_flags() -> None:
     spans = bullet_synopses(README)
     assert len(spans) >= 8
+    assert "pr-watch cron install|uninstall [--dry-run]" in spans  # a bare span of the README
     for span in spans:
-        words = []
-        for token in span.split()[1:]:
-            if token.startswith(("[", "<", "(", "-")):
-                break
-            words.append(token.rstrip(","))
-        paths = [[]]
-        for word in words:
-            paths = [p + [w] for p in paths for w in word.split("|")]
-        flags = set(re.findall(r"--[a-z][a-z-]*", span))
-        known = {"--json", "--config", "--verbose", "--quiet"}
-        for path in paths:
-            known |= command_help_flags(path)
-        assert flags <= known, f"{span!r}: unknown {sorted(flags - known)}"
+        assert not unknown_flags(span), f"{span!r}: unknown {sorted(unknown_flags(span))}"
 
 
 def test_the_hooks_yaml_example_loads_as_a_valid_config(
