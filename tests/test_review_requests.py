@@ -315,6 +315,7 @@ def test_converted_to_draft_comes_after_ready_slot_and_before_terminal() -> None
 
 def test_converted_to_draft_event_validates(store: Store) -> None:
     (ev,) = run(with_(gh(), draft=False), with_(gh(), draft=True))
+    assert ev.type == "converted_to_draft"
     with store.transaction():
         stored = store.append_event(ev.to_new_event(labels=(), watches=(WATCH,)))
     assert schema_errors("event", stored.to_json()) == []

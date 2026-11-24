@@ -81,6 +81,6 @@ This plan implements [interface.md](interface.md) (the normative spec) and [desi
 ## Version roadmap
 
 - **0.x**: stages 0 to 6, in order. Every 0.x release keeps the interface additive.
-- **1.0** when: the live suite has passed on GitHub and on a GitLab server, the GitLab transition shapes are confirmed, a real poll loop has run for a week under cron without a stuck PR or a lost event, forgectl is at a stable version, and the macOS checklist is done.
+- **1.0** when: the live suite has passed on GitHub and on a GitLab server, the GitLab transition shapes are confirmed, a real poll loop has run for a week under cron without a stuck PR or a lost event, forgectl is at a stable version, and the macOS checklist is done. The agent-doable part of that qualification, the README examples and the interface coverage audit, is recorded in [coverage.md](coverage.md).
 - **1.x (additive)**: the candidates listed in design.md under "Not in 0.1" (`review_requested`, `converted_to_draft`, `approval_withdrawn`, `retargeted`, `renamed`, `unreachable`, `recovered` and `mergeability` are done), a `browse` TUI, an output cap when forgectl offers one, per-owner event filters if consumers need more, and richer pacing.
 - **2.0**: only if the event model changes incompatibly; nothing is planned.

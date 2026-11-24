@@ -201,11 +201,13 @@ def test_the_event_validates_against_the_schema(store: Store, backend: str) -> N
     chain = Chain(reviewers(base(), entry("77", "approved", T1)))
     for snap in (reviewers(base(), entry("77", "dismissed", T2)),):
         (event,) = only(chain, snap)
+        assert event.type == "approval_withdrawn"
         with store.transaction():
             stored = store.append_event(event.to_new_event(labels=("k=v",), watches=(WATCH,)))
         assert schema_errors("event", stored.to_json()) == []
     chain = Chain(reviewers(base(), entry("77", "approved", T1)))
     (event,) = only(chain, reviewers(base()))
+    assert event.type == "approval_withdrawn"
     with store.transaction():
         stored = store.append_event(event.to_new_event(labels=(), watches=(WATCH,)))
     assert schema_errors("event", stored.to_json()) == []

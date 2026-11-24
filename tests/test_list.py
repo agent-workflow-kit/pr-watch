@@ -204,6 +204,17 @@ def test_empty_store(store: Store, capsys: pytest.CaptureFixture[str]) -> None:
     assert jlist(capsys) == {"watches": [], "prs": [], "last_poll_finished_at": None, "hosts": []}
 
 
+def test_a_successful_command_exits_0_and_prints_its_result(
+    store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    populate(store)
+    code, out, err = run(capsys, "--json", "list")
+    assert code == 0 and err == ""
+    assert_valid("cli/list", json.loads(out))
+    code, out, err = run(capsys, "list")
+    assert code == 0 and err == "" and out.strip()
+
+
 def test_full_listing_json_golden(store: Store, capsys: pytest.CaptureFixture[str]) -> None:
     populate(store)
     d = jlist(capsys)

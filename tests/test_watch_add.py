@@ -187,6 +187,16 @@ def test_new_terminal_pr_stores_its_one_event_after_the_cursor(
     assert doc["cursor"].endswith(f".{before}")  # read before the event was stored
 
 
+def test_the_owner_flag_names_the_owner_of_the_watch(
+    fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, _ = run(capsys, "--json", "watch", "add", PR, "--owner", B)
+    doc = json.loads(out)
+    assert code == 0
+    assert_valid("cli/watch-add", doc)
+    assert doc["watch"]["owners"] == [B]
+
+
 def test_no_baseline_calls_show_and_stores_a_row_without_digest(
     fake: FakeForgectl, store: Store, capsys: pytest.CaptureFixture[str]
 ) -> None:
