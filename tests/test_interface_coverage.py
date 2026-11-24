@@ -202,15 +202,31 @@ def _is_128(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and node.value == 128
 
 
+# The names an exit code is held in: `code` (`main()`'s return), `exc.value.code` (`SystemExit`),
+# `proc.returncode` and the like. A compare with none of them is not about an exit code.
+_EXIT_NAMES = {"code", "returncode", "exitcode", "exit_code", "poll_exit", "status"}
+
+
+def _holds_exit_code(node: ast.AST) -> bool:
+    return any(
+        (isinstance(leaf, ast.Name) and leaf.id in _EXIT_NAMES)
+        or (isinstance(leaf, ast.Attribute) and leaf.attr in _EXIT_NAMES)
+        for leaf in ast.walk(node)
+    )
+
+
 def _compared_ints(nodes: list[ast.AST]) -> set[int]:
-    """Every int literal an exit code is compared with in `nodes` (`== 12`, `in (0, 1)`,
-    `SystemExit(2)`); -1 stands for a `128 + signal` sum, the signal row."""
+    """Every int literal an exit code is compared with in `nodes`: a compare with a `code`-like
+    name on a side (`code == 12`, `exc.value.code in (0, 1)`) or a `SystemExit(2)`; -1 stands for
+    a `128 + signal` sum, the signal row. `len(x) == 1` is not an exit code."""
     out: set[int] = set()
     for root in nodes:
         for sub in ast.walk(root):
             parts: list[ast.AST] = []
             if isinstance(sub, ast.Compare):
                 parts = [sub.left, *sub.comparators]
+                if not any(_holds_exit_code(part) for part in parts):
+                    parts = []
             elif isinstance(sub, ast.Call) and getattr(sub.func, "id", "") == "SystemExit":
                 parts = list(sub.args)
             for part in parts:
@@ -223,6 +239,44 @@ def _compared_ints(nodes: list[ast.AST]) -> set[int]:
                         and (_is_128(leaf.left) or _is_128(leaf.right))
                     ):
                         out.add(-1)
+    return out
+
+
+_EVENT_KEYS = {"type", "event_type", "event"}
+
+
+def _asserted_strings(nodes: list[ast.AST]) -> list[str]:
+    """The strings a test uses as a value rather than as prose: a string under a compare
+    (`e["type"] == "ci"`, `types >= {"ci"}`), a dict value under a `type`-like key, or a
+    `type=`-like keyword (`Event(type="ci")`), a `NewEvent("ci", ...)` first argument, or the value
+    after a `--type` argument."""
+    out: list[str] = []
+
+    def strings(node: ast.AST) -> list[str]:
+        return [
+            leaf.value
+            for leaf in ast.walk(node)
+            if isinstance(leaf, ast.Constant) and isinstance(leaf.value, str)
+        ]
+
+    for root in nodes:
+        for sub in ast.walk(root):
+            if isinstance(sub, ast.Compare):
+                out += strings(sub)
+            elif isinstance(sub, ast.Dict):
+                for key, value in zip(sub.keys, sub.values, strict=True):
+                    if isinstance(key, ast.Constant) and key.value in _EVENT_KEYS:
+                        out += strings(value)
+            elif isinstance(sub, ast.keyword) and sub.arg in _EVENT_KEYS:
+                out += strings(sub.value)
+            elif isinstance(sub, ast.Call):
+                args = sub.args
+                if getattr(sub.func, "id", "") == "NewEvent":  # NewEvent("ci", pr_id, ...)
+                    out += strings(args[0]) if args else []
+                # the CLI filter: `run(capsys, "events", "--type", "renamed")`
+                for flag, value in zip(args, args[1:], strict=False):
+                    if isinstance(flag, ast.Constant) and flag.value == "--type":
+                        out += strings(value)
     return out
 
 
@@ -261,7 +315,7 @@ def _node_problem(category: str, item: str, node_id: str) -> str | None:
         return None
     nodes = {"module": [tree], "body": [function], "function": _scope(function, tree)}[scope]
     if scope == "function":
-        strings = _strings(nodes)
+        strings = _asserted_strings(nodes) if category == "events" else _strings(nodes)
         missing = list(tokens) if not any(_token_in(t, strings) for t in tokens) else []
     else:
         words: set[str] = set()
@@ -375,6 +429,13 @@ def _rejects(category: str, item: str, node_id: str, fragment: str) -> None:
         # a test that exits 0 does not cover exit code 20, nor a test with no exit code at all
         ("exit codes", "20", "tests/test_cli.py::test_version_prints_version_and_exits_zero", "20"),
         ("exit codes", "0", "tests/test_cli.py::test_exit_code_table_matches_the_interface", "0"),
+        # a test that compares only exit code 1 does not cover exit code 2
+        (
+            "exit codes",
+            "2",
+            "tests/test_cli_watches.py::test_a_corrupt_store_is_internal_exit_1",
+            "2",
+        ),
         # another hook's payload golden, or a schema test of another command, is not this item's
         (
             "hooks",
@@ -402,6 +463,37 @@ def test_the_audit_rejects_a_wrong_mapping(
     category: str, item: str, node_id: str, fragment: str
 ) -> None:
     _rejects(category, item, node_id, fragment)
+
+
+def _nodes(source: str) -> list[ast.AST]:
+    return [ast.parse(source)]
+
+
+def test_an_int_compared_with_something_that_is_not_an_exit_code_does_not_count() -> None:
+    assert _compared_ints(_nodes("assert len(x) == 1\nassert n in (1, 2)")) == set()
+    assert _compared_ints(_nodes("assert count(s, 'w') == 2 and x[0] == 1")) == set()
+
+
+def test_an_int_compared_with_an_exit_code_name_counts() -> None:
+    assert _compared_ints(_nodes("assert code == 1")) == {1}
+    assert _compared_ints(_nodes("assert exc.value.code in (0, 2)")) == {0, 2}
+    assert _compared_ints(_nodes("assert proc.returncode == 12")) == {12}
+    assert _compared_ints(_nodes("assert code == 128 + number")) == {-1, 128}
+    assert _compared_ints(_nodes("raise SystemExit(20)")) == {20}
+
+
+def test_a_string_that_is_not_asserted_does_not_count_for_an_event() -> None:
+    prose = _nodes("def test_x():\n    'a ci run'\n    log('ci')\n    names = ['ci']")
+    assert not _token_in("ci", _asserted_strings(prose))
+    for used in (
+        "assert e['type'] == 'ci'",
+        "assert types >= {'ci', 'review'}",
+        "x = {'type': 'ci'}",
+        "Event(type='ci')",
+        "NewEvent('ci', 1)",
+        "run('events', '--type', 'ci')",
+    ):
+        assert _token_in("ci", _asserted_strings(_nodes(used))), used
 
 
 def test_a_name_inside_another_name_does_not_count() -> None:
